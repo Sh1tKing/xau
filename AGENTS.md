@@ -1,58 +1,62 @@
-# AGENTS.md — XAUUSD AI Trading System
+# AGENTS.md — XAUUSD 开发说明
 
-## Project overview
+当前主系统是 H1/M15 三策略脚本。账户约 50 美元，0.01 手，最多 1 个仓。
 
-Single-file MT5 automated trading system for XAUUSD (Gold) on M5 timeframe. Uses a dual-AI-engine architecture backed by DeepSeek API: one AI acts as "Commander" for trade entry/exit decisions on M5 bars, another as "Risk Director" for stop-loss optimization on M1 bars. Python acts as the ultimate circuit-breaker — all AI outputs are validated by local rules before execution.
+## 每次开工
 
-## Engineering Iron Rules (absolute)
+判断问题或修改策略之前，必须先调用 agentmemory 的 `memory_recall`。项目标识固定用 `myq-xauusd`。至少查询一次架构和一次已知问题，用查到的结论判断，不要把已经否决的方案重新当成新建议。
 
-### 1. No rewrites — surgical patching only
+建议查询：
 
-All modifications MUST be inserted into the existing `xauusd copy.py` as surgical additions. Creating an entirely new main program structure is forbidden. The existing class `TradingSystemWithAI`, its method layout, the `run_simulation` loop, and the `main()` entry point are the skeleton — inject into it, never replace it.
+- `myq-xauusd architecture H1 M15 fib`
+- `myq-xauusd strategy known problems stop cap`
 
-### 2. Bottom-layer API no-fly zone
+做出新的架构决定、策略取舍或修好一个问题后，调用 `memory_save` 写回，`project` 填 `myq-xauusd`。内容要具体到文件、规则和不要再尝试的做法。
 
-The following methods and code blocks are **read-only** and must not be modified:
+## 改完同步 Git
 
-- `connect_mt5()` — MT5 initialization and login logic (lines 76–140)
-- `get_market_data_and_features()` — historical data pulling and feature assembly (lines 284–458)
-- `place_order()` — order sending function (lines 829–876)
+用户要求保留的代码修改，完成后提交到本地 `master`。不要等用户再提醒。
 
-### 3. AI & analysis no-fly zone
+- 提交当前主脚本、`AGENTS.md`、`.env.example` 和确实属于这次改动的文件。
+- 不提交 `.env`、日志、`xau_fib_pa_logs/`、备份副本。
+- 提交说明用一句中文，说明行为变化，不写空泛的 “update”。
+- 不主动推送远程，除非用户明确要求。
+- 不启动实盘或模拟盘进程。正在运行的进程要用户自己重启后才会加载新代码。
 
-The following are **read-only** and must not be modified:
+## 当前架构
 
-- H4 / H1 / M5 multi-timeframe trend extraction logic within `get_market_data_and_features()` (lines 376–395 for H4/H1, lines 298–340 for M5)
-- `call_external_ai()` — Commander prompt structure and HTTP request framework (lines 460–590)
-- `call_protection_ai()` — Risk Director prompt structure and HTTP request framework (lines 592–705)
+主文件：
 
-### 4. Pure-function separation
+- `xauusd_fib_volume_pa_trader.py`：本地策略、下单、虚拟锁盈和单票平仓。
+- `xauusd_fib_volume_pa_ai3.py`：AI-1、AI-2、AI-3。它调用本地策略，不复制一套规则。
+- 日志目录：`xau_fib_pa_logs/`。密钥只放 `.env`。
 
-All newly added risk-control logic or mathematical algorithms MUST be encapsulated in completely independent Python pure functions or classes. These must:
+周期分工：
 
-- Have zero network I/O
-- Have zero file I/O
-- Take data in, return data out
-- Be callable from the main class's execution flow WITHOUT modifying the forbidden methods listed in Rules 2 and 3
+- H1 决定方向。M15 负责斐波那契、tick volume 和价格行为。M5 只确认当前这根 K 线，不能单独开仓。
+- H4 只作为背景，不是否决条件。
+- 新的已收盘 M15 才评估开仓。本地先评分，AI-1 再给方向，AI-2 只审核硬伤，AI-3 只持有、收紧或平仓。
+- Python 是最后一道门。AI 不能放宽止损，不能突破下面的硬限制。
 
-## Architecture reference
+市场状态先于方向：
 
-```
-Data layer:  get_market_data_and_features() → dict of all indicators + positions
-     ↓
-Hot loop (every 15s): run_simulation()
-  1. Pull features (local, fast)
-  2. Local trailing stop (update_trailing_stop) — pure math, no AI
-  3. On new M1 bar → call_protection_ai() → execute_protection()
-  4. On new M5 bar → call_external_ai() → execute_decision()
-```
+- `trend`：按 H1 方向做回撤。M15 暂时反向只算回撤，不直接否决。
+- `wide_range`：只做区间边缘，并且要有拒绝 K 线。中轴不追。
+- `tight_range`：窄震荡或方向不清，直接观望。
 
-### Key design facts
+入场斐波那契使用 `entry_fib_structure()`。H1 方向和已确认波段不一致，或旧波段已经被价格突破时，改用当前这一段上涨或下跌。`detect_swing_structure()` 仍留给持仓后的结构失效判断，不要拿它代替入场结构。
 
-- M5 MACD: fast=8, slow=17, signal=5
-- M1 MACD: fast=5, slow=13, signal=4 (translated to 7 semantic labels before reaching AI)
-- Max positions: 2 (hard cap in `execute_decision`)
-- Lot size: fixed 0.01 (the `calculate_lot_size` body returns 0.01; the proportional logic is commented out)
-- Trail stop: triggers when profit > max(3.0, ATR * 0.5), steps SL at price ± max(3.0, ATR * 0.8)
-- ATR fail-safe: if AI returns invalid SL, Python enforces 1.5 × ATR
-- Protection AI validates SL with 3-tier checks before dispatch
+## 不能改掉的策略限制
+
+- 本地阈值 `FIB_PA_CONFIDENCE_THRESHOLD=70`，AI 置信度 75，最低盈亏比 1.5。
+- 止损绝对值上限 4 美元。结构止损放不下时拒绝，禁止把远处止损硬拉进 4 美元里面。
+- 偏离 M15 EMA21 超过 1.5 ATR 不追。
+- 价格贴着极值、没有回到 38.2% 到 61.8% 回撤区，斐波那契结构分为 0。
+- 不因为某一天多单或空单亏损而给买卖设置不同阈值。
+- 不把仓位改成账户的 1.5%，不把方向过滤抬回 D1/H4。
+
+## 已知问题
+
+- 本地分日志只有数字，完整原因在 AI-1 的日志里。
+- AI-1 选择观望时，如果理由里没有“观望”二字，仍会发飞书，通知偏密。
+- 运行中的进程不会自动加载刚提交的代码。

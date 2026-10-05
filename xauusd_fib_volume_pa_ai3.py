@@ -125,10 +125,10 @@ def fib_payload(fib):
 
 def build_feature_pack(df_m15, df_h1, df_m5, local_result):
     atr = base.calculate_atr(df_m15)
-    fib = base.detect_swing_structure(df_m15)
     price = float(df_m15["close"].iloc[-1])
     h1_trend = base.trend_from_ema(df_h1, 50)
     m15_trend = base.trend_from_ema(df_m15, 50)
+    fib = base.entry_fib_structure(df_m15, h1_trend, atr)
     pack = {
         "symbol": base.SYMBOL,
         "timeframe": "M15",

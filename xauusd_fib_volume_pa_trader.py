@@ -509,6 +509,68 @@ def detect_swing_structure(df: pd.DataFrame, lookback=80) -> Optional[FibLevels]
     return fallback_fib_structure(work, lookback=min(lookback, len(work)))
 
 
+def structure_is_broken(fib: Optional[FibLevels], price: float) -> bool:
+    if fib is None:
+        return True
+    if fib.direction == "bull" and price < fib.swing_low:
+        return True
+    if fib.direction == "bear" and price > fib.swing_high:
+        return True
+    return False
+
+
+def impulse_fib(df: pd.DataFrame, direction: str, atr: float, lookback=80) -> Optional[FibLevels]:
+    if df is None or len(df) < 20 or direction not in ("bull", "bear"):
+        return None
+    window = df.tail(lookback).reset_index(drop=True)
+    min_leg = max(1.5 * max(float(atr), 0.0), 3.0)
+    highs, lows = find_pivots(window)
+    if direction == "bear":
+        indexes = [idx for idx in highs if idx < len(window) - 1]
+        if not indexes:
+            indexes = [int(window["high"].to_numpy().argmax())]
+        for high_idx in reversed(indexes):
+            rel = int(window["low"].iloc[high_idx:].to_numpy().argmin())
+            low_idx = high_idx + rel
+            swing_high = float(window["high"].iloc[high_idx])
+            swing_low = float(window["low"].iloc[low_idx])
+            if swing_high - swing_low >= min_leg:
+                return build_fib_levels("bear", swing_low, swing_high)
+        return None
+    indexes = [idx for idx in lows if idx < len(window) - 1]
+    if not indexes:
+        indexes = [int(window["low"].to_numpy().argmin())]
+    for low_idx in reversed(indexes):
+        rel = int(window["high"].iloc[low_idx:].to_numpy().argmax())
+        high_idx = low_idx + rel
+        swing_low = float(window["low"].iloc[low_idx])
+        swing_high = float(window["high"].iloc[high_idx])
+        if swing_high - swing_low >= min_leg:
+            return build_fib_levels("bull", swing_low, swing_high)
+    return None
+
+
+def entry_fib_structure(
+    df: pd.DataFrame,
+    h1_trend: str,
+    atr: float,
+    lookback=80,
+) -> Optional[FibLevels]:
+    confirmed = detect_swing_structure(df, lookback=lookback)
+    if df is None or len(df) == 0:
+        return confirmed
+    price = float(df["close"].iloc[-1])
+    confirmed_ok = confirmed is not None and not structure_is_broken(confirmed, price)
+    if confirmed_ok and (h1_trend not in ("bull", "bear") or confirmed.direction == h1_trend):
+        return confirmed
+    fresh = impulse_fib(df, h1_trend, atr, lookback=lookback) if h1_trend in ("bull", "bear") else None
+    if fresh is not None and not structure_is_broken(fresh, price):
+        return fresh
+    if confirmed_ok:
+        return confirmed
+    return fresh or confirmed
+
+
 def fib_score_for_action(
     action: str,
     fib: Optional[FibLevels],
@@ -1010,7 +1072,7 @@ def build_fib_volume_pa_decision(
     m15_trend = trend_from_ema(df_m15, 50)
     adx = calculate_adx(df_m15)
     regime, regime_text, regime_meta = classify_market_regime(df_m15, atr, adx, h1_trend)
-    fib = detect_swing_structure(df_m15)
+    fib = entry_fib_structure(df_m15, h1_trend, atr)
     price = float(df_m15["close"].iloc[-1])
 
     buy_score, buy_details = score_candidate("buy", df_m15, fib, atr, h1_trend, m15_trend, adx)
@@ -1933,7 +1995,29 @@ def run_self_test():
     assert 0 < near_sl - 100.0 <= MAX_SL_ABS + 0.02, (near_sl, near_tp)
     far_sl, far_tp = calculate_targets("sell", 100.0, 6.5, FibLevels("bear", 90.0, 110.0, {}), 106.0)
     assert far_sl == 0.0 and far_tp == 0.0, (far_sl, far_tp)
-    
+
+    rows = []
+    price = 100.0
+    for i in range(50):
+        nxt = 100 + i * 0.4
+        rows.append((price, max(price, nxt) + 0.2, min(price, nxt) - 0.2, nxt))
+        price = nxt
+    for nxt in (118, 114, 110, 106, 102):
+        rows.append((price, price + 0.2, nxt, nxt))
+        price = nxt
+    rows.append((102, 109.2, 101.5, 108.4))
+    dump_df = ohlc_frame(rows, [100] * len(rows))
+    dump_atr = max(calculate_atr(dump_df), 0.5)
+    stale = detect_swing_structure(dump_df)
+    active = entry_fib_structure(dump_df, "bear", dump_atr)
+    assert stale is None or stale.direction == "bull", stale
+    assert active is not None and active.direction == "bear", active
+    assert active.swing_high > 115 and active.swing_low < 104, active
+    zone_score, zone_text = fib_score_for_action("sell", active, active.levels["50.0"], dump_atr, None)
+    assert zone_score == 30, (zone_score, zone_text, active)
+    low_score, low_text = fib_score_for_action("sell", active, active.swing_low + 0.2, dump_atr, None)
+    assert low_score == 0, (low_score, low_text, active)
+
     print("SELF-TEST OK")
     print("BUY", result_buy.action, result_buy.confidence, result_buy.stop_loss, result_buy.take_profit)
     print("SELL", result_sell.action, result_sell.confidence, result_sell.stop_loss, result_sell.take_profit)
