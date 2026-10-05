@@ -70,8 +70,9 @@ AI1_INSTRUCTIONS = (
     "你是 XAUUSD 分析师 AI-1。只根据给定结构化数据判断方向，不看账户，不决定手数，不执行下单。"
     "先看 regime。tight_range 或方向不清时 action 必须是 no。"
     "wide_range 只允许在区间边缘且有拒绝K线时交易，中轴追单必须是 no。trend 才按趋势回撤做。"
-    "方向只看 H1。M15 负责斐波那契、成交量和价格行为。M5 只确认这一根，不单独开仓。H4 不是否决条件。"
+    "方向只看 H1。M15 负责斐波那契、成交量和价格行为。M5 不单独决定方向；最近3根M5的拒绝极值加缓冲后仍不超过4美元时，可以用该极值进场。H4 不是否决条件。"
     "M15 与 H1 暂时反向是回撤，不是冲突，不能因此 no。"
+    "M15影线离收盘价超过4美元时，如果最近3根M5的拒绝极值仍在4美元内，止损放在该M5极值外；禁止把更远的影线止损改小。"
     "H1 不支持该方向、止损超过 4 美元、价格偏离 M15 EMA21 超过 1.5 ATR、止损止盈方向错误或盈亏比低于 1.5 时，action 必须是 no。"
     "stop_loss 和 take_profit 用绝对价格。最终回复只能是一个 JSON 对象，不要 Markdown。"
 )
@@ -292,17 +293,16 @@ def prices_are_valid(action, entry, stop_loss, take_profit):
 
 
 def clamp_proposal(action, entry, stop_loss, take_profit, atr):
-    atr = max(float(atr), 0.01)
-    min_risk = max(base.ENTRY_MIN_SL_ABS, base.ENTRY_MIN_SL_ATR * atr)
+    min_risk, max_risk = base.entry_risk_limits(atr)
     if action == "buy":
         risk = entry - stop_loss
-        if risk > base.MAX_SL_ABS:
+        if risk > max_risk:
             return 0.0, 0.0
         if risk <= 0 or risk < min_risk:
             stop_loss = entry - min_risk
         stop_loss = round(float(stop_loss), 2)
         risk = entry - stop_loss
-        if risk <= 0 or risk > base.MAX_SL_ABS + 0.001:
+        if risk <= 0 or risk > max_risk + 0.001:
             return 0.0, 0.0
         far_tp = entry + 1.8 * risk
         if take_profit <= entry or take_profit > far_tp:
@@ -310,19 +310,19 @@ def clamp_proposal(action, entry, stop_loss, take_profit, atr):
         return stop_loss, round(float(take_profit), 2)
 
     risk = stop_loss - entry
-    if risk > base.MAX_SL_ABS:
+    if risk > max_risk:
         return 0.0, 0.0
     if risk <= 0 or risk < min_risk:
         stop_loss = entry + min_risk
     stop_loss = round(float(stop_loss), 2)
     risk = stop_loss - entry
-    if risk <= 0 or risk > base.MAX_SL_ABS + 0.001:
+    if risk <= 0 or risk > max_risk + 0.001:
         return 0.0, 0.0
     far_tp = entry - 1.8 * risk
     if take_profit >= entry or take_profit < far_tp:
         take_profit = far_tp
     return stop_loss, round(float(take_profit), 2)
-def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_confidence=None, df_m15=None, df_m5=None, regime=None, regime_location=None, pa_score=0):
+def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_confidence=None, df_m15=None, df_m5=None, regime=None, regime_location=None, pa_score=0, local_stop=0.0, local_target=0.0):
     if min_confidence is None:
         min_confidence = AI_CONFIDENCE
     if not isinstance(payload, dict):
@@ -358,26 +358,34 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
     except (TypeError, ValueError):
         stop_loss, take_profit = 0.0, 0.0
 
-    if not prices_are_valid(action, entry, stop_loss, take_profit):
-        setup_price = None
-        if df_m15 is not None and len(df_m15) >= 3:
-            setup_price = float(df_m15["low"].tail(3).min() if action == "buy" else df_m15["high"].tail(3).max())
-        stop_loss, take_profit = base.calculate_targets(action, entry, atr, fib, setup_price)
-        if stop_loss <= 0 or take_profit <= 0:
-            return None, "Python拒绝: 结构止损超过小资金上限 %.2f" % base.MAX_SL_ABS
-        reasoning = (reasoning + "；AI止损止盈无效，改用本地结构目标").strip("；")
-    else:
-        risk = (entry - stop_loss) if action == "buy" else (stop_loss - entry)
-        if risk > base.MAX_SL_ABS:
-            return None, "Python拒绝: 止损距离 %.2f 超过小资金上限 %.2f" % (
-                risk, base.MAX_SL_ABS
-            )
+    risk = (entry - stop_loss) if action == "buy" else (stop_loss - entry)
+    if prices_are_valid(action, entry, stop_loss, take_profit) and 0 < risk <= base.MAX_SL_ABS:
         stop_loss, take_profit = clamp_proposal(action, entry, stop_loss, take_profit, atr)
+    else:
+        stop_loss, take_profit = 0.0, 0.0
+
+    if not prices_are_valid(action, entry, stop_loss, take_profit):
+        replaced = False
+        if prices_are_valid(action, entry, local_stop, local_target):
+            local_risk = (entry - local_stop) if action == "buy" else (local_stop - entry)
+            if 0 < local_risk <= base.MAX_SL_ABS:
+                stop_loss, take_profit = float(local_stop), float(local_target)
+                replaced = True
+                reasoning = (reasoning + "；AI止损放不下，改用本地结构止损").strip("；")
+        if not replaced:
+            timed = base.m5_rejection_anchor(df_m5, action, atr) if df_m5 is not None else None
+            if timed is None:
+                return None, "Python拒绝: 结构止损超过小资金上限 %.2f" % base.MAX_SL_ABS
+            entry, setup_price = timed
+            stop_loss, take_profit = base.calculate_targets(action, entry, atr, fib, setup_price)
+            if not prices_are_valid(action, entry, stop_loss, take_profit):
+                return None, "Python拒绝: 结构止损超过小资金上限 %.2f" % base.MAX_SL_ABS
+            reasoning = (reasoning + "；AI止损放不下，改用仍在4美元内的M5极值").strip("；")
 
     if not prices_are_valid(action, entry, stop_loss, take_profit):
         return None, "Python拒绝: 止损止盈方向非法或超过 %.2f 美元上限" % base.MAX_SL_ABS
     if df_m15 is not None:
-        chased, chase_text = base.chase_blocks(df_m15, action, atr)
+        chased, chase_text = base.chase_blocks_at(df_m15, entry, action, atr)
         if chased:
             return None, "Python拒绝: " + chase_text
     if df_m5 is not None:
@@ -530,10 +538,31 @@ class ThreeAITrader(base.FibVolumePATrader):
             [detail, datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
         )
 
+    def dispatch_m5_entry(self, bar_time):
+        try:
+            df_m15, df_h1, df_m5 = self.get_context()
+            local_result = base.build_fib_volume_pa_decision(
+                df_m15, df_h1, df_m5, base.CONFIDENCE_THRESHOLD
+            )
+        except Exception as exc:
+            base.logger.error("M5时机评估异常: %s: %s" % (type(exc).__name__, exc))
+            return
+        if local_result.action not in ("buy", "sell"):
+            base.logger.info(
+                "M5时机未到 action=%s score=%s"
+                % (local_result.action, local_result.confidence)
+            )
+            return
+        base.logger.info(
+            "M5拒绝仍在4美元内，派发开仓 action=%s score=%s SL=%s"
+            % (local_result.action, local_result.confidence, local_result.stop_loss)
+        )
+        self.dispatch_entry(bar_time)
+
     def dispatch_entry(self, bar_time):
         seq = self.claim_task("entry", bar_time, ENTRY_TAKEOVER_SEC)
         if seq is None:
-            base.logger.info("AI-1/2 仍在进行，跳过本根 M15")
+            base.logger.info("AI-1/2 仍在进行，跳过本根K线")
             return
         base.logger.info("AI-1 已派发分析线程 bar=%s seq=%s" % (bar_time, seq))
         threading.Thread(target=self.entry_task, args=(bar_time, seq), daemon=True).start()
@@ -577,11 +606,13 @@ class ThreeAITrader(base.FibVolumePATrader):
             if not self.entry_is_current(seq, bar_time) or self._stop.is_set():
                 base.logger.info("AI-1 返回已过期，丢弃 seq=%s" % seq)
                 return
+            entry_price = float((local_result.details or {}).get("entry_price") or price)
             proposal, reason = finalize_ai_proposal(
-                extract_json_object(raw), price, atr, pack["h1_trend"], pack["m15_trend"], fib,
+                extract_json_object(raw), entry_price, atr, pack["h1_trend"], pack["m15_trend"], fib,
                 df_m15=df_m15, df_m5=df_m5, regime=pack.get("regime"),
                 regime_location=(local_result.details or {}).get("location"),
                 pa_score=int((local_result.details or {}).get("pa_score") or 0),
+                local_stop=local_result.stop_loss, local_target=local_result.take_profit,
             )
             base.logger.info("AI-1 结果: %s" % reason)
             if proposal is None:
@@ -799,6 +830,7 @@ class ThreeAITrader(base.FibVolumePATrader):
         )
         # Evaluate the latest closed M15 immediately so a valid signal can place an order.
         last_m15 = 0
+        last_m5 = 0
         last_m1 = 0
         if base.ENABLE_TRADING:
             base.logger.info("下单已开启，启动后立即评估最新已收盘M15")
@@ -816,6 +848,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                     base.logger.error("平仓监听异常: %s: %s" % (type(exc).__name__, exc))
 
                 m15_time = self.latest_bar_time(base.ENTRY_BAR_TIMEFRAME)
+                m5_time = self.latest_bar_time(base.mt5.TIMEFRAME_M5)
                 m1_time = self.latest_bar_time(base.mt5.TIMEFRAME_M1)
                 if m15_time and m15_time != last_m15:
                     last_m15 = m15_time
@@ -825,6 +858,9 @@ class ThreeAITrader(base.FibVolumePATrader):
                             self.entry_task(m15_time, seq)
                         return 0
                     self.dispatch_entry(m15_time)
+                if m5_time and m5_time != last_m5 and m5_time != m15_time and not once:
+                    last_m5 = m5_time
+                    self.dispatch_m5_entry(m5_time)
                 if m1_time and m1_time != last_m1:
                     last_m1 = m1_time
                     if not once:
@@ -870,6 +906,34 @@ def run_self_test():
         100, 2.0, "bull", "bull", None, 75,
     )
     assert wide is None and "4" in wide_reason, wide_reason
+
+    tight_sl, tight_tp = clamp_proposal("sell", 100.0, 102.5, 90.0, 10.0)
+    assert 100.0 < tight_sl <= 100.0 + base.MAX_SL_ABS + 0.02, (tight_sl, tight_tp)
+    local_kept, local_reason = finalize_ai_proposal(
+        {"action": "sell", "confidence": 88, "stop_loss": 112, "take_profit": 90, "reasoning": "远影线"},
+        100, 10.0, "bear", "bear", None, 75, local_stop=103.2, local_target=94.0,
+    )
+    assert local_kept is not None and abs(local_kept.stop_loss - 103.2) < 0.001, local_reason
+    near_m5 = base.pd.DataFrame([
+        {"open": 108.0, "high": 109.2, "low": 107.4, "close": 107.6},
+        {"open": 107.6, "high": 109.0, "low": 107.2, "close": 107.4},
+        {"open": 107.4, "high": 109.1, "low": 106.8, "close": 107.0},
+    ])
+    timed_kept, timed_reason = finalize_ai_proposal(
+        {"action": "sell", "confidence": 88, "stop_loss": 120, "take_profit": 90, "reasoning": "远影线"},
+        107.0, 10.0, "bear", "bear", None, 75, df_m5=near_m5,
+    )
+    assert timed_kept is not None and 0 < timed_kept.stop_loss - 107.0 <= base.MAX_SL_ABS + 0.02, timed_reason
+    far_m5 = base.pd.DataFrame([
+        {"open": 100.0, "high": 111.0, "low": 99.0, "close": 100.0},
+        {"open": 100.0, "high": 111.5, "low": 99.0, "close": 100.0},
+        {"open": 100.0, "high": 112.0, "low": 99.0, "close": 99.5},
+    ])
+    far_kept, far_reason = finalize_ai_proposal(
+        {"action": "sell", "confidence": 88, "stop_loss": 120, "take_profit": 90, "reasoning": "远影线"},
+        99.5, 2.0, "bear", "bear", None, 75, df_m5=far_m5,
+    )
+    assert far_kept is None and "4" in far_reason, far_reason
 
     assert ai2_allows({"decision": "APPROVE", "reasoning": "ok"})[0]
     assert not ai2_allows({"decision": "REJECT", "defects": ["盈亏比不足"]})[0]

@@ -834,12 +834,47 @@ def trend_score_for_action(action: str, h1_trend: str, m15_trend: str) -> Tuple[
     return 0, "H1/M15 中性"
 
 def chase_blocks(df: pd.DataFrame, action: str, atr: float) -> Tuple[bool, str]:
-    distance = ema_distance_atr(df, atr, 21)
+    if df is None or len(df) == 0:
+        return False, ""
+    return chase_blocks_at(df, float(df["close"].iloc[-1]), action, atr)
+
+
+def chase_blocks_at(df: pd.DataFrame, price: float, action: str, atr: float) -> Tuple[bool, str]:
+    if df is None or atr <= 0:
+        return False, ""
+    ema = ema_last(df["close"], 21)
+    if ema is None:
+        return False, ""
+    distance = (float(price) - ema) / atr
     if action == "buy" and distance > CHASE_MAX_ATR:
         return True, f"价格离M15 EMA21过远({distance:.2f}ATR)，不追多"
     if action == "sell" and distance < -CHASE_MAX_ATR:
         return True, f"价格离M15 EMA21过远({distance:.2f}ATR)，不追空"
     return False, ""
+
+
+def m5_rejection_anchor(df_m5: pd.DataFrame, action: str, atr: float):
+    if df_m5 is None or len(df_m5) < 3 or action not in ("buy", "sell"):
+        return None
+    window = df_m5.tail(3)
+    entry = float(window["close"].iloc[-1])
+    last = window.iloc[-1]
+    buffer = min(max(0.6, 0.15 * max(float(atr), 0.01)), 1.0)
+    if action == "sell":
+        if float(last["close"]) >= float(last["open"]):
+            return None
+        extreme = float(window["high"].max())
+        risk = extreme + buffer - entry
+        if risk <= 0 or risk > MAX_SL_ABS:
+            return None
+        return entry, extreme
+    if float(last["close"]) <= float(last["open"]):
+        return None
+    extreme = float(window["low"].min())
+    risk = entry - (extreme - buffer)
+    if risk <= 0 or risk > MAX_SL_ABS:
+        return None
+    return entry, extreme
 
 
 def m5_blocks_entry(df_m5: pd.DataFrame, action: str) -> Tuple[bool, str]:
@@ -1055,6 +1090,7 @@ def score_candidate(
         "trend": trend_text,
         "core_count": str(core_count),
         "pa_score": str(pa_score),
+        "fib_score": str(fib_score),
     }
 
 
@@ -1077,6 +1113,21 @@ def build_fib_volume_pa_decision(
 
     buy_score, buy_details = score_candidate("buy", df_m15, fib, atr, h1_trend, m15_trend, adx)
     sell_score, sell_details = score_candidate("sell", df_m15, fib, atr, h1_trend, m15_trend, adx)
+
+    def boost_m5(action: str, score: int, details: dict) -> int:
+        if int(details.get("fib_score", 0)) < 18 or df_m5 is None or len(df_m5) < 8:
+            return score
+        m5_atr = calculate_atr(df_m5)
+        m5_pa, m5_text = classify_price_action(df_m5, action, m5_atr)
+        old_pa = int(details.get("pa_score", 0))
+        if m5_pa < 12 or m5_pa <= old_pa:
+            return score
+        details["pa_score"] = str(m5_pa)
+        details["price_action"] = f"{details.get('price_action', '')}；M5拒绝确认: {m5_text}"
+        return max(0, min(100, score + m5_pa - old_pa))
+
+    buy_score = boost_m5("buy", buy_score, buy_details)
+    sell_score = boost_m5("sell", sell_score, sell_details)
     for details in (buy_details, sell_details):
         details["regime"] = regime
         details["regime_text"] = regime_text
@@ -1091,18 +1142,26 @@ def build_fib_volume_pa_decision(
             blocks.append(regime_block)
         if ALIGN_HARD_FILTER and not trends_support(action, h1_trend, m15_trend):
             blocks.append(f"{action.upper()} 与H1不同向(H1={h1_trend}, M15={m15_trend})")
-        chased, chase_text = chase_blocks(df_m15, action, atr)
-        if chased:
-            blocks.append(chase_text)
         blocked, m5_text = m5_blocks_entry(df_m5, action)
         if blocked:
             blocks.append(m5_text)
         setup_price = float(df_m15["low"].tail(3).min() if action == "buy" else df_m15["high"].tail(3).max())
-        stop_loss, take_profit = calculate_targets(action, price, atr, fib, setup_price)
+        entry_price = price
+        stop_loss, take_profit = calculate_targets(action, entry_price, atr, fib, setup_price)
+        if stop_loss <= 0 and not blocked:
+            timed = m5_rejection_anchor(df_m5, action, atr)
+            if timed is not None:
+                entry_price, setup_price = timed
+                stop_loss, take_profit = calculate_targets(action, entry_price, atr, fib, setup_price)
+                details["entry_note"] = "M5极值仍在4美元内"
+        chased, chase_text = chase_blocks_at(df_m15, entry_price, action, atr)
+        if chased:
+            blocks.append(chase_text)
+        details["entry_price"] = f"{entry_price:.2f}"
         prices_ok = (
-            action == "buy" and stop_loss > 0 and stop_loss < price and take_profit > price
+            action == "buy" and stop_loss > 0 and stop_loss < entry_price and take_profit > entry_price
         ) or (
-            action == "sell" and stop_loss > price and take_profit > 0 and take_profit < price
+            action == "sell" and stop_loss > entry_price and take_profit > 0 and take_profit < entry_price
         )
         if not prices_ok:
             blocks.append(f"结构止损超过小资金上限 {MAX_SL_ABS:.2f}，拒绝把止损拉进噪声")
@@ -1110,7 +1169,7 @@ def build_fib_volume_pa_decision(
         approved, review_text = (False, "")
         if prices_ok and not blocks:
             approved, review_text = review_entry(
-                action, price, stop_loss, take_profit, h1_trend, m15_trend, MIN_REWARD_RISK, ALIGN_HARD_FILTER
+                action, entry_price, stop_loss, take_profit, h1_trend, m15_trend, MIN_REWARD_RISK, ALIGN_HARD_FILTER
             )
             if not approved:
                 blocks.append(review_text)
@@ -1767,6 +1826,7 @@ class FibVolumePATrader:
         )
 
         last_bar_time = 0
+        last_m5_time = 0
         if ENABLE_TRADING:
             logger.info("下单已开启，启动后立即评估最新已收盘M15")
         else:
@@ -1784,14 +1844,17 @@ class FibVolumePATrader:
                     logger.error(f"持仓平仓监听异常: {type(exc).__name__}: {exc}")
 
                 rates = mt5.copy_rates_from_pos(SYMBOL, ENTRY_BAR_TIMEFRAME, 0, 1)
+                m5_rates = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M5, 0, 1)
                 if rates is None or len(rates) == 0:
                     logger.warning("无法获取最新K线，等待重试")
                     time.sleep(POLL_SECONDS)
                     continue
 
                 current_bar_time = int(rates[0]["time"])
-                if current_bar_time != last_bar_time:
+                current_m5_time = int(m5_rates[0]["time"]) if m5_rates is not None and len(m5_rates) else 0
+                if current_bar_time != last_bar_time or current_m5_time != last_m5_time:
                     last_bar_time = current_bar_time
+                    last_m5_time = current_m5_time
                     try:
                         self.evaluate_once()
                     except Exception as exc:
@@ -2017,6 +2080,18 @@ def run_self_test():
     assert zone_score == 30, (zone_score, zone_text, active)
     low_score, low_text = fib_score_for_action("sell", active, active.swing_low + 0.2, dump_atr, None)
     assert low_score == 0, (low_score, low_text, active)
+
+    far_m5 = ohlc_frame([(100, 110, 99, 100), (100, 110.5, 99, 100), (100, 111, 99, 100)], [100, 100, 100])
+    assert m5_rejection_anchor(far_m5, "sell", 2.0) is None
+    near_m5 = ohlc_frame([(108, 109.2, 107.4, 107.6), (107.6, 109.0, 107.2, 107.4), (107.4, 109.1, 106.8, 107.0)], [100, 100, 100])
+    near_anchor = m5_rejection_anchor(near_m5, "sell", 2.0)
+    assert near_anchor is not None and near_anchor[1] - near_anchor[0] <= MAX_SL_ABS, near_anchor
+    min_risk_hi, _ = entry_risk_limits(10.0)
+    assert min_risk_hi < MAX_SL_ABS, min_risk_hi
+    near_sl_hi, near_tp_hi = calculate_targets("sell", 100.0, 10.0, None, 102.2)
+    assert 0 < near_sl_hi - 100.0 <= MAX_SL_ABS + 0.02, (near_sl_hi, near_tp_hi)
+    far_sl_hi, far_tp_hi = calculate_targets("sell", 100.0, 10.0, None, 106.0)
+    assert far_sl_hi == 0.0 and far_tp_hi == 0.0, (far_sl_hi, far_tp_hi)
 
     print("SELF-TEST OK")
     print("BUY", result_buy.action, result_buy.confidence, result_buy.stop_loss, result_buy.take_profit)
