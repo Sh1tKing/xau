@@ -1,5 +1,6 @@
 .env
 __pycache__/
 xau_logs/
+xau_fib_pa_logs/
 .claude
 md/
