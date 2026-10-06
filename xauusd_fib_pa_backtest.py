@@ -386,19 +386,26 @@ def summarize(trades, stats, rejects, meta, start_balance):
     gross_win = sum(t["pnl"] for t in wins)
     gross_loss = -sum(t["pnl"] for t in losses)
     equity, peak, max_dd, streak, worst_streak = start_balance, start_balance, 0.0, 0, 0
+    low_equity, broke_at = start_balance, ""
     for trade in trades:
         equity += trade["pnl"]
         peak = max(peak, equity)
         max_dd = max(max_dd, peak - equity)
+        low_equity = min(low_equity, equity)
+        if equity <= 0 and not broke_at:
+            broke_at = trade["close_bj"]
         streak = streak + 1 if trade["pnl"] <= 0 else 0
         worst_streak = max(worst_streak, streak)
     lines.append("区间(北京时间): %s 到 %s" % (meta["start_bj"], meta["end_bj"]))
     lines.append("服务器时差: UTC%+g，点差: %s" % (meta["server_offset"], meta["spread_note"]))
     lines.append("本地阈值: %s，手数: %s，起始资金: %.2f" % (meta["threshold"], base.LOT_SIZE, start_balance))
+    lines.append("止损上限: %.2f 美元，单笔最多亏起始资金的 %.1f%%" % (
+        base.MAX_SL_ABS, 100.0 * base.MAX_SL_ABS / start_balance if start_balance > 0 else 0.0))
     lines.append("")
     lines.append("成交 %d 笔，盈利 %d，亏损 %d，胜率 %.1f%%" % (
         len(trades), len(wins), len(losses), 100.0 * len(wins) / len(trades) if trades else 0.0))
     lines.append("净盈亏 %.2f 美元，期末资金 %.2f，最大回撤 %.2f 美元" % (equity - start_balance, equity, max_dd))
+    lines.append("资金最低 %.2f，%s" % (low_equity, ("在 %s 归零" % broke_at) if broke_at else "没有归零"))
     if trades:
         lines.append("平均盈利 %.2f，平均亏损 %.2f，盈亏因子 %s，最长连亏 %d 笔" % (
             gross_win / len(wins) if wins else 0.0,
@@ -439,11 +446,24 @@ def main():
     parser = argparse.ArgumentParser(description="用 MT5 历史K线回放本地策略，不调用 AI，不下单。")
     parser.add_argument("--days", type=int, default=30, help="回放最近多少天，默认 30")
     parser.add_argument("--threshold", type=int, default=base.CONFIDENCE_THRESHOLD, help="本地开仓阈值")
-    parser.add_argument("--balance", type=float, default=50.0, help="起始资金，只用于算回撤")
+    parser.add_argument("--balance", type=float, default=100.0, help="起始资金，用于算回撤和是否归零，默认 100")
+    parser.add_argument(
+        "--max-sl", type=float, default=None,
+        help="止损上限(美元)，默认用 .env 的 FIB_PA_MAX_SL_ABS（当前 %.2f）" % base.MAX_SL_ABS,
+    )
     parser.add_argument("--spread", type=float, default=None, help="固定点差(points)，默认用每根K线自带的点差")
     parser.add_argument("--server-offset", type=float, default=None, help="MT5 服务器相对 UTC 的小时数，默认自动检测")
     parser.add_argument("--offline", action="store_true", help="不连 MT5，直接用上次保存的 CSV")
     args = parser.parse_args()
+    if args.max_sl is not None:
+        if args.max_sl <= 0:
+            print("--max-sl 必须大于 0")
+            return 1
+        # Strategy helpers read the module global at call time, so this covers every stop check.
+        base.MAX_SL_ABS = float(args.max_sl)
+    if args.balance <= 0:
+        print("--balance 必须大于 0")
+        return 1
 
     if args.offline:
         data, meta = load_history()

@@ -31,6 +31,7 @@
 - `xauusd_fib_volume_pa_ai3.py`：AI-1、AI-2、AI-3。它调用本地策略，不复制一套规则。
 - 日志目录：`xau_fib_pa_logs/`。密钥只放 `.env`。
 - `xauusd_fib_pa_backtest.py`：用 MT5 历史 K 线回放本地策略，不调用 AI，不下单。每根已收盘 M5 评估一次，M1 上模拟成交和本地护盘，同一根 M1 同时碰到止损和止盈按止损算。结果写到 `xau_fib_pa_logs/backtest/`。改了本地策略先跑它再上模拟盘。MT5 的 `copy_rates_from_pos` 一次要几十万根会返回 Invalid params，回测按约 2 万根分页，页被拒绝就再缩小。终端图表最大柱数不够时只拿到已有的K线并提示，不把这当成策略拒绝。
+- 回测参数：`--balance` 起始资金（默认 100），`--max-sl` 止损上限（默认读 `.env` 的 `FIB_PA_MAX_SL_ABS`）。`--max-sl` 只改这次回测，不改实盘。报告会写止损上限、单笔最多亏起始资金的比例、资金最低点和是否归零。
 
 周期分工：
 
