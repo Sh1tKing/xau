@@ -944,15 +944,92 @@ def entry_risk_limits(atr: float) -> Tuple[float, float]:
     return min_risk, max_risk
 
 
+
+def stop_buffer(atr: float) -> float:
+    return min(max(0.6, 0.15 * max(float(atr), 0.01)), 1.0)
+
+
+def recent_m5_extreme(df_m5: pd.DataFrame, action: str) -> Optional[float]:
+    if df_m5 is None or len(df_m5) < 3 or action not in ("buy", "sell"):
+        return None
+    window = df_m5.tail(3)
+    if action == "sell":
+        return float(window["high"].max())
+    return float(window["low"].min())
+
+
+def m5_extreme_on_stop_side(action: str, entry_price: float, extreme: Optional[float]) -> bool:
+    if extreme is None:
+        return False
+    if action == "sell":
+        return float(extreme) > float(entry_price)
+    if action == "buy":
+        return float(extreme) < float(entry_price)
+    return False
+
+
+def m5_extreme_risk(action: str, entry_price: float, extreme: float, atr: float) -> float:
+    buffer = stop_buffer(atr)
+    if action == "sell":
+        return float(extreme) + buffer - float(entry_price)
+    return float(entry_price) - (float(extreme) - buffer)
+
+
+def stop_covers_m5_extreme(action: str, stop_loss: float, extreme: float, atr: float) -> bool:
+    if stop_loss <= 0:
+        return False
+    buffer = stop_buffer(atr)
+    if action == "sell":
+        return float(stop_loss) + 1e-6 >= float(extreme) + buffer
+    if action == "buy":
+        return float(stop_loss) - 1e-6 <= float(extreme) - buffer
+    return False
+
+
+def m5_wick_reject_text() -> str:
+    return "最近3根M5极值加缓冲超过小资金上限 %.2f，拒绝把止损拉进影线" % MAX_SL_ABS
+
+
+def guarded_structure_price(action: str, entry_price: float, candidates, protect_extreme: Optional[float], buffer: float, max_risk: float) -> Optional[float]:
+    if action == "sell":
+        usable = [float(item) for item in candidates if float(item) > entry_price]
+        if protect_extreme is not None and protect_extreme > entry_price:
+            usable = [item for item in usable if item + 1e-9 >= float(protect_extreme)]
+            usable.append(float(protect_extreme))
+        fitting = [item for item in usable if 0 < item + buffer - entry_price <= max_risk + 0.001]
+        return min(fitting) if fitting else None
+    usable = [float(item) for item in candidates if float(item) < entry_price]
+    if protect_extreme is not None and protect_extreme < entry_price:
+        usable = [item for item in usable if item - 1e-9 <= float(protect_extreme)]
+        usable.append(float(protect_extreme))
+    fitting = [item for item in usable if 0 < entry_price - (item - buffer) <= max_risk + 0.001]
+    return max(fitting) if fitting else None
+
+
+def reject_inside_m5_wick(action, entry, stop_loss, take_profit, atr, fib, df_m5):
+    extreme = recent_m5_extreme(df_m5, action)
+    if not m5_extreme_on_stop_side(action, entry, extreme):
+        return stop_loss, take_profit, ""
+    required = m5_extreme_risk(action, entry, extreme, atr)
+    if required <= 0 or required > MAX_SL_ABS + 0.001:
+        return 0.0, 0.0, m5_wick_reject_text()
+    if stop_covers_m5_extreme(action, stop_loss, extreme, atr):
+        return stop_loss, take_profit, ""
+    new_sl, new_tp = calculate_targets(action, entry, atr, fib, extreme, extreme)
+    if new_sl <= 0 or not stop_covers_m5_extreme(action, new_sl, extreme, atr):
+        return 0.0, 0.0, m5_wick_reject_text()
+    return new_sl, new_tp, "止损改到最近3根M5极值之外"
+
 def calculate_targets(
     action: str,
     entry_price: float,
     atr: float,
     fib: Optional[FibLevels],
     setup_price: Optional[float] = None,
+    protect_extreme: Optional[float] = None,
 ) -> Tuple[float, float]:
     atr = max(atr, 0.01)
-    buffer = min(max(0.6, 0.15 * atr), 1.0)
+    buffer = stop_buffer(atr)
     min_risk, max_risk = entry_risk_limits(atr)
 
     if action == "buy":
@@ -961,7 +1038,12 @@ def calculate_targets(
             lows.append(float(fib.swing_low))
         if setup_price is not None and setup_price < entry_price:
             lows.append(float(setup_price))
-        structure_low = max(lows) if lows else entry_price - 1.2 * atr
+        if protect_extreme is not None:
+            structure_low = guarded_structure_price("buy", entry_price, lows, protect_extreme, buffer, max_risk)
+            if structure_low is None:
+                return 0.0, 0.0
+        else:
+            structure_low = max(lows) if lows else entry_price - 1.2 * atr
         raw_sl = structure_low - buffer
         risk = entry_price - raw_sl
         if risk > max_risk:
@@ -986,7 +1068,12 @@ def calculate_targets(
         highs.append(float(fib.swing_high))
     if setup_price is not None and setup_price > entry_price:
         highs.append(float(setup_price))
-    structure_high = min(highs) if highs else entry_price + 1.2 * atr
+    if protect_extreme is not None:
+        structure_high = guarded_structure_price("sell", entry_price, highs, protect_extreme, buffer, max_risk)
+        if structure_high is None:
+            return 0.0, 0.0
+    else:
+        structure_high = min(highs) if highs else entry_price + 1.2 * atr
     raw_sl = structure_high + buffer
     risk = raw_sl - entry_price
     if risk > max_risk:
@@ -1147,13 +1234,36 @@ def build_fib_volume_pa_decision(
             blocks.append(m5_text)
         setup_price = float(df_m15["low"].tail(3).min() if action == "buy" else df_m15["high"].tail(3).max())
         entry_price = price
-        stop_loss, take_profit = calculate_targets(action, entry_price, atr, fib, setup_price)
-        if stop_loss <= 0 and not blocked:
-            timed = m5_rejection_anchor(df_m5, action, atr)
-            if timed is not None:
-                entry_price, setup_price = timed
-                stop_loss, take_profit = calculate_targets(action, entry_price, atr, fib, setup_price)
-                details["entry_note"] = "M5极值仍在4美元内"
+        extreme = recent_m5_extreme(df_m5, action)
+        protect = extreme if m5_extreme_on_stop_side(action, entry_price, extreme) else None
+        stop_loss, take_profit = 0.0, 0.0
+        if protect is not None and m5_extreme_risk(action, entry_price, protect, atr) > MAX_SL_ABS:
+            blocks.append(m5_wick_reject_text())
+        else:
+            stop_loss, take_profit = calculate_targets(action, entry_price, atr, fib, setup_price, protect)
+            if stop_loss <= 0 and not blocked:
+                timed = m5_rejection_anchor(df_m5, action, atr)
+                if timed is not None:
+                    entry_price, setup_price = timed
+                    extreme = recent_m5_extreme(df_m5, action)
+                    protect = extreme if m5_extreme_on_stop_side(action, entry_price, extreme) else None
+                    if protect is not None and m5_extreme_risk(action, entry_price, protect, atr) > MAX_SL_ABS:
+                        blocks.append(m5_wick_reject_text())
+                        stop_loss, take_profit = 0.0, 0.0
+                    else:
+                        stop_loss, take_profit = calculate_targets(action, entry_price, atr, fib, setup_price, protect)
+                        details["entry_note"] = "M5极值仍在4美元内"
+            if stop_loss > 0 and protect is not None and not stop_covers_m5_extreme(action, stop_loss, protect, atr):
+                guarded_sl, guarded_tp, guard_note = reject_inside_m5_wick(
+                    action, entry_price, stop_loss, take_profit, atr, fib, df_m5
+                )
+                if guarded_sl <= 0:
+                    blocks.append(guard_note or m5_wick_reject_text())
+                    stop_loss, take_profit = 0.0, 0.0
+                else:
+                    stop_loss, take_profit = guarded_sl, guarded_tp
+                    if guard_note:
+                        details["entry_note"] = guard_note
         chased, chase_text = chase_blocks_at(df_m15, entry_price, action, atr)
         if chased:
             blocks.append(chase_text)
@@ -1164,7 +1274,8 @@ def build_fib_volume_pa_decision(
             action == "sell" and stop_loss > entry_price and take_profit > 0 and take_profit < entry_price
         )
         if not prices_ok:
-            blocks.append(f"结构止损超过小资金上限 {MAX_SL_ABS:.2f}，拒绝把止损拉进噪声")
+            if not any("影线" in item for item in blocks):
+                blocks.append(f"结构止损超过小资金上限 {MAX_SL_ABS:.2f}，拒绝把止损拉进噪声")
             stop_loss, take_profit = 0.0, 0.0
         approved, review_text = (False, "")
         if prices_ok and not blocks:
@@ -1993,7 +2104,12 @@ def run_self_test():
     assert wide_sl == 0.0 and wide_tp == 0.0, (wide_sl, wide_tp)
     buried_sl, buried_tp = calculate_targets("buy", 113.7, calculate_atr(wide_df), wide_fib, 100.0)
     assert buried_sl == 0.0 and buried_tp == 0.0, (buried_sl, buried_tp)
-    wide_result = build_fib_volume_pa_decision(wide_df, h1_bull, m5_quiet, 80)
+    wide_m5 = ohlc_frame([
+        (113.4, 113.8, 113.1, 113.5),
+        (113.5, 113.9, 113.2, 113.6),
+        (113.6, 113.9, 113.3, 113.7),
+    ], [100, 100, 100])
+    wide_result = build_fib_volume_pa_decision(wide_df, h1_bull, wide_m5, 80)
     assert wide_result.action == "buy", wide_result
     wide_entry = float(wide_df["close"].iloc[-1])
     wide_risk = wide_entry - wide_result.stop_loss
@@ -2092,6 +2208,23 @@ def run_self_test():
     assert 0 < near_sl_hi - 100.0 <= MAX_SL_ABS + 0.02, (near_sl_hi, near_tp_hi)
     far_sl_hi, far_tp_hi = calculate_targets("sell", 100.0, 10.0, None, 106.0)
     assert far_sl_hi == 0.0 and far_tp_hi == 0.0, (far_sl_hi, far_tp_hi)
+
+    covered_sl, covered_tp = calculate_targets(
+        "sell", 100.0, 2.0, FibLevels("bear", 90.0, 101.2, {}), 101.2, 102.0
+    )
+    assert covered_sl >= 102.6 - 0.01, (covered_sl, covered_tp)
+    inside_sl, inside_tp = calculate_targets(
+        "sell", 100.0, 2.0, FibLevels("bear", 90.0, 101.2, {}), 101.2, 104.5
+    )
+    assert inside_sl == 0.0 and inside_tp == 0.0, (inside_sl, inside_tp)
+    sell_close = float(sell_df["close"].iloc[-1])
+    wick_m5 = ohlc_frame([
+        (sell_close, sell_close + 5.4, sell_close - 0.3, sell_close - 0.1),
+        (sell_close - 0.1, sell_close + 5.2, sell_close - 0.4, sell_close - 0.2),
+        (sell_close - 0.2, sell_close + 5.0, sell_close - 0.5, sell_close - 0.3),
+    ], [80, 80, 90])
+    wicked = build_fib_volume_pa_decision(sell_df, h1_bear, wick_m5, 0)
+    assert wicked.action == "no" and "影线" in wicked.reasoning, wicked
 
     print("SELF-TEST OK")
     print("BUY", result_buy.action, result_buy.confidence, result_buy.stop_loss, result_buy.take_profit)

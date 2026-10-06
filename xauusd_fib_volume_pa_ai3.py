@@ -384,6 +384,16 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
 
     if not prices_are_valid(action, entry, stop_loss, take_profit):
         return None, "Python拒绝: 止损止盈方向非法或超过 %.2f 美元上限" % base.MAX_SL_ABS
+    guarded_sl, guarded_tp, guard_note = base.reject_inside_m5_wick(
+        action, entry, stop_loss, take_profit, atr, fib, df_m5
+    )
+    if guarded_sl <= 0 and guard_note:
+        return None, "Python拒绝: " + guard_note
+    if guard_note:
+        stop_loss, take_profit = guarded_sl, guarded_tp
+        reasoning = (reasoning + "；" + guard_note).strip("；")
+    if not prices_are_valid(action, entry, stop_loss, take_profit):
+        return None, "Python拒绝: " + (guard_note or base.m5_wick_reject_text())
     if df_m15 is not None:
         chased, chase_text = base.chase_blocks_at(df_m15, entry, action, atr)
         if chased:
@@ -576,9 +586,18 @@ class ThreeAITrader(base.FibVolumePATrader):
                 df_m15, df_h1, df_m5, base.CONFIDENCE_THRESHOLD
             )
             pack, fib, atr, price = build_feature_pack(df_m15, df_h1, df_m5, local_result)
+            reject = ""
+            if local_result.action == "no" and "拒绝:" in (local_result.reasoning or ""):
+                reject = " 拒绝:" + local_result.reasoning.split("拒绝:", 1)[1].strip().replace("\n", " ")[:160]
             base.logger.info(
-                "本地评分 action=%s confidence=%s BUY=%s SELL=%s"
-                % (local_result.action, local_result.confidence, local_result.score_buy, local_result.score_sell)
+                "本地评分 action=%s confidence=%s BUY=%s SELL=%s%s"
+                % (
+                    local_result.action,
+                    local_result.confidence,
+                    local_result.score_buy,
+                    local_result.score_sell,
+                    reject,
+                )
             )
             if not AI_ENABLED:
                 if local_result.action in ("buy", "sell"):
@@ -934,6 +953,27 @@ def run_self_test():
         99.5, 2.0, "bear", "bear", None, 75, df_m5=far_m5,
     )
     assert far_kept is None and "4" in far_reason, far_reason
+
+    wick_m5 = base.pd.DataFrame([
+        {"open": 100.2, "high": 104.8, "low": 99.4, "close": 99.8},
+        {"open": 99.8, "high": 104.6, "low": 99.2, "close": 99.6},
+        {"open": 99.6, "high": 104.4, "low": 99.0, "close": 99.4},
+    ])
+    inside_wick, inside_reason = finalize_ai_proposal(
+        {"action": "sell", "confidence": 88, "stop_loss": 102.0, "take_profit": 94.0, "reasoning": "影线内止损"},
+        100.0, 2.0, "bear", "bear", None, 75, df_m5=wick_m5, local_stop=102.0, local_target=94.0,
+    )
+    assert inside_wick is None and "影线" in inside_reason, inside_reason
+    near_wick = base.pd.DataFrame([
+        {"open": 100.4, "high": 101.2, "low": 99.8, "close": 100.1},
+        {"open": 100.1, "high": 101.1, "low": 99.6, "close": 99.9},
+        {"open": 99.9, "high": 101.0, "low": 99.4, "close": 99.6},
+    ])
+    moved, moved_reason = finalize_ai_proposal(
+        {"action": "sell", "confidence": 88, "stop_loss": 101.4, "take_profit": 96.0, "reasoning": "止损偏近"},
+        100.0, 2.0, "bear", "bear", None, 75, df_m5=near_wick,
+    )
+    assert moved is not None and moved.stop_loss >= 101.6 - 0.01, moved_reason
 
     assert ai2_allows({"decision": "APPROVE", "reasoning": "ok"})[0]
     assert not ai2_allows({"decision": "REJECT", "defects": ["盈亏比不足"]})[0]
