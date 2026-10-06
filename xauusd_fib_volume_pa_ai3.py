@@ -71,8 +71,10 @@ base.ENABLE_TRADING = AI_ENABLE_TRADING
 
 AI1_INSTRUCTIONS = (
     "你是 XAUUSD 分析师 AI-1。只根据给定结构化数据判断方向，不看账户，不决定手数，不执行下单。"
-    "先看 regime。tight_range 或方向不清时 action 必须是 no。"
-    "wide_range 只允许在区间边缘且有拒绝K线时交易，中轴追单必须是 no。trend 才按趋势回撤做。"
+    "先看 session 和 setup。setup 是本地按时段选出的进场方式：pullback 是趋势回撤，range_edge 是区间边缘反转，breakout 是突破后回踩。"
+    "pullback：tight_range 时 action 必须是 no；wide_range 只做边缘且要有拒绝K线。"
+    "range_edge：只在 24 根 M15 区间的边缘、有拒绝K线时做，中轴必须是 no，目标看区间另一侧。"
+    "breakout：必须是放量突破后回踩箱体边缘并守住；没有回踩的追突破必须是 no。breakout 不受 tight_range 限制。"
     "方向只看 H1。M15 负责斐波那契、成交量和价格行为。M5 不单独决定方向；最近3根M5的拒绝极值加缓冲后仍不超过4美元时，可以用该极值进场。H4 不是否决条件。"
     "M15 与 H1 暂时反向是回撤，不是冲突，不能因此 no。"
     "M15影线离收盘价超过4美元时，如果最近3根M5的拒绝极值仍在4美元内，止损放在该M5极值外；禁止把更远的影线止损改小。"
@@ -81,7 +83,7 @@ AI1_INSTRUCTIONS = (
 )
 AI2_INSTRUCTIONS = (
     "你是独立风控审核官 AI-2。不能提出新交易，只能 APPROVE 或 REJECT。"
-    "只有明确缺陷才能 REJECT：regime 为 tight_range、宽震荡却在中轴追单、止损方向错误、盈亏比低于 1.5、H1 不支持该方向、止损超过 4 美元、追价超过 1.5 ATR、止损或止盈缺失、关键数据缺失、订单自相矛盾。"
+    "只有明确缺陷才能 REJECT：setup 为 pullback 却处在 tight_range、range_edge 却在区间中轴、breakout 没有回踩箱体就追单、止损方向错误、盈亏比低于 1.5、H1 不支持该方向、止损超过 4 美元、追价超过 1.5 ATR、止损或止盈缺失、关键数据缺失、订单自相矛盾。"
     "M15 与 H1 暂时反向、轻微背离、逆 H4、波动大或感觉不确定，都不能单独 REJECT。"
     "最终回复只能是一个 JSON 对象，不要 Markdown。"
 )
@@ -144,6 +146,9 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result):
         "m15_ema21_distance_atr": round(base.ema_distance_atr(df_m15, atr, 21), 2),
         "regime": (local_result.details or {}).get("regime", ""),
         "regime_text": (local_result.details or {}).get("regime_text", ""),
+        "session": (local_result.details or {}).get("session", ""),
+        "setup": (local_result.details or {}).get("setup", ""),
+        "momentum": (local_result.details or {}).get("momentum", ""),
         "fib": fib_payload(fib),
         "local_action": local_result.action,
         "local_confidence": local_result.confidence,
@@ -376,7 +381,7 @@ def clamp_proposal(action, entry, stop_loss, take_profit, atr):
     if take_profit >= entry or take_profit < far_tp:
         take_profit = far_tp
     return stop_loss, round(float(take_profit), 2)
-def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_confidence=None, df_m15=None, df_m5=None, regime=None, regime_location=None, pa_score=0, local_stop=0.0, local_target=0.0):
+def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_confidence=None, df_m15=None, df_m5=None, regime=None, regime_location=None, pa_score=0, local_stop=0.0, local_target=0.0, setup="pullback"):
     if min_confidence is None:
         min_confidence = AI_CONFIDENCE
     if not isinstance(payload, dict):
@@ -390,9 +395,9 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
         return None, reasoning or "AI-1 选择观望"
     if confidence < min_confidence:
         return None, "AI-1 置信度 %s < %s" % (confidence, min_confidence)
-    if regime == "tight_range":
+    if setup == "pullback" and regime == "tight_range":
         return None, "Python拒绝: 窄震荡或方向不清，不交易"
-    if regime == "wide_range" and regime_location is not None:
+    if setup == "pullback" and regime == "wide_range" and regime_location is not None:
         if df_m15 is not None:
             pa_score, _ = base.classify_price_action(df_m15, action, atr)
         if pa_score < 12:
@@ -687,6 +692,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 regime_location=(local_result.details or {}).get("location"),
                 pa_score=int((local_result.details or {}).get("pa_score") or 0),
                 local_stop=local_result.stop_loss, local_target=local_result.take_profit,
+                setup=(local_result.details or {}).get("setup", "pullback"),
             )
             base.logger.info("AI-1 结果: %s" % reason)
             if proposal is None:
@@ -706,6 +712,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                 "m15_trend": pack["m15_trend"],
                 "regime": pack.get("regime"),
                 "regime_text": pack.get("regime_text"),
+                "session": pack.get("session"),
+                "setup": pack.get("setup"),
                 "max_stop_abs": base.MAX_SL_ABS,
                 "min_rr": base.MIN_REWARD_RISK,
                 "local_action": local_result.action,

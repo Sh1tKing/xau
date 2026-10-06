@@ -10,7 +10,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set, Tuple
 from urllib import error, request
 
@@ -418,6 +418,64 @@ def regime_blocks_entry(action: str, regime: str, regime_text: str, meta: dict, 
 def trends_support(action: str, h1_trend: str, m15_trend: str) -> bool:
     desired = "bull" if action == "buy" else "bear"
     return h1_trend == desired
+
+
+# Beijing time sessions. Every session can open, but each one uses its own setups.
+SESSION_SETUPS = {
+    "asia": ("pullback", "range_edge"),
+    "london": ("breakout", "pullback"),
+    "overlap": ("breakout", "pullback"),
+    "late_us": ("pullback", "range_edge"),
+}
+SESSION_TEXT = {
+    "asia": "亚盘 07-15",
+    "london": "欧盘 15-20",
+    "overlap": "欧美重叠 20-01",
+    "late_us": "美盘尾段 01-07",
+}
+SETUP_TEXT = {"pullback": "趋势回撤", "range_edge": "区间边缘", "breakout": "突破回踩"}
+RANGE_LOOKBACK = 24
+BREAKOUT_BOX = 16
+
+
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def trading_session(now: Optional[datetime] = None) -> str:
+    now = now or datetime.now(BEIJING_TZ)
+    if now.tzinfo is not None:
+        now = now.astimezone(BEIJING_TZ)
+    hour = now.hour
+    if 7 <= hour < 15:
+        return "asia"
+    if 15 <= hour < 20:
+        return "london"
+    if hour >= 20 or hour < 1:
+        return "overlap"
+    return "late_us"
+
+
+def calculate_rsi(df: pd.DataFrame, period: int = 14) -> float:
+    if df is None or len(df) < period + 2:
+        return 50.0
+    delta = df["close"].astype(float).diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean()
+    last_gain = float(gain.iloc[-1])
+    last_loss = float(loss.iloc[-1])
+    if last_loss <= 1e-12:
+        return 100.0 if last_gain > 0 else 50.0
+    return 100.0 - 100.0 / (1.0 + last_gain / last_loss)
+
+
+def macd_histogram(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[float, float]:
+    if df is None or len(df) < slow + signal:
+        return 0.0, 0.0
+    close = df["close"].astype(float)
+    macd = close.ewm(span=fast, adjust=False).mean() - close.ewm(span=slow, adjust=False).mean()
+    hist = macd - macd.ewm(span=signal, adjust=False).mean()
+    return float(hist.iloc[-1]), float(hist.iloc[-2])
+
 
 def find_pivots(df: pd.DataFrame, left=2, right=2) -> Tuple[List[int], List[int]]:
     highs = []
@@ -1181,11 +1239,127 @@ def score_candidate(
     }
 
 
+
+def momentum_score(action: str, setup: str, rsi: float, hist: float, prev_hist: float) -> Tuple[int, str]:
+    score = 0
+    notes = []
+    sign = 1 if action == "buy" else -1
+    rsi_dir = rsi if action == "buy" else 100.0 - rsi
+    if rsi_dir >= 75:
+        score -= 12
+        notes.append("RSI已到极端区，不追")
+    elif setup == "range_edge" and rsi_dir <= 40:
+        score += 10
+        notes.append("RSI在区间边缘偏离")
+    elif setup == "pullback" and 35 <= rsi_dir <= 55:
+        score += 5
+        notes.append("RSI回撤降温")
+    if sign * hist > 0 or sign * (hist - prev_hist) > 0:
+        score += 5
+        notes.append("MACD动能同向")
+    elif setup == "breakout":
+        score -= 8
+        notes.append("MACD没跟上突破")
+    text = "RSI=%.1f, MACD柱=%.2f" % (rsi, hist)
+    if notes:
+        text += "，" + "，".join(notes)
+    return score, text
+
+
+def setup_details(fib_text, volume, pa_score, pa_text, trend_text, edge_score):
+    return {
+        "fib": fib_text,
+        "volume": str(volume["summary"]),
+        "price_action": pa_text,
+        "trend": trend_text,
+        "core_count": str(int(edge_score >= 25) + int(volume["score"] >= 15) + int(pa_score >= 18)),
+        "pa_score": str(pa_score),
+        "fib_score": str(edge_score),
+    }
+
+
+def score_range_edge(action: str, df_m15: pd.DataFrame, atr: float, h1_trend: str, m15_trend: str):
+    window = df_m15.tail(RANGE_LOOKBACK)
+    low = float(window["low"].min())
+    high = float(window["high"].max())
+    box = max(high - low, 1e-9)
+    box_atr = box / atr
+    price = float(df_m15["close"].iloc[-1])
+    location = (price - low) / box
+    structure = FibLevels("bull" if action == "buy" else "bear", low, high, {})
+    volume = classify_volume_state(df_m15)
+    pa_score, pa_text = classify_price_action(df_m15, action, atr)
+    trend_score, trend_text = trend_score_for_action(action, h1_trend, m15_trend)
+    edge_loc = location if action == "buy" else 1.0 - location
+    box_text = "24根M15区间 %.2f-%.2f (%.2fATR), location=%.2f" % (low, high, box_atr, location)
+    if box_atr < 2.0:
+        return 0, setup_details(box_text + "，区间太窄", volume, pa_score, pa_text, trend_text, 0), structure
+    if box_atr > 7.0:
+        return 0, setup_details(box_text + "，区间过宽，不按震荡做", volume, pa_score, pa_text, trend_text, 0), structure
+    if edge_loc > 0.3:
+        return 0, setup_details(box_text + "，不在区间边缘", volume, pa_score, pa_text, trend_text, 0), structure
+    edge_score = 30 if edge_loc <= 0.18 else 22
+    score = edge_score + pa_score + int(volume["score"]) + trend_score
+    if pa_score < 12:
+        score = min(score, 50)
+        pa_text += "，边缘缺少拒绝K线"
+    return max(0, min(100, score)), setup_details(box_text, volume, pa_score, pa_text, trend_text, edge_score), structure
+
+
+def score_breakout(action: str, df_m15: pd.DataFrame, atr: float, h1_trend: str, m15_trend: str):
+    work = df_m15.reset_index(drop=True)
+    direction = "bull" if action == "buy" else "bear"
+    empty_volume = {"score": 0, "summary": "突破样本不足"}
+    if len(work) < BREAKOUT_BOX + 26:
+        return 0, setup_details("突破样本不足", empty_volume, 0, "", "", 0), None
+    box = work.iloc[-(BREAKOUT_BOX + 4):-4]
+    recent = work.iloc[-4:]
+    low = float(box["low"].min())
+    high = float(box["high"].max())
+    box_atr = (high - low) / atr
+    structure = FibLevels(direction, low, high, {})
+    pa_score, pa_text = classify_price_action(df_m15, action, atr)
+    trend_score, trend_text = trend_score_for_action(action, h1_trend, m15_trend)
+    box_text = "突破前16根箱体 %.2f-%.2f (%.2fATR)" % (low, high, box_atr)
+    vol_ma = float(work["tick_volume"].iloc[-24:-4].mean())
+    if box_atr > 3.5 or vol_ma <= 0:
+        return 0, setup_details(box_text + "，突破前没有收敛", empty_volume, pa_score, pa_text, trend_text, 0), structure
+    edge = high if action == "buy" else low
+    sign = 1 if action == "buy" else -1
+    pushes = recent.iloc[:-1]
+    broke = pushes[sign * (pushes["close"] - edge) > 0.1 * atr]
+    last = recent.iloc[-1]
+    if broke.empty:
+        return 0, setup_details(box_text + "，没有收盘突破", empty_volume, pa_score, pa_text, trend_text, 0), structure
+    if sign * (float(last["close"]) - edge) <= 0:
+        return 0, setup_details(box_text + "，回踩收回箱体，突破失败", empty_volume, pa_score, pa_text, trend_text, 0), structure
+    # The retest must happen after the first breakout close; the breakout bar's own wick is still inside the box.
+    after = recent.loc[broke.index[0] + 1:]
+    retested = False
+    if not after.empty:
+        probe = float(after["low"].min()) if action == "buy" else float(after["high"].max())
+        retested = sign * (probe - edge) <= 0.35 * atr
+    break_ratio = float(broke["tick_volume"].max()) / vol_ma
+    break_score = 25 if break_ratio >= 1.3 else 15 if break_ratio >= 1.1 else 5
+    volume = {"score": break_score, "summary": "突破K量能 %.2fx" % break_ratio}
+    retest_score = 30 if retested else 0
+    holds = (float(last["close"]) > float(last["open"])) if action == "buy" else (float(last["close"]) < float(last["open"]))
+    if holds and pa_score < 12:
+        pa_score = 12
+        pa_text = (pa_text + "，回踩后收" + ("阳" if action == "buy" else "阴")).strip("，")
+    text = box_text + ("，回踩到箱体边缘后守住" if retested else "，没有回踩，属于追突破")
+    score = break_score + retest_score + pa_score + trend_score
+    if not retested:
+        score = min(score, 45)
+    return max(0, min(100, score)), setup_details(text, volume, pa_score, pa_text, trend_text, retest_score), structure
+
+
 def build_fib_volume_pa_decision(
     df_m15: pd.DataFrame,
     df_h1: pd.DataFrame,
     df_m5: pd.DataFrame,
     threshold=80,
+    now: Optional[datetime] = None,
 ) -> StrategyResult:
     atr = calculate_atr(df_m15)
     if atr <= 0:
@@ -1197,9 +1371,6 @@ def build_fib_volume_pa_decision(
     regime, regime_text, regime_meta = classify_market_regime(df_m15, atr, adx, h1_trend)
     fib = entry_fib_structure(df_m15, h1_trend, atr)
     price = float(df_m15["close"].iloc[-1])
-
-    buy_score, buy_details = score_candidate("buy", df_m15, fib, atr, h1_trend, m15_trend, adx)
-    sell_score, sell_details = score_candidate("sell", df_m15, fib, atr, h1_trend, m15_trend, adx)
 
     def boost_m5(action: str, score: int, details: dict) -> int:
         if int(details.get("fib_score", 0)) < 18 or df_m5 is None or len(df_m5) < 8:
@@ -1213,20 +1384,50 @@ def build_fib_volume_pa_decision(
         details["price_action"] = f"{details.get('price_action', '')}；M5拒绝确认: {m5_text}"
         return max(0, min(100, score + m5_pa - old_pa))
 
-    buy_score = boost_m5("buy", buy_score, buy_details)
-    sell_score = boost_m5("sell", sell_score, sell_details)
-    for details in (buy_details, sell_details):
-        details["regime"] = regime
-        details["regime_text"] = regime_text
-        details["location"] = str(regime_meta.get("location", 0.5))
+    session = trading_session(now)
+    rsi = calculate_rsi(df_m15)
+    hist, prev_hist = macd_histogram(df_m15)
+    picks = {}
+    for side in ("buy", "sell"):
+        best = None
+        for setup in SESSION_SETUPS[session]:
+            if setup == "pullback":
+                score, details = score_candidate(side, df_m15, fib, atr, h1_trend, m15_trend, adx)
+                structure = fib
+            elif setup == "range_edge":
+                score, details, structure = score_range_edge(side, df_m15, atr, h1_trend, m15_trend)
+            else:
+                score, details, structure = score_breakout(side, df_m15, atr, h1_trend, m15_trend)
+            bonus, momentum_text = momentum_score(side, setup, rsi, hist, prev_hist)
+            if score > 0:
+                score = boost_m5(side, score, details)
+                score = max(0, min(100, score + bonus))
+            details["momentum"] = momentum_text
+            details["regime"] = regime
+            details["regime_text"] = regime_text
+            details["location"] = str(regime_meta.get("location", 0.5))
+            details["session"] = session
+            details["setup"] = setup
+            if best is None or score > best[0]:
+                best = (score, details, structure)
+        picks[side] = best
+    buy_score, buy_details, buy_structure = picks["buy"]
+    sell_score, sell_details, sell_structure = picks["sell"]
 
-    def finish(action: str, score: int, details: dict) -> StrategyResult:
-        blocks = []
-        regime_block = regime_blocks_entry(
-            action, regime, regime_text, regime_meta, int(details.get("pa_score", 0))
+    def label(details: dict) -> str:
+        return "[%s/%s] " % (
+            SESSION_TEXT.get(details.get("session", session), session),
+            SETUP_TEXT.get(details.get("setup", ""), details.get("setup", "")),
         )
-        if regime_block:
-            blocks.append(regime_block)
+
+    def finish(action: str, score: int, details: dict, fib: Optional[FibLevels]) -> StrategyResult:
+        blocks = []
+        if details.get("setup") == "pullback":
+            regime_block = regime_blocks_entry(
+                action, regime, regime_text, regime_meta, int(details.get("pa_score", 0))
+            )
+            if regime_block:
+                blocks.append(regime_block)
         if ALIGN_HARD_FILTER and not trends_support(action, h1_trend, m15_trend):
             blocks.append(f"{action.upper()} 与H1不同向(H1={h1_trend}, M15={m15_trend})")
         blocked, m5_text = m5_blocks_entry(df_m5, action)
@@ -1286,10 +1487,10 @@ def build_fib_volume_pa_decision(
                 blocks.append(review_text)
         elif prices_ok:
             review_text = "未进入盈亏比审核"
-        reasoning = (
+        reasoning = label(details) + (
             f"{action.upper()}三策略共振，score={score}。{regime_text}。"
             f"{details['fib']}；{details['volume']}；"
-            f"{details['price_action']}；{details['trend']}。"
+            f"{details['price_action']}；{details['trend']}；{details.get('momentum', '')}。"
         )
         if blocks:
             reasoning += "拒绝: " + "；".join(blocks)
@@ -1302,14 +1503,14 @@ def build_fib_volume_pa_decision(
         return StrategyResult("no", max(buy_score, sell_score), False, reasoning, 0.0, 0.0, buy_score, sell_score, {})
 
     if buy_score >= threshold and buy_score > sell_score:
-        return finish("buy", buy_score, buy_details)
+        return finish("buy", buy_score, buy_details, buy_structure)
     if sell_score >= threshold and sell_score > buy_score:
-        return finish("sell", sell_score, sell_details)
+        return finish("sell", sell_score, sell_details, sell_structure)
 
     best_score = max(buy_score, sell_score)
     best_side = "BUY" if buy_score >= sell_score else "SELL"
     details = buy_details if buy_score >= sell_score else sell_details
-    reasoning = (
+    reasoning = label(details) + (
         f"未达到交易阈值。最佳方向={best_side}, score={best_score}, "
         f"BUY={buy_score}, SELL={sell_score}。"
         f"{regime_text}。H1={h1_trend}, M15={m15_trend}。"
@@ -2225,6 +2426,48 @@ def run_self_test():
     ], [80, 80, 90])
     wicked = build_fib_volume_pa_decision(sell_df, h1_bear, wick_m5, 0)
     assert wicked.action == "no" and "影线" in wicked.reasoning, wicked
+
+    bj = lambda hour: datetime(2026, 10, 6, hour, 0, tzinfo=BEIJING_TZ)
+    assert [trading_session(bj(h)) for h in (9, 16, 21, 0, 3)] == ["asia", "london", "overlap", "overlap", "late_us"]
+    brk_rows = []
+    level = 100.0
+    for _ in range(50):
+        nxt = level + 0.2
+        brk_rows.append((level, nxt + 0.3, level - 0.3, nxt))
+        level = nxt
+    for i in range(16):
+        o = 110.4 + (0.3 if i % 2 else -0.3)
+        c = 110.4 + (-0.3 if i % 2 else 0.3)
+        brk_rows.append((o, 111.0, 109.8, c))
+    brk_rows += [(110.6, 112.4, 110.5, 112.2), (112.2, 112.6, 111.6, 111.8),
+                 (111.8, 112.0, 111.0, 111.3), (111.3, 112.1, 111.05, 111.95)]
+    brk_vols = [100] * len(brk_rows)
+    brk_vols[-4] = 190
+    brk_df = ohlc_frame(brk_rows, brk_vols)
+    brk_m5 = ohlc_frame([(111.7, 112.0, 111.5, 111.8), (111.8, 112.0, 111.6, 111.9), (111.9, 112.0, 111.7, 111.95)], [100] * 3)
+    london = build_fib_volume_pa_decision(brk_df, h1_bull, brk_m5, 70, now=bj(16))
+    assert london.action == "buy" and london.details.get("setup") == "breakout", london
+    assert 0 < 111.95 - london.stop_loss <= MAX_SL_ABS + 0.02, london
+    asia = build_fib_volume_pa_decision(brk_df, h1_bull, brk_m5, 70, now=bj(9))
+    assert asia.details.get("setup") != "breakout", asia
+    chase_rows = brk_rows[:-3] + [(112.2, 113.4, 112.1, 113.2), (113.2, 114.1, 113.1, 114.0), (114.0, 114.9, 113.9, 114.8)]
+    chase_score, _, _ = score_breakout("buy", ohlc_frame(chase_rows, brk_vols), calculate_atr(brk_df), "bull", "bull")
+    assert chase_score <= 45, chase_score
+    edge_rows = []
+    for i in range(40):
+        mid = 102 + 2 * math.sin(i / 2.5)
+        edge_rows.append((mid - 0.2, mid + 0.5, mid - 0.5, mid + 0.2))
+    edge_rows.append((100.6, 100.9, 99.6, 100.8))
+    edge_vols = [100] * len(edge_rows)
+    edge_vols[-1] = 150
+    for i in range(len(edge_rows) - 5, len(edge_rows) - 1):
+        edge_vols[i] = 70
+    edge_m5 = ohlc_frame([(100.9, 101.0, 100.6, 100.7), (100.7, 100.9, 100.5, 100.8), (100.8, 101.0, 100.6, 100.85)], [100] * 3)
+    edge = build_fib_volume_pa_decision(ohlc_frame(edge_rows, edge_vols), h1_bull, edge_m5, 70, now=bj(9))
+    assert edge.action == "buy" and edge.details.get("setup") == "range_edge", edge
+    edge_bear = build_fib_volume_pa_decision(ohlc_frame(edge_rows, edge_vols), h1_bear, edge_m5, 70, now=bj(9))
+    assert edge_bear.action == "no", edge_bear
+    assert calculate_rsi(h1_bull) > 70 and calculate_rsi(h1_bear) < 30
 
     print("SELF-TEST OK")
     print("BUY", result_buy.action, result_buy.confidence, result_buy.stop_loss, result_buy.take_profit)
