@@ -59,8 +59,11 @@ AI3_EFFORT = os.getenv("FIB_PA_AI3_EFFORT", "low")
 AI1_TIMEOUT = env_int("FIB_PA_AI1_TIMEOUT", 60)
 AI2_TIMEOUT = env_int("FIB_PA_AI2_TIMEOUT", 40)
 AI3_TIMEOUT = env_int("FIB_PA_AI3_TIMEOUT", 40)
-ENTRY_TAKEOVER_SEC = env_int("FIB_PA_AI_ENTRY_TAKEOVER_SEC", 120)
-AI3_TAKEOVER_SEC = env_int("FIB_PA_AI3_TAKEOVER_SEC", 75)
+# 5 次 60 秒超时大约 300 秒。接管时间必须盖住重试，否则下一根 K 线会丢掉后面的结果。
+ENTRY_TAKEOVER_SEC = env_int("FIB_PA_AI_ENTRY_TAKEOVER_SEC", 360)
+AI3_TAKEOVER_SEC = env_int("FIB_PA_AI3_TAKEOVER_SEC", 220)
+AI_HTTP_RETRIES = max(1, env_int("FIB_PA_AI_HTTP_RETRIES", 5))
+AI_HTTP_RETRY_PAUSE = 2.0
 API_ALERT_COOLDOWN = env_int("FIB_PA_AI_ALERT_COOLDOWN", 900)
 
 base.MAGIC = AI_MAGIC
@@ -235,7 +238,14 @@ def summarize_chat_result(result):
         "usage": result.get("usage"),
     }
 
-def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key):
+class AIRequestError(RuntimeError):
+    def __init__(self, role, detail):
+        self.role = role
+        self.detail = detail
+        super().__init__("%s: %s" % (role, detail))
+
+
+def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, still_current=None):
     key = str(api_key or "").strip()
     if not key:
         raise RuntimeError("%s 缺少 API key" % role)
@@ -246,6 +256,46 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key):
         "Content-Type": "application/json",
         "Authorization": "Bearer " + key,
     }
+
+    def task_alive():
+        return still_current is None or still_current()
+
+    def post_with_retry(data, label):
+        last_exc = None
+        for attempt in range(1, AI_HTTP_RETRIES + 1):
+            if not task_alive():
+                base.logger.info(
+                    "%s 任务已过期或已停止，停止重试 (%s %s/%s)"
+                    % (role, label, attempt, AI_HTTP_RETRIES)
+                )
+                return None
+            try:
+                response = requests.post(url, headers=headers, json=data, timeout=timeout)
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_exc = exc
+                base.logger.warning(
+                    "%s 请求超时或连接失败 (%s/%s, %s): %s: %s"
+                    % (role, attempt, AI_HTTP_RETRIES, label, type(exc).__name__, exc)
+                )
+                if attempt >= AI_HTTP_RETRIES:
+                    break
+                time.sleep(AI_HTTP_RETRY_PAUSE)
+                continue
+            if not task_alive():
+                base.logger.info("%s 请求返回时任务已过期，丢弃 (%s)" % (role, label))
+                return None
+            if attempt > 1:
+                base.logger.info("%s 第 %s/%s 次请求成功 (%s)" % (role, attempt, AI_HTTP_RETRIES, label))
+            return response
+        detail = "连续 %s 次超时或连接失败 (%s): %s: %s" % (
+            AI_HTTP_RETRIES,
+            label,
+            type(last_exc).__name__,
+            last_exc,
+        )
+        base.logger.error("%s %s" % (role, detail[:300]))
+        raise AIRequestError(role, detail[:300])
+
     attempts = (("primary", effort), ("low_retry", "low"))
     for index, (label, this_effort) in enumerate(attempts, start=1):
         data = {
@@ -258,11 +308,15 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key):
         }
         if this_effort:
             data["reasoning"] = {"effort": this_effort}
-        response = requests.post(url, headers=headers, json=data, timeout=timeout)
+        response = post_with_retry(data, label)
+        if response is None:
+            return ""
         if response.status_code == 400 and "reasoning" in response.text.lower():
             data.pop("reasoning", None)
             base.logger.warning("%s 拒绝 reasoning 参数，去掉后重试 (%s)" % (role, label))
-            response = requests.post(url, headers=headers, json=data, timeout=timeout)
+            response = post_with_retry(data, label + "/no_reasoning")
+            if response is None:
+                return ""
         if response.status_code != 200:
             base.logger.error(
                 "%s 调用失败 (%s/%s, %s): %s - %s"
@@ -618,12 +672,13 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI1_TIMEOUT,
                 AI1_URL,
                 AI1_KEY,
+                still_current=lambda: self.entry_is_current(seq, bar_time) and not self._stop.is_set(),
             )
-            if not raw:
-                self.alert_api_failure("AI-1", "没有可见 JSON")
-                return
             if not self.entry_is_current(seq, bar_time) or self._stop.is_set():
                 base.logger.info("AI-1 返回已过期，丢弃 seq=%s" % seq)
+                return
+            if not raw:
+                self.alert_api_failure("AI-1", "没有可见 JSON")
                 return
             entry_price = float((local_result.details or {}).get("entry_price") or price)
             proposal, reason = finalize_ai_proposal(
@@ -668,6 +723,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI2_TIMEOUT,
                 AI2_URL,
                 AI2_KEY,
+                still_current=lambda: self.entry_is_current(seq, bar_time) and not self._stop.is_set(),
             )
             if not self.entry_is_current(seq, bar_time) or self._stop.is_set():
                 base.logger.info("AI-2 返回已过期，丢弃 seq=%s" % seq)
@@ -691,6 +747,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                 return
             proposal.reasoning = "%s。%s" % (proposal.reasoning, review_reason)
             self.place_order(proposal)
+        except AIRequestError as exc:
+            self.alert_api_failure(exc.role, exc.detail)
         except Exception as exc:
             base.logger.error("AI开仓线程异常: %s: %s" % (type(exc).__name__, exc))
         finally:
@@ -752,6 +810,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI3_TIMEOUT,
                 AI3_URL,
                 AI3_KEY,
+                still_current=lambda: self.ai3_is_current(seq, bar_time) and not self._stop.is_set(),
             )
             if not self.ai3_is_current(seq, bar_time) or self._stop.is_set():
                 base.logger.info("AI-3 返回已过期，丢弃 seq=%s" % seq)
@@ -760,6 +819,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                 self.alert_api_failure("AI-3", "没有可见 JSON，本地护盘继续")
                 return
             self.execute_ai3(extract_json_object(raw))
+        except AIRequestError as exc:
+            self.alert_api_failure(exc.role, exc.detail)
         except Exception as exc:
             base.logger.error("AI-3 线程异常: %s: %s" % (type(exc).__name__, exc))
         finally:
@@ -894,6 +955,67 @@ class ThreeAITrader(base.FibVolumePATrader):
                 base.mt5.shutdown()
             base.logger.info("MT5 已关闭")
 
+
+def run_http_retry_self_test():
+    global AI_HTTP_RETRIES, AI_HTTP_RETRY_PAUSE
+    old_post = requests.post
+    old_retries = AI_HTTP_RETRIES
+    old_pause = AI_HTTP_RETRY_PAUSE
+    AI_HTTP_RETRIES = 5
+    AI_HTTP_RETRY_PAUSE = 0
+
+    class OkResponse:
+        status_code = 200
+        text = "ok"
+        encoding = "utf-8"
+
+        def json(self):
+            return {"choices": [{"message": {"content": "{\"action\":\"no\"}"}}]}
+
+    try:
+        state = {"n": 0}
+
+        def flaky(url, headers=None, json=None, timeout=None):
+            state["n"] += 1
+            if state["n"] < 3:
+                raise requests.ReadTimeout("read timed out")
+            return OkResponse()
+
+        requests.post = flaky
+        text = call_chat("AI-1", "m", "low", "sys", "hi", 1, "http://example.test", "key")
+        assert "action" in text and state["n"] == 3, (text, state["n"])
+
+        state["n"] = 0
+
+        def always_down(url, headers=None, json=None, timeout=None):
+            state["n"] += 1
+            raise requests.ConnectionError("connection refused")
+
+        requests.post = always_down
+        try:
+            call_chat("AI-2", "m", "low", "sys", "hi", 1, "http://example.test", "key")
+            raise AssertionError("timeout retries should fail")
+        except AIRequestError as exc:
+            assert exc.role == "AI-2" and state["n"] == 5 and "没有可见 JSON" not in exc.detail, exc.detail
+
+        state["n"] = 0
+
+        def timeout_once(url, headers=None, json=None, timeout=None):
+            state["n"] += 1
+            raise requests.Timeout("slow")
+
+        requests.post = timeout_once
+        stale = call_chat(
+            "AI-3", "m", "low", "sys", "hi", 1, "http://example.test", "key",
+            still_current=lambda: state["n"] == 0,
+        )
+        assert stale == "" and state["n"] == 1, state["n"]
+    finally:
+        requests.post = old_post
+        AI_HTTP_RETRIES = old_retries
+        AI_HTTP_RETRY_PAUSE = old_pause
+
+
 def run_self_test():
     fenced = extract_json_object("```json\n{\"action\":\"buy\",\"confidence\":0.8}\n```")
     assert fenced["action"] == "buy", fenced
@@ -980,6 +1102,7 @@ def run_self_test():
     assert not ai2_allows(None)[0]
     assert not base.sl_change_is_tighter("BUY", 100, 99)
     assert base.sl_change_is_tighter("SELL", 110, 109)
+    run_http_retry_self_test()
     print("AI3 SELF-TEST OK")
     print(passed.to_decision())
     print(reject_reason)
