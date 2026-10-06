@@ -68,6 +68,7 @@ API_ALERT_COOLDOWN = env_int("FIB_PA_AI_ALERT_COOLDOWN", 900)
 
 base.MAGIC = AI_MAGIC
 base.ENABLE_TRADING = AI_ENABLE_TRADING
+SL_CAP = "%g" % base.MAX_SL_ABS
 
 AI1_INSTRUCTIONS = (
     "你是 XAUUSD 分析师 AI-1。只根据给定结构化数据判断方向，不看账户，不决定手数，不执行下单。"
@@ -75,22 +76,25 @@ AI1_INSTRUCTIONS = (
     "pullback：tight_range 时 action 必须是 no；wide_range 只做边缘且要有拒绝K线。"
     "range_edge：只在 24 根 M15 区间的边缘、有拒绝K线时做，中轴必须是 no，目标看区间另一侧。"
     "breakout：必须是放量突破后回踩箱体边缘并守住；没有回踩的追突破必须是 no。breakout 不受 tight_range 限制。"
-    "方向只看 H1。M15 负责斐波那契、成交量和价格行为。M5 不单独决定方向；最近3根M5的拒绝极值加缓冲后仍不超过4美元时，可以用该极值进场。H4 不是否决条件。"
+    f"方向只看 H1。M15 负责斐波那契、成交量和价格行为。M5 不单独决定方向；最近3根M5的拒绝极值加缓冲后仍不超过{SL_CAP}美元时，可以用该极值进场。H4 不是否决条件。"
     "M15 与 H1 暂时反向是回撤，不是冲突，不能因此 no。"
-    "M15影线离收盘价超过4美元时，如果最近3根M5的拒绝极值仍在4美元内，止损放在该M5极值外；禁止把更远的影线止损改小。"
-    "H1 不支持该方向、止损超过 4 美元、价格偏离 M15 EMA21 超过 1.5 ATR、止损止盈方向错误或盈亏比低于 1.5 时，action 必须是 no。"
+    f"M15影线离收盘价超过{SL_CAP}美元时，如果最近3根M5的拒绝极值仍在{SL_CAP}美元内，止损放在该M5极值外；禁止把更远的影线止损改小。"
+    f"H1 不支持该方向、止损超过 {SL_CAP} 美元、价格偏离 M15 EMA21 超过 1.5 ATR、止损止盈方向错误或盈亏比低于 1.5 时，action 必须是 no。"
     "stop_loss 和 take_profit 用绝对价格。最终回复只能是一个 JSON 对象，不要 Markdown。"
 )
 AI2_INSTRUCTIONS = (
     "你是独立风控审核官 AI-2。不能提出新交易，只能 APPROVE 或 REJECT。"
-    "只有明确缺陷才能 REJECT：setup 为 pullback 却处在 tight_range、range_edge 却在区间中轴、breakout 没有回踩箱体就追单、止损方向错误、盈亏比低于 1.5、H1 不支持该方向、止损超过 4 美元、追价超过 1.5 ATR、止损或止盈缺失、关键数据缺失、订单自相矛盾。"
+    f"只有明确缺陷才能 REJECT：setup 为 pullback 却处在 tight_range、range_edge 却在区间中轴、breakout 没有回踩箱体就追单、止损方向错误、盈亏比低于 1.5、H1 不支持该方向、止损超过 {SL_CAP} 美元、追价超过 1.5 ATR、止损或止盈缺失、关键数据缺失、订单自相矛盾。"
     "M15 与 H1 暂时反向、轻微背离、逆 H4、波动大或感觉不确定，都不能单独 REJECT。"
     "最终回复只能是一个 JSON 对象，不要 Markdown。"
 )
 AI3_INSTRUCTIONS = (
     "你是持仓监控 AI-3。只能选择 hold、tighten_sl 或 close。"
     "禁止放宽止损，禁止加仓，禁止新开仓。tighten_sl 必须比当前止损更有利，并给出绝对价格。"
-    "窄震荡里的上下影线和轻微回撤选择 hold，交给本地虚拟锁盈。只有结构失效或强反向才 close。"
+    "窄震荡里的上下影线和轻微回撤选择 hold，交给本地虚拟锁盈。"
+    "不要等价格碰到初始止损才处理：浮亏单如果持续 hold_minutes 较久、r_now 一直为负、M1/M5 收盘不断朝止损方向推进或跌破入场结构，"
+    "且没有出现有利方向的拒绝K线，应该 close，或者把止损收紧到最近 M1/M5 结构外，减少亏损。"
+    "单根影线刺穿但收盘收回不算结构失效。浮盈单可以把止损收紧到入场价以上（BUY）或以下（SELL）来锁定利润。"
     "最终回复只能是一个 JSON 对象，不要 Markdown。"
 )
 
@@ -439,7 +443,7 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
             stop_loss, take_profit = base.calculate_targets(action, entry, atr, fib, setup_price)
             if not prices_are_valid(action, entry, stop_loss, take_profit):
                 return None, "Python拒绝: 结构止损超过小资金上限 %.2f" % base.MAX_SL_ABS
-            reasoning = (reasoning + "；AI止损放不下，改用仍在4美元内的M5极值").strip("；")
+            reasoning = (reasoning + "；AI止损放不下，改用仍在%g美元内的M5极值" % base.MAX_SL_ABS).strip("；")
 
     if not prices_are_valid(action, entry, stop_loss, take_profit):
         return None, "Python拒绝: 止损止盈方向非法或超过 %.2f 美元上限" % base.MAX_SL_ABS
@@ -632,8 +636,8 @@ class ThreeAITrader(base.FibVolumePATrader):
             )
             return
         base.logger.info(
-            "M5拒绝仍在4美元内，派发开仓 action=%s score=%s SL=%s"
-            % (local_result.action, local_result.confidence, local_result.stop_loss)
+            "M5拒绝仍在%g美元内，派发开仓 action=%s score=%s SL=%s"
+            % (base.MAX_SL_ABS, local_result.action, local_result.confidence, local_result.stop_loss)
         )
         self.dispatch_entry(bar_time)
 
@@ -818,15 +822,31 @@ class ThreeAITrader(base.FibVolumePATrader):
             for position in positions:
                 ticket = int(position.ticket)
                 state = self.guardian_states.get(ticket)
+                is_buy = position.type == base.mt5.POSITION_TYPE_BUY
+                entry = float(position.price_open)
+                now_price = (float(tick.bid) if is_buy else float(tick.ask)) if tick else 0.0
+                risk = float(state.risk) if state and state.risk > 0 else 0.0
+                move = (now_price - entry) if is_buy else (entry - now_price)
+                best = adverse = 0.0
+                if state:
+                    best = (state.highest_price - entry) if is_buy else (entry - state.lowest_price)
+                    adverse = (entry - state.lowest_price) if is_buy else (state.highest_price - entry)
+                # Server time on both sides, so the difference is the real holding time.
+                hold_minutes = (int(tick.time) - int(position.time)) / 60.0 if tick else 0.0
                 payload["positions"].append({
                     "ticket": ticket,
-                    "direction": "BUY" if position.type == base.mt5.POSITION_TYPE_BUY else "SELL",
+                    "direction": "BUY" if is_buy else "SELL",
                     "volume": float(position.volume),
-                    "entry": float(position.price_open),
+                    "entry": entry,
                     "sl": float(position.sl or 0),
                     "tp": float(position.tp or 0),
                     "profit": round(float(position.profit or 0), 2),
                     "virtual_sl": round(float(state.virtual_sl), 2) if state else 0,
+                    "hold_minutes": round(max(0.0, hold_minutes), 1),
+                    "initial_risk": round(risk, 2),
+                    "r_now": round(move / risk, 2) if risk > 0 else 0,
+                    "max_favorable": round(max(0.0, best), 2),
+                    "max_adverse": round(max(0.0, adverse), 2),
                 })
             raw = call_chat(
                 "AI-3",
@@ -1076,7 +1096,8 @@ def run_self_test():
         {"action": "buy", "confidence": 90, "stop_loss": 90, "take_profit": 120, "reasoning": "wide"},
         100, 2.0, "bull", "bull", None, 75,
     )
-    assert wide is None and "4" in wide_reason, wide_reason
+    cap_text = "%.2f" % base.MAX_SL_ABS
+    assert wide is None and cap_text in wide_reason, wide_reason
 
     tight_sl, tight_tp = clamp_proposal("sell", 100.0, 102.5, 90.0, 10.0)
     assert 100.0 < tight_sl <= 100.0 + base.MAX_SL_ABS + 0.02, (tight_sl, tight_tp)
@@ -1104,12 +1125,12 @@ def run_self_test():
         {"action": "sell", "confidence": 88, "stop_loss": 120, "take_profit": 90, "reasoning": "远影线"},
         99.5, 2.0, "bear", "bear", None, 75, df_m5=far_m5,
     )
-    assert far_kept is None and "4" in far_reason, far_reason
+    assert far_kept is None and cap_text in far_reason, far_reason
 
     wick_m5 = base.pd.DataFrame([
-        {"open": 100.2, "high": 104.8, "low": 99.4, "close": 99.8},
-        {"open": 99.8, "high": 104.6, "low": 99.2, "close": 99.6},
-        {"open": 99.6, "high": 104.4, "low": 99.0, "close": 99.4},
+        {"open": 100.2, "high": 100.0 + base.MAX_SL_ABS + 1.8, "low": 99.4, "close": 99.8},
+        {"open": 99.8, "high": 100.0 + base.MAX_SL_ABS + 1.6, "low": 99.2, "close": 99.6},
+        {"open": 99.6, "high": 100.0 + base.MAX_SL_ABS + 1.4, "low": 99.0, "close": 99.4},
     ])
     inside_wick, inside_reason = finalize_ai_proposal(
         {"action": "sell", "confidence": 88, "stop_loss": 102.0, "take_profit": 94.0, "reasoning": "影线内止损"},

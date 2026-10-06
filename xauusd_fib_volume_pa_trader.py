@@ -140,7 +140,7 @@ MIN_SL_MODIFY_ATR = env_float("FIB_PA_MIN_SL_MODIFY_ATR", 0.1)
 MIN_SL_MODIFY_ABS = env_float("FIB_PA_MIN_SL_MODIFY_ABS", 0.5)
 MIN_REWARD_RISK = env_float("FIB_PA_MIN_RR", 1.5)
 MAX_SL_ATR = env_float("FIB_PA_MAX_SL_ATR", 2.0)
-MAX_SL_ABS = env_float("FIB_PA_MAX_SL_ABS", 4.0)
+MAX_SL_ABS = env_float("FIB_PA_MAX_SL_ABS", 8.0)
 ENTRY_MIN_SL_ATR = env_float("FIB_PA_ENTRY_MIN_SL_ATR", 0.6)
 ENTRY_MIN_SL_ABS = env_float("FIB_PA_ENTRY_MIN_SL_ABS", 0.8)
 H4_HARD_FILTER = env_bool("FIB_PA_H4_HARD_FILTER", False)
@@ -1455,7 +1455,7 @@ def build_fib_volume_pa_decision(
                         stop_loss, take_profit = 0.0, 0.0
                     else:
                         stop_loss, take_profit = calculate_targets(action, entry_price, atr, fib, setup_price, protect)
-                        details["entry_note"] = "M5极值仍在4美元内"
+                        details["entry_note"] = f"M5极值仍在{MAX_SL_ABS:g}美元内"
             if stop_loss > 0 and protect is not None and not stop_covers_m5_extreme(action, stop_loss, protect, atr):
                 guarded_sl, guarded_tp, guard_note = reject_inside_m5_wick(
                     action, entry_price, stop_loss, take_profit, atr, fib, df_m5
@@ -2392,7 +2392,7 @@ def run_self_test():
     assert not trends_support("buy", "bear", "bull")
     near_sl, near_tp = calculate_targets("sell", 100.0, 6.5, FibLevels("bear", 90.0, 110.0, {}), 101.2)
     assert 0 < near_sl - 100.0 <= MAX_SL_ABS + 0.02, (near_sl, near_tp)
-    far_sl, far_tp = calculate_targets("sell", 100.0, 6.5, FibLevels("bear", 90.0, 110.0, {}), 106.0)
+    far_sl, far_tp = calculate_targets("sell", 100.0, 6.5, FibLevels("bear", 90.0, 110.0, {}), 100.0 + MAX_SL_ABS)
     assert far_sl == 0.0 and far_tp == 0.0, (far_sl, far_tp)
 
     rows = []
@@ -2426,7 +2426,7 @@ def run_self_test():
     assert min_risk_hi < MAX_SL_ABS, min_risk_hi
     near_sl_hi, near_tp_hi = calculate_targets("sell", 100.0, 10.0, None, 102.2)
     assert 0 < near_sl_hi - 100.0 <= MAX_SL_ABS + 0.02, (near_sl_hi, near_tp_hi)
-    far_sl_hi, far_tp_hi = calculate_targets("sell", 100.0, 10.0, None, 106.0)
+    far_sl_hi, far_tp_hi = calculate_targets("sell", 100.0, 10.0, None, 100.0 + MAX_SL_ABS)
     assert far_sl_hi == 0.0 and far_tp_hi == 0.0, (far_sl_hi, far_tp_hi)
 
     covered_sl, covered_tp = calculate_targets(
@@ -2434,14 +2434,14 @@ def run_self_test():
     )
     assert covered_sl >= 102.6 - 0.01, (covered_sl, covered_tp)
     inside_sl, inside_tp = calculate_targets(
-        "sell", 100.0, 2.0, FibLevels("bear", 90.0, 101.2, {}), 101.2, 104.5
+        "sell", 100.0, 2.0, FibLevels("bear", 90.0, 101.2, {}), 101.2, 100.0 + MAX_SL_ABS + 1.0
     )
     assert inside_sl == 0.0 and inside_tp == 0.0, (inside_sl, inside_tp)
     sell_close = float(sell_df["close"].iloc[-1])
     wick_m5 = ohlc_frame([
-        (sell_close, sell_close + 5.4, sell_close - 0.3, sell_close - 0.1),
-        (sell_close - 0.1, sell_close + 5.2, sell_close - 0.4, sell_close - 0.2),
-        (sell_close - 0.2, sell_close + 5.0, sell_close - 0.5, sell_close - 0.3),
+        (sell_close, sell_close + MAX_SL_ABS + 1.4, sell_close - 0.3, sell_close - 0.1),
+        (sell_close - 0.1, sell_close + MAX_SL_ABS + 1.2, sell_close - 0.4, sell_close - 0.2),
+        (sell_close - 0.2, sell_close + MAX_SL_ABS + 1.0, sell_close - 0.5, sell_close - 0.3),
     ], [80, 80, 90])
     wicked = build_fib_volume_pa_decision(sell_df, h1_bear, wick_m5, 0)
     assert wicked.action == "no" and "影线" in wicked.reasoning, wicked
