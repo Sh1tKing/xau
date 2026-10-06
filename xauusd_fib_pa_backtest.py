@@ -63,18 +63,56 @@ def detect_server_offset():
     return float(round(hours))
 
 
+HISTORY_PAGE = 20000
+
+
+def copy_rates_page(timeframe, start_pos, count):
+    """Ask for one page. Shrink it if the terminal rejects a large count."""
+    ask = min(int(count), HISTORY_PAGE)
+    last_error = None
+    while True:
+        rates = mt5.copy_rates_from_pos(base.SYMBOL, timeframe, int(start_pos), int(ask))
+        last_error = mt5.last_error()
+        if rates is not None and len(rates) > 0:
+            return rates, ask, last_error
+        code = last_error[0] if last_error else None
+        if code != -2 or ask <= 500:
+            return None, ask, last_error
+        nxt = max(500, ask // 2)
+        if nxt >= ask:
+            return None, ask, last_error
+        ask = nxt
+
+
 def fetch_history(days):
     data = {}
     for name, (timeframe, _, per_day, warmup) in FRAMES.items():
-        count = days * per_day + warmup
-        rates = mt5.copy_rates_from_pos(base.SYMBOL, timeframe, 1, count)
-        if rates is None or len(rates) == 0:
-            raise RuntimeError("%s 历史数据为空: %s" % (name, mt5.last_error()))
-        df = base.normalize_rates(rates)
+        wanted = int(days) * per_day + warmup
+        frames = []
+        start_pos = 1
+        got = 0
+        while got < wanted:
+            rates, asked, last_error = copy_rates_page(timeframe, start_pos, wanted - got)
+            if rates is None or len(rates) == 0:
+                if not frames:
+                    raise RuntimeError("%s 历史数据为空: %s" % (name, last_error))
+                break
+            frames.append(base.normalize_rates(rates))
+            got += len(rates)
+            start_pos += len(rates)
+            if len(rates) < asked:
+                break
+        df = pd.concat(frames, ignore_index=True)
+        df = df.drop_duplicates(subset=["time"], keep="last").sort_values("time").reset_index(drop=True)
         if "spread" not in df.columns:
             df["spread"] = 0
-        if len(df) < count:
-            print("提示: %s 只拿到 %s/%s 根，MT5 的图表最大K线数可能不够" % (name, len(df), count))
+        if len(df) < wanted:
+            hint = ""
+            if len(df) >= 100000:
+                hint = "。请在 MT5 工具-选项-图表里调大图表最大柱数和历史最大柱数，重开终端后再拉"
+            print("提示: %s 只拿到 %s/%s 根，MT5 的图表最大K线数可能不够%s" % (name, len(df), wanted, hint))
+        else:
+            print("  %s 拿到 %s 根" % (name, len(df)))
         data[name] = df
     return data
 
