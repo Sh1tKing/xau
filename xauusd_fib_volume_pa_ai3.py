@@ -617,9 +617,18 @@ class ThreeAITrader(base.FibVolumePATrader):
             base.logger.error("M5时机评估异常: %s: %s" % (type(exc).__name__, exc))
             return
         if local_result.action not in ("buy", "sell"):
+            reject = ""
+            if "拒绝:" in (local_result.reasoning or ""):
+                reject = " 拒绝:" + local_result.reasoning.split("拒绝:", 1)[1].strip().replace("\n", " ")[:160]
             base.logger.info(
-                "M5时机未到 action=%s score=%s"
-                % (local_result.action, local_result.confidence)
+                "M5时机未到 action=%s confidence=%s BUY=%s SELL=%s%s"
+                % (
+                    local_result.action,
+                    local_result.confidence,
+                    local_result.score_buy,
+                    local_result.score_sell,
+                    reject,
+                )
             )
             return
         base.logger.info(
@@ -694,19 +703,31 @@ class ThreeAITrader(base.FibVolumePATrader):
                 local_stop=local_result.stop_loss, local_target=local_result.take_profit,
                 setup=(local_result.details or {}).get("setup", "pullback"),
             )
-            base.logger.info("AI-1 结果: %s" % reason)
+            ai_confidence = None
+            parsed = extract_json_object(raw)
+            if isinstance(parsed, dict):
+                ai_confidence = normalize_confidence(parsed.get("confidence", 0))
+            confidence_line = "本地置信度: %s (BUY=%s SELL=%s)，AI-1 置信度: %s，门槛: 本地%s / AI%s" % (
+                local_result.confidence,
+                local_result.score_buy,
+                local_result.score_sell,
+                "无" if ai_confidence is None else ai_confidence,
+                base.CONFIDENCE_THRESHOLD,
+                AI_CONFIDENCE,
+            )
+            base.logger.info("AI-1 结果: %s | %s" % (reason, confidence_line))
             if proposal is None:
                 if "观望" not in reason and "未给出" not in reason:
                     self.notify_lines(
                         "✋ %s AI-1/Python 未放行" % base.SYMBOL,
-                        [reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+                        [confidence_line, reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
                     )
                 return
             proposal.score_buy = local_result.score_buy
             proposal.score_sell = local_result.score_sell
             review_pack = {
                 "proposal": proposal.to_decision(),
-                "entry_price": price,
+                "entry_price": entry_price,
                 "atr": pack["atr"],
                 "h1_trend": pack["h1_trend"],
                 "m15_trend": pack["m15_trend"],
@@ -746,6 +767,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "✋ %s AI-2 未通过" % base.SYMBOL,
                     [
                         "方向: %s" % proposal.action.upper(),
+                        confidence_line,
                         "止损: %s" % proposal.stop_loss,
                         "止盈: %s" % proposal.take_profit,
                         review_reason,

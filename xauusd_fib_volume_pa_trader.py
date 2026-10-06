@@ -1434,6 +1434,8 @@ def build_fib_volume_pa_decision(
         if blocked:
             blocks.append(m5_text)
         setup_price = float(df_m15["low"].tail(3).min() if action == "buy" else df_m15["high"].tail(3).max())
+        # Keep the closed M15 close as the planned entry. Pricing M5 rechecks off the latest
+        # M5 close was backtested on 2026-10-06: 175 trades, -70 USD vs 101 trades, -1.65 USD.
         entry_price = price
         extreme = recent_m5_extreme(df_m5, action)
         protect = extreme if m5_extreme_on_stop_side(action, entry_price, extreme) else None
@@ -1525,6 +1527,11 @@ class FibVolumePATrader:
         self.guardian_states: Dict[int, GuardianState] = {}
         self.position_snapshots: Dict[int, PositionSnapshot] = {}
         self.notified_close_tickets: Set[int] = set()
+        # Confidence at entry, keyed by position ticket, so close messages can show it.
+        self.entry_confidence: Dict[int, str] = {}
+
+    def entry_confidence_line(self, ticket: int) -> str:
+        return f"开仓置信度: {self.entry_confidence.get(int(ticket), '未知(非本进程开仓或已重启)')}"
 
     def connect_mt5(self):
         if mt5.initialize():
@@ -1684,6 +1691,7 @@ class FibVolumePATrader:
                 [
                     f"ticket: {ticket}",
                     f"方向: {snapshot.direction}",
+                    self.entry_confidence_line(ticket),
                     f"手数: {snapshot.volume}",
                     f"开仓价: {snapshot.price_open}",
                     f"最后浮盈/浮亏: {snapshot.profit:.2f}",
@@ -1706,6 +1714,7 @@ class FibVolumePATrader:
             [
                 f"ticket: {ticket}",
                 f"方向: {snapshot.direction}平仓",
+                self.entry_confidence_line(ticket),
                 f"手数: {float(getattr(deal, 'volume', snapshot.volume) or snapshot.volume)}",
                 f"开仓价: {snapshot.price_open}",
                 f"平仓价: {float(getattr(deal, 'price', 0.0) or 0.0)}",
@@ -1744,6 +1753,7 @@ class FibVolumePATrader:
             deal = self.find_recent_close_deal(ticket, snapshot)
             self.notify_position_closed(ticket, snapshot, deal)
             self.notified_close_tickets.add(ticket)
+            self.entry_confidence.pop(ticket, None)
 
     def validate_order_prices(self, action, entry_price, stop_loss, take_profit):
         if action == "buy":
@@ -1824,11 +1834,14 @@ class FibVolumePATrader:
             logger.warning(f"✅ 护盘单票平仓成功 ticket={ticket}, reason={reason}")
             self.guardian_states.pop(ticket, None)
             self.notified_close_tickets.add(ticket)
+            confidence_line = self.entry_confidence_line(ticket)
+            self.entry_confidence.pop(ticket, None)
             send_feishu_notification(
                 f"🛡️ {SYMBOL} 护盘平仓",
                 [
                     f"ticket: {ticket}",
                     f"方向: {side}",
+                    confidence_line,
                     f"手数: {position.volume}",
                     f"平仓价: {price}",
                     f"原因: {reason}",
@@ -2092,6 +2105,12 @@ class FibVolumePATrader:
             return False
 
         logger.info(f"✅ 下单成功: {action.upper()} {LOT_SIZE} {SYMBOL}, price={price}, SL={result.stop_loss}, TP={result.take_profit}")
+        # On netting/hedging MT5 the new position ticket equals the opening order ticket.
+        order_ticket = int(getattr(order_result, "order", 0) or 0)
+        if order_ticket > 0:
+            self.entry_confidence[order_ticket] = (
+                f"{result.confidence} (BUY={result.score_buy} SELL={result.score_sell})"
+            )
         try:
             self.sync_position_close_notifications()
         except Exception as exc:
