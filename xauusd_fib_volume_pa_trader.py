@@ -276,6 +276,38 @@ def send_feishu_notification(title, lines):
     return False
 
 
+def format_signed_money(value) -> str:
+    """Format realized P/L with an explicit sign for both profit and loss."""
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return "未知"
+    if amount >= 0:
+        return "+$%.2f" % amount
+    return "-$%.2f" % abs(amount)
+
+
+def account_balance_lines() -> List[str]:
+    """Return a compact, best-effort account balance/equity snapshot for alerts."""
+    try:
+        info = mt5.account_info()
+    except Exception:
+        info = None
+    if info is None:
+        return ["当前余额: 未知", "当前净值: 未知"]
+    balance = getattr(info, "balance", None)
+    equity = getattr(info, "equity", None)
+    try:
+        balance_text = "$%.2f" % float(balance)
+    except (TypeError, ValueError):
+        balance_text = "未知"
+    try:
+        equity_text = "$%.2f" % float(equity)
+    except (TypeError, ValueError):
+        equity_text = "未知"
+    return [f"当前余额: {balance_text}", f"当前净值: {equity_text}"]
+
+
 def normalize_rates(rates) -> pd.DataFrame:
     df = pd.DataFrame(rates)
     if df.empty:
@@ -1684,46 +1716,58 @@ class FibVolumePATrader:
             reverse=True,
         )[0]
 
-    def notify_position_closed(self, ticket: int, snapshot: PositionSnapshot, deal=None):
+    def notify_position_closed(
+        self,
+        ticket: int,
+        snapshot: PositionSnapshot,
+        deal=None,
+        close_reason: Optional[str] = None,
+        title_prefix: str = "✅",
+    ):
+        balance_lines = account_balance_lines()
         if deal is None:
             send_feishu_notification(
-                f"⚠️ {snapshot.symbol} 持仓已消失",
+                f"⚠️ {snapshot.symbol} {snapshot.direction}平仓",
                 [
-                    f"ticket: {ticket}",
-                    f"方向: {snapshot.direction}",
+                    "【平仓结果】",
+                    "本次盈亏: 未知（未查到历史成交）",
+                    *balance_lines,
+                    "【平仓信息】",
+                    f"平仓原因: {close_reason or '持仓已消失'}",
+                    f"最后浮动盈亏: {format_signed_money(snapshot.profit)}",
+                    "【开仓信息】",
                     self.entry_confidence_line(ticket),
-                    f"手数: {snapshot.volume}",
-                    f"开仓价: {snapshot.price_open}",
-                    f"最后浮盈/浮亏: {snapshot.profit:.2f}",
-                    f"原SL: {snapshot.sl}",
-                    f"原TP: {snapshot.tp}",
-                    "来源: 持仓监听器，未查到对应历史成交",
+                    f"手数/开仓价: {snapshot.volume} / {snapshot.price_open}",
+                    f"原止损/止盈: {snapshot.sl} / {snapshot.tp}",
+                    f"ticket: {ticket}",
                     f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                 ],
             )
             return
 
-        reason = self.deal_reason_text(getattr(deal, "reason", None))
+        server_reason = self.deal_reason_text(getattr(deal, "reason", None))
+        reason = close_reason or server_reason
         profit = float(getattr(deal, "profit", snapshot.profit) or 0.0)
         commission = float(getattr(deal, "commission", 0.0) or 0.0)
         swap = float(getattr(deal, "swap", 0.0) or 0.0)
-        net_profit = profit + commission + swap
+        fee = float(getattr(deal, "fee", 0.0) or 0.0)
+        net_profit = profit + commission + swap + fee
 
         send_feishu_notification(
-            f"✅ {snapshot.symbol} {reason}",
+            f"{title_prefix} {snapshot.symbol} {snapshot.direction}平仓",
             [
-                f"ticket: {ticket}",
-                f"方向: {snapshot.direction}平仓",
+                "【平仓结果】",
+                f"本次盈亏: {format_signed_money(net_profit)}",
+                *balance_lines,
+                "【平仓信息】",
+                f"平仓原因: {reason}",
+                f"开仓价 → 平仓价: {snapshot.price_open} → {float(getattr(deal, 'price', 0.0) or 0.0)}",
+                f"成交盈亏/费用: {format_signed_money(profit)} / {format_signed_money(commission + swap + fee)}",
+                "【开仓信息】",
                 self.entry_confidence_line(ticket),
                 f"手数: {float(getattr(deal, 'volume', snapshot.volume) or snapshot.volume)}",
-                f"开仓价: {snapshot.price_open}",
-                f"平仓价: {float(getattr(deal, 'price', 0.0) or 0.0)}",
-                f"盈亏: {profit:.2f}$",
-                f"净盈亏: {net_profit:.2f}$",
-                f"原SL: {snapshot.sl}",
-                f"原TP: {snapshot.tp}",
-                f"历史成交: {getattr(deal, 'ticket', '')}",
-                "来源: MT5服务器/外部成交监听",
+                f"原止损/止盈: {snapshot.sl} / {snapshot.tp}",
+                f"ticket: {ticket}  成交: {getattr(deal, 'ticket', '')}",
                 f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             ],
         )
@@ -1798,6 +1842,8 @@ class FibVolumePATrader:
         if ticket <= 0:
             return False
 
+        snapshot = self.create_position_snapshot(position)
+
         tick = mt5.symbol_info_tick(SYMBOL)
         if tick is None:
             logger.error(f"❌ 护盘平仓失败，无法获取 {SYMBOL} 报价")
@@ -1806,11 +1852,9 @@ class FibVolumePATrader:
         if position.type == mt5.POSITION_TYPE_BUY:
             order_type = mt5.ORDER_TYPE_SELL
             price = float(tick.bid)
-            side = "BUY平仓"
         else:
             order_type = mt5.ORDER_TYPE_BUY
             price = float(tick.ask)
-            side = "SELL平仓"
 
         if not ENABLE_TRADING:
             logger.warning(f"🧪 DRY-RUN 护盘平仓 ticket={ticket}, reason={reason}, price={price}")
@@ -1834,20 +1878,20 @@ class FibVolumePATrader:
             logger.warning(f"✅ 护盘单票平仓成功 ticket={ticket}, reason={reason}")
             self.guardian_states.pop(ticket, None)
             self.notified_close_tickets.add(ticket)
-            confidence_line = self.entry_confidence_line(ticket)
-            self.entry_confidence.pop(ticket, None)
-            send_feishu_notification(
-                f"🛡️ {SYMBOL} 护盘平仓",
-                [
-                    f"ticket: {ticket}",
-                    f"方向: {side}",
-                    confidence_line,
-                    f"手数: {position.volume}",
-                    f"平仓价: {price}",
-                    f"原因: {reason}",
-                    f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                ],
+            close_deal = None
+            for _ in range(3):
+                close_deal = self.find_recent_close_deal(ticket, snapshot)
+                if close_deal is not None:
+                    break
+                time.sleep(0.2)
+            self.notify_position_closed(
+                ticket,
+                snapshot,
+                close_deal,
+                close_reason=reason,
+                title_prefix="🛡️",
             )
+            self.entry_confidence.pop(ticket, None)
             return True
 
         retcode = result.retcode if result else "None"
