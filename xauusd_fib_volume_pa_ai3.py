@@ -8,6 +8,7 @@ Python still enforces reward/risk, H1/M15 alignment, the configured stop cap, an
 """
 
 import json
+import logging
 import os
 import sys
 import threading
@@ -2006,6 +2007,7 @@ class ThreeAITrader(base.FibVolumePATrader):
 def run_http_retry_self_test():
     global AI_HTTP_RETRIES, AI_HTTP_RETRY_PAUSE
     old_post = requests.post
+    old_logger = base.logger
     old_retries = AI_HTTP_RETRIES
     old_pause = AI_HTTP_RETRY_PAUSE
     AI_HTTP_RETRIES = 5
@@ -2020,6 +2022,10 @@ def run_http_retry_self_test():
             return {"choices": [{"message": {"content": "{\"action\":\"no\"}"}}]}
 
     try:
+        # Mock failures must never look like live API failures in trading logs.
+        self_test_logger = logging.Logger("xauusd_fib_volume_pa.http_retry_self_test")
+        self_test_logger.addHandler(logging.NullHandler())
+        base.logger = self_test_logger
         state = {"n": 0}
 
         def flaky(url, headers=None, json=None, timeout=None):
@@ -2059,6 +2065,7 @@ def run_http_retry_self_test():
         assert stale == "" and state["n"] == 1, state["n"]
     finally:
         requests.post = old_post
+        base.logger = old_logger
         AI_HTTP_RETRIES = old_retries
         AI_HTTP_RETRY_PAUSE = old_pause
 
