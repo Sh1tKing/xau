@@ -4,7 +4,7 @@
 AI-1 proposes a direction from the local feature pack.
 AI-2 may only approve or reject clear defects.
 AI-3 may hold, tighten the stop, or close. It cannot widen a stop.
-Python still enforces reward/risk, H1/M15 alignment, the 4 USD stop cap, and the local guardian.
+Python still enforces reward/risk, H1/M15 alignment, the configured stop cap, and the local guardian.
 """
 
 import json
@@ -65,13 +65,14 @@ AI3_TAKEOVER_SEC = env_int("FIB_PA_AI3_TAKEOVER_SEC", 220)
 AI_HTTP_RETRIES = max(1, env_int("FIB_PA_AI_HTTP_RETRIES", 5))
 AI_HTTP_RETRY_PAUSE = 2.0
 API_ALERT_COOLDOWN = env_int("FIB_PA_AI_ALERT_COOLDOWN", 900)
+AI3_STATE_FILE = os.path.join(base.LOG_DIR, "ai3_position_state.json")
 
 base.MAGIC = AI_MAGIC
 base.ENABLE_TRADING = AI_ENABLE_TRADING
 SL_CAP = "%g" % base.MAX_SL_ABS
 
 AI1_INSTRUCTIONS = (
-    "你是 XAUUSD 分析师 AI-1。只根据给定结构化数据判断方向，不看账户，不决定手数，不执行下单。"
+    "你是 XAUUSD 分析师 AI-1。保留自主提出交易的能力，只根据给定结构化数据判断，不看账户，不决定手数，不执行下单。"
     "先看 session 和 setup。setup 是本地按时段选出的进场方式：pullback 是趋势回撤，range_edge 是区间边缘反转，breakout 是突破后回踩。"
     "pullback：tight_range 时 action 必须是 no；wide_range 只做边缘且要有拒绝K线。"
     "range_edge：只在 24 根 M15 区间的边缘、有拒绝K线时做，中轴必须是 no，目标看区间另一侧。"
@@ -79,8 +80,9 @@ AI1_INSTRUCTIONS = (
     f"方向只看 H1。M15 负责斐波那契、成交量和价格行为。M5 不单独决定方向；最近3根M5的拒绝极值加缓冲后仍不超过{SL_CAP}美元时，可以用该极值进场。H4 不是否决条件。"
     "M15 与 H1 暂时反向是回撤，不是冲突，不能因此 no。"
     "H1 同向只表示允许的交易方向，不代表当前存在入场信号。分别检查方向、setup结构有效性、已收盘K线确认、目标前的障碍。"
+    "先核实事实，再依次说明在哪里、哪根已收盘K线证明触发、什么价位和周期使理由失效、目标前有什么障碍、最强反证是什么。"
     "pullback 的旧波段已被收盘破坏时，不能只凭H1同向把破坏解释为普通回撤；只有给定数据支持新结构及新的确认才可提出交易，否则 no。单根影线刺穿后收回不等于收盘破坏。"
-    "止盈必须说明给定数据中的目标依据和中间阻力/支撑，不能只为凑够RR把目标延远。确认量偏弱是质量扣分，不可编造放量确认。"
+    "止盈必须说明给定数据中的目标依据和中间阻力/支撑，不能只为凑够RR把目标延远。确认量偏弱是质量扣分，不可编造放量确认。确认尚未完成、或第一个重要障碍前没有1.5RR空间时，返回no并写明等待条件。"
     "confidence 是对所选action的确信程度，不是胜率；不要复制本地分，不要为了通过门槛抬分。reasoning依次说明setup证据、失效位置、目标依据和主要反证；证据缺失明确写未知。"
     f"M15影线离收盘价超过{SL_CAP}美元时，如果最近3根M5的拒绝极值仍在{SL_CAP}美元内，止损放在该M5极值外；禁止把更远的影线止损改小。"
     f"H1 不支持该方向、止损超过 {SL_CAP} 美元、价格偏离 M15 EMA21 超过 1.5 ATR、止损止盈方向错误或盈亏比低于 1.5 时，action 必须是 no。"
@@ -92,17 +94,20 @@ AI2_INSTRUCTIONS = (
     "M15 与 H1 暂时反向、轻微背离、逆 H4、波动大或感觉不确定，都不能单独 REJECT。"
     "根据market_evidence独立核实，不要把AI-1的reasoning当作已核实事实。明确的setup结构失效且没有新结构确认、声称回踩/放量但K线数据反驳，也属于订单自相矛盾，应REJECT并指出对应证据。单根影线收回不能当作收盘破坏。"
     "仅仅本地action=no、量能普通、ADX偏弱或RR接近合格下限不能单独否决；必须区分质量保留意见与可核实的硬伤。数据不足以核实必要条件时指出缺失字段，不得补造事实。"
+    "审核Python调整后的最终方案，不审核已经被替换的AI-1原始止损或止盈；如果最终目标与AI理由不一致，要求给出可核实的调整依据，否则REJECT。"
     "最终回复只能是一个 JSON 对象，不要 Markdown。"
 )
 AI3_INSTRUCTIONS = (
     "你是持仓监控 AI-3。只能选择 hold、tighten_sl 或 close。"
     "禁止放宽止损，禁止加仓，禁止新开仓。tighten_sl 必须比当前止损更有利，并给出绝对价格。"
     "窄震荡里的上下影线和轻微回撤选择 hold，交给本地虚拟锁盈。"
-    "不要等价格碰到初始止损才处理：浮亏单如果持续 hold_minutes 较久、r_now 一直为负、M1/M5 收盘不断朝止损方向推进或跌破入场结构，"
-    "且没有出现有利方向的拒绝K线，应该 close，或者把止损收紧到最近 M1/M5 结构外，减少亏损。"
+    "不必等价格碰到初始止损才处理，但不能仅因当前浮亏或持仓时间提前退出。只有指定失效边界被已收盘K线越过，"
+    "或至少两根相邻已收盘M1朝不利方向推进、最近M5结构同步恶化且没有有利拒绝时，才可close；否则优先hold。"
     "单根影线刺穿但收盘收回不算结构失效。浮盈单可以把止损收紧到入场价以上（BUY）或以下（SELL）来锁定利润。"
     "输入的r_now和profit只是当前快照，hold_minutes只是持仓时长，均不能证明持续浮亏；没有历史序列不得声称一直亏损。用已给M1/M5收盘序列说明推进或拒绝的具体证据。"
     "未提供原始入场结构时，不得断言原始入场结构已失效；可以依据明确的近期M1/M5结构恶化提前减亏。仅持仓时间长、单次浮亏或一根反向K线不足以close。"
+    "先对照保存的entry_context说明新行情是否使原入场理由失效。至少两根相邻已收盘M1朝不利方向推进且近期M5结构同步恶化，才可作为提前close的证据；指定失效边界被已收盘K线越过时可close。"
+    "max_adverse为null或覆盖范围有限时，不得写成从未回撤；只用可见区间的MFE/MAE，并明确coverage。"
     "最终回复只能是一个 JSON 对象，不要 Markdown。"
 )
 
@@ -130,6 +135,12 @@ def bars_for_prompt(df, limit=8):
     return rows
 
 
+def bar_times_for_prompt(df, limit):
+    if df is None or len(df) == 0 or "time" not in df.columns:
+        return []
+    return [int(value) for value in df["time"].tail(limit).tolist()]
+
+
 def fib_payload(fib):
     if fib is None:
         return None
@@ -141,9 +152,10 @@ def fib_payload(fib):
     }
 
 
-def build_feature_pack(df_m15, df_h1, df_m5, local_result):
+def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_id=None):
     atr = base.calculate_atr(df_m15)
     price = float(df_m15["close"].iloc[-1])
+    reference_bar_time = int(df_m15["time"].iloc[-1]) if "time" in df_m15.columns else 0
     h1_trend = base.trend_from_ema(df_h1, 50)
     m15_trend = base.trend_from_ema(df_m15, 50)
     fib = base.entry_fib_structure(df_m15, h1_trend, atr)
@@ -152,6 +164,14 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result):
         "timeframe": "M15",
         "direction_timeframe": "H1",
         "price": round(price, 2),
+        "decision_id": decision_id,
+        "bars_are_closed": True,
+        "reference_price": {
+            "price": round(price, 2),
+            "source": "previous_closed_m15_close",
+            "bar_time": reference_bar_time,
+        },
+        "live_quote": quote or {"bid": None, "ask": None, "time": None},
         "atr": round(atr, 2),
         "h1_trend": h1_trend,
         "m15_trend": m15_trend,
@@ -181,7 +201,16 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result):
             "chase_max_atr": base.CHASE_MAX_ATR,
             "min_rr": base.MIN_REWARD_RISK,
         },
-        "m15_bars": bars_for_prompt(df_m15, 12),
+        "m15_bars": bars_for_prompt(df_m15, 32),
+        "evidence_windows": {
+            "m15_structure_lookback": 24,
+            "m15_structure_bar_times": bar_times_for_prompt(df_m15, 24),
+            "breakout_box_lookback": 16,
+            "breakout_recent_bars": 4,
+            "breakout_bar_times": bar_times_for_prompt(df_m15, 20),
+            "m5_rejection_lookback": 3,
+            "m5_rejection_bar_times": bar_times_for_prompt(df_m5, 3),
+        },
         "h1_bars": bars_for_prompt(df_h1, 8),
         "m5_bars": bars_for_prompt(df_m5, 8),
     }
@@ -406,6 +435,14 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
     reasoning = str(payload.get("reasoning", "")).strip()
     if action == "no":
         return None, reasoning or "AI-1 选择观望"
+    required_evidence = {
+        "trigger_evidence": payload.get("trigger_evidence"),
+        "invalidation": payload.get("invalidation"),
+        "target_basis": payload.get("target_basis"),
+    }
+    missing_evidence = [name for name, value in required_evidence.items() if not str(value or "").strip()]
+    if missing_evidence:
+        return None, "AI-1证据字段缺失: " + ",".join(missing_evidence)
     if confidence < min_confidence:
         return None, "AI-1 置信度 %s < %s" % (confidence, min_confidence)
     if setup == "pullback" and regime == "tight_range":
@@ -489,7 +526,15 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
         take_profit=take_profit,
         score_buy=0,
         score_sell=0,
-        details={"source": "ai1", "h1_trend": h1_trend, "m15_trend": m15_trend},
+        details={
+            "source": "ai1",
+            "h1_trend": h1_trend,
+            "m15_trend": m15_trend,
+            "entry_price": entry,
+            "trigger_evidence": required_evidence["trigger_evidence"],
+            "invalidation": required_evidence["invalidation"],
+            "target_basis": required_evidence["target_basis"],
+        },
     )
     return result, full_reason
 def ai2_allows(payload):
@@ -503,7 +548,9 @@ def ai2_allows(payload):
     if decision != "APPROVE":
         defect_text = "，".join(str(item) for item in defects) if defects else "未列明"
         return False, "AI-2 拒绝: %s，缺陷=%s。%s" % (decision or "EMPTY", defect_text, reasoning)
-    return True, reasoning or "AI-2 APPROVE"
+    if not reasoning:
+        return False, "AI-2拒绝: 审核理由缺失"
+    return True, reasoning
 
 
 def task_is_current(seq, bar_time, current_seq, current_bar):
@@ -517,6 +564,8 @@ class ThreeAITrader(base.FibVolumePATrader):
     def __init__(self):
         super().__init__()
         self._mt5_lock = threading.RLock()
+        self._state_lock = threading.RLock()
+        self.entry_contexts = {}
         self._entry_lock = threading.Lock()
         self._entry_inflight = False
         self._entry_seq = 0
@@ -529,6 +578,132 @@ class ThreeAITrader(base.FibVolumePATrader):
         self._ai3_started = 0.0
         self._stop = threading.Event()
         self._last_api_alert = 0.0
+        self.load_entry_contexts()
+
+    def load_entry_contexts(self):
+        with self._state_lock:
+            self.entry_contexts = {}
+            try:
+                with open(AI3_STATE_FILE, "r", encoding="utf-8") as state_file:
+                    data = json.load(state_file)
+            except FileNotFoundError:
+                return
+            except (OSError, ValueError) as exc:
+                base.logger.warning("AI-3 持仓上下文读取失败，历史字段标记未知: %s: %s", type(exc).__name__, exc)
+                return
+            if not isinstance(data, dict):
+                base.logger.warning("AI-3 持仓上下文格式无效，历史字段标记未知")
+                return
+            contexts = data.get("positions", data)
+            if isinstance(contexts, dict):
+                self.entry_contexts = {
+                    str(ticket): value
+                    for ticket, value in contexts.items()
+                    if isinstance(value, dict)
+                }
+
+    def save_entry_contexts(self):
+        with self._state_lock:
+            os.makedirs(base.LOG_DIR, exist_ok=True)
+            temp_path = AI3_STATE_FILE + ".tmp"
+            payload = {"version": 1, "positions": self.entry_contexts}
+            try:
+                with open(temp_path, "w", encoding="utf-8") as state_file:
+                    json.dump(payload, state_file, ensure_ascii=False, indent=2, sort_keys=True)
+                    state_file.flush()
+                    os.fsync(state_file.fileno())
+                os.replace(temp_path, AI3_STATE_FILE)
+            except OSError as exc:
+                base.logger.warning("AI-3 持仓上下文保存失败: %s: %s", type(exc).__name__, exc)
+                try:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                except OSError:
+                    pass
+
+    def reconcile_entry_contexts(self):
+        positions = self.get_positions()
+        active = {str(int(position.ticket)): position for position in positions}
+        changed = False
+        with self._state_lock:
+            for ticket in list(self.entry_contexts):
+                if ticket not in active:
+                    self.entry_contexts.pop(ticket, None)
+                    changed = True
+            for ticket, position in active.items():
+                if ticket in self.entry_contexts:
+                    continue
+                self.entry_contexts[ticket] = {
+                    "status": "unknown_after_restart",
+                    "ticket": int(position.ticket),
+                    "identifier": int(getattr(position, "identifier", 0) or 0),
+                    "symbol": getattr(position, "symbol", base.SYMBOL),
+                    "direction": "BUY" if position.type == base.mt5.POSITION_TYPE_BUY else "SELL",
+                    "entry_price": float(position.price_open),
+                    "initial_sl": float(position.sl or 0.0),
+                    "initial_tp": float(position.tp or 0.0),
+                    "initial_risk": None,
+                    "source": "unknown",
+                    "decision_id": None,
+                    "setup": None,
+                    "session": None,
+                    "entry_reasoning": None,
+                    "trigger_evidence": None,
+                    "invalidation": None,
+                    "target_basis": None,
+                    "coverage": "since_restart",
+                    "coverage_started_at": time.time(),
+                }
+                changed = True
+        if changed:
+            self.save_entry_contexts()
+
+    def record_entry_context(self, result, position):
+        ticket = int(getattr(position, "ticket", 0) or 0)
+        if ticket <= 0:
+            return
+        details = dict(result.details or {})
+        entry_price = float(getattr(position, "price_open", 0.0) or details.get("entry_price", 0.0) or 0.0)
+        initial_sl = float(getattr(position, "sl", 0.0) or result.stop_loss or 0.0)
+        initial_tp = float(getattr(position, "tp", 0.0) or result.take_profit or 0.0)
+        risk = abs(entry_price - initial_sl) if initial_sl > 0 else None
+        context = {
+            "status": "complete",
+            "ticket": ticket,
+            "identifier": int(getattr(position, "identifier", 0) or 0),
+            "symbol": getattr(position, "symbol", base.SYMBOL),
+            "direction": "BUY" if position.type == base.mt5.POSITION_TYPE_BUY else "SELL",
+            "entry_price": entry_price,
+            "initial_sl": initial_sl,
+            "initial_tp": initial_tp,
+            "final_stop_loss": initial_sl,
+            "final_take_profit": initial_tp,
+            "initial_risk": risk,
+            "source": details.get("source", "ai1"),
+            "decision_id": details.get("decision_id"),
+            "setup": details.get("setup"),
+            "session": details.get("session"),
+            "entry_reasoning": result.reasoning,
+            "local_action_before_ai": details.get("local_action_before_ai"),
+            "local_confidence": details.get("local_confidence"),
+            "ai_confidence": result.confidence,
+            "trigger_evidence": details.get("trigger_evidence"),
+            "invalidation": details.get("invalidation"),
+            "target_basis": details.get("target_basis"),
+            "reference_price_source": details.get("reference_price_source"),
+            "coverage": "from_entry",
+            "coverage_started_at": time.time(),
+            "last_observed_at": time.time(),
+        }
+        with self._state_lock:
+            self.entry_contexts[str(ticket)] = context
+        self.save_entry_contexts()
+
+    def remove_entry_context(self, ticket):
+        with self._state_lock:
+            removed = self.entry_contexts.pop(str(int(ticket)), None)
+        if removed is not None:
+            self.save_entry_contexts()
 
     def get_rates(self, timeframe, count, shift=1):
         with self._mt5_lock:
@@ -544,7 +719,22 @@ class ThreeAITrader(base.FibVolumePATrader):
 
     def place_order(self, result):
         with self._mt5_lock:
-            return super().place_order(result)
+            placed = super().place_order(result)
+            if not placed:
+                return False
+            positions = self.get_positions()
+            ticket = int(getattr(self, "last_order_ticket", 0) or 0)
+            position = next(
+                (item for item in positions if int(getattr(item, "ticket", 0) or 0) == ticket),
+                None,
+            )
+            if position is None and positions:
+                position = max(positions, key=lambda item: int(getattr(item, "time", 0) or 0))
+            if position is None:
+                base.logger.warning("开仓成功但暂未找到持仓，AI-3上下文将在下次启动/轮询标记未知")
+            else:
+                self.record_entry_context(result, position)
+            return True
 
     def modify_position_sl(self, position, new_sl, reason):
         with self._mt5_lock:
@@ -552,7 +742,21 @@ class ThreeAITrader(base.FibVolumePATrader):
 
     def close_position_by_ticket(self, position, reason):
         with self._mt5_lock:
-            return super().close_position_by_ticket(position, reason)
+            ticket = int(getattr(position, "ticket", 0) or 0)
+            closed = super().close_position_by_ticket(position, reason)
+            if closed:
+                self.remove_entry_context(ticket)
+            return closed
+
+    def sync_position_close_notifications(self):
+        super().sync_position_close_notifications()
+        active = {str(int(item.ticket)) for item in self.get_positions()}
+        with self._state_lock:
+            stale = [ticket for ticket in self.entry_contexts if ticket not in active]
+            for ticket in stale:
+                self.entry_contexts.pop(ticket, None)
+        if stale:
+            self.save_entry_contexts()
 
     def latest_bar_time(self, timeframe):
         with self._mt5_lock:
@@ -666,7 +870,17 @@ class ThreeAITrader(base.FibVolumePATrader):
             local_result = base.build_fib_volume_pa_decision(
                 df_m15, df_h1, df_m5, base.CONFIDENCE_THRESHOLD
             )
-            pack, fib, atr, price = build_feature_pack(df_m15, df_h1, df_m5, local_result)
+            decision_id = "%s-%s" % (bar_time, seq)
+            with self._mt5_lock:
+                tick = base.mt5.symbol_info_tick(base.SYMBOL)
+            quote = {
+                "bid": round(float(tick.bid), 2) if tick else None,
+                "ask": round(float(tick.ask), 2) if tick else None,
+                "time": int(getattr(tick, "time", 0) or 0) if tick else None,
+            }
+            pack, fib, atr, price = build_feature_pack(
+                df_m15, df_h1, df_m5, local_result, quote=quote, decision_id=decision_id
+            )
             reject = ""
             if local_result.action == "no" and "拒绝:" in (local_result.reasoning or ""):
                 reject = " 拒绝:" + local_result.reasoning.split("拒绝:", 1)[1].strip().replace("\n", " ")[:160]
@@ -682,6 +896,14 @@ class ThreeAITrader(base.FibVolumePATrader):
             )
             if not AI_ENABLED:
                 if local_result.action in ("buy", "sell"):
+                    local_result.details.update(
+                        {
+                            "source": "local",
+                            "decision_id": decision_id,
+                            "local_action_before_ai": local_result.action,
+                            "local_confidence": local_result.confidence,
+                        }
+                    )
                     self.place_order(local_result)
                 return
             if not self.entry_is_current(seq, bar_time):
@@ -693,7 +915,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI1_EFFORT,
                 AI1_INSTRUCTIONS,
                 prompt_json(
-                    "请只输出 JSON: {\"action\":\"buy|sell|no\",\"confidence\":0-100,\"stop_loss\":0,\"take_profit\":0,\"reasoning\":\"...\"}",
+                    "请只输出 JSON: {\"action\":\"buy|sell|no\",\"confidence\":0-100,\"stop_loss\":0,\"take_profit\":0,\"reasoning\":\"...\",\"trigger_evidence\":\"...\",\"invalidation\":\"...\",\"target_basis\":\"...\"}",
                     pack,
                 ),
                 AI1_TIMEOUT,
@@ -708,8 +930,9 @@ class ThreeAITrader(base.FibVolumePATrader):
                 self.alert_api_failure("AI-1", "没有可见 JSON")
                 return
             entry_price = float((local_result.details or {}).get("entry_price") or price)
+            parsed = extract_json_object(raw)
             proposal, reason = finalize_ai_proposal(
-                extract_json_object(raw), entry_price, atr, pack["h1_trend"], pack["m15_trend"], fib,
+                parsed, entry_price, atr, pack["h1_trend"], pack["m15_trend"], fib,
                 df_m15=df_m15, df_m5=df_m5, regime=pack.get("regime"),
                 regime_location=(local_result.details or {}).get("location"),
                 pa_score=int((local_result.details or {}).get("pa_score") or 0),
@@ -717,7 +940,6 @@ class ThreeAITrader(base.FibVolumePATrader):
                 setup=(local_result.details or {}).get("setup", "pullback"),
             )
             ai_confidence = None
-            parsed = extract_json_object(raw)
             if isinstance(parsed, dict):
                 ai_confidence = normalize_confidence(parsed.get("confidence", 0))
             confidence_line = "本地置信度: %s (BUY=%s SELL=%s)，AI-1 置信度: %s，门槛: 本地%s / AI%s" % (
@@ -728,7 +950,10 @@ class ThreeAITrader(base.FibVolumePATrader):
                 base.CONFIDENCE_THRESHOLD,
                 AI_CONFIDENCE,
             )
-            base.logger.info("AI-1 结果: %s | %s" % (reason, confidence_line))
+            base.logger.info(
+                "AI-1 结果 decision=%s local_action=%s: %s | %s"
+                % (decision_id, local_result.action, reason, confidence_line)
+            )
             if proposal is None:
                 if "观望" not in reason and "未给出" not in reason:
                     self.notify_lines(
@@ -738,8 +963,37 @@ class ThreeAITrader(base.FibVolumePATrader):
                 return
             proposal.score_buy = local_result.score_buy
             proposal.score_sell = local_result.score_sell
+            requested_sl = parsed.get("stop_loss") if isinstance(parsed, dict) else None
+            requested_tp = parsed.get("take_profit") if isinstance(parsed, dict) else None
+            proposal.details.update(
+                {
+                    "source": "ai1",
+                    "decision_id": decision_id,
+                    "local_action_before_ai": local_result.action,
+                    "local_confidence": local_result.confidence,
+                    "session": pack.get("session"),
+                    "setup": pack.get("setup"),
+                    "reference_price_source": pack["reference_price"].get("source"),
+                    "trigger_evidence": parsed.get("trigger_evidence") if isinstance(parsed, dict) else None,
+                    "invalidation": parsed.get("invalidation") if isinstance(parsed, dict) else None,
+                    "target_basis": parsed.get("target_basis") if isinstance(parsed, dict) else None,
+                    "ai_requested_stop_loss": requested_sl,
+                    "ai_requested_take_profit": requested_tp,
+                    "final_stop_loss": proposal.stop_loss,
+                    "final_take_profit": proposal.take_profit,
+                    "python_finalization": reason,
+                }
+            )
             review_pack = {
                 "proposal": proposal.to_decision(),
+                "ai1_raw_proposal": parsed,
+                "python_finalization": {
+                    "final_entry_price": proposal.details.get("entry_price", entry_price),
+                    "final_stop_loss": proposal.stop_loss,
+                    "final_take_profit": proposal.take_profit,
+                    "reason": reason,
+                },
+                "decision_id": decision_id,
                 "entry_price": entry_price,
                 "atr": pack["atr"],
                 "h1_trend": pack["h1_trend"],
@@ -775,7 +1029,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 self.alert_api_failure("AI-2", "没有可见 JSON，拒绝开仓")
                 return
             allowed, review_reason = ai2_allows(extract_json_object(review_raw))
-            base.logger.info("AI-2 结果: %s" % review_reason)
+            base.logger.info("AI-2 结果 decision=%s: %s" % (decision_id, review_reason))
             if not allowed:
                 self.notify_lines(
                     "✋ %s AI-2 未通过" % base.SYMBOL,
@@ -790,6 +1044,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 )
                 return
             proposal.reasoning = "%s。%s" % (proposal.reasoning, review_reason)
+            proposal.details["ai2_review"] = review_reason
             self.place_order(proposal)
         except AIRequestError as exc:
             self.alert_api_failure(exc.role, exc.detail)
@@ -829,20 +1084,52 @@ class ThreeAITrader(base.FibVolumePATrader):
                 "m5_bars": bars_for_prompt(df_m5, 8),
                 "positions": [],
             }
+            state_changed = False
             for position in positions:
                 ticket = int(position.ticket)
                 state = self.guardian_states.get(ticket)
+                with self._state_lock:
+                    saved_context = self.entry_contexts.get(str(ticket))
+                    context = dict(saved_context) if isinstance(saved_context, dict) else None
                 is_buy = position.type == base.mt5.POSITION_TYPE_BUY
                 entry = float(position.price_open)
                 now_price = (float(tick.bid) if is_buy else float(tick.ask)) if tick else 0.0
-                risk = float(state.risk) if state and state.risk > 0 else 0.0
+                saved_risk = context.get("initial_risk") if context else None
+                try:
+                    risk = float(saved_risk) if saved_risk is not None else 0.0
+                except (TypeError, ValueError):
+                    risk = 0.0
+                if risk <= 0:
+                    risk = 0.0
+                    if context is not None:
+                        context["status"] = "unknown_after_restart"
+                        context.setdefault("coverage", "since_restart")
+                        with self._state_lock:
+                            self.entry_contexts[str(ticket)] = context
+                        state_changed = True
                 move = (now_price - entry) if is_buy else (entry - now_price)
-                best = adverse = 0.0
+                best = adverse = None
                 if state:
                     best = (state.highest_price - entry) if is_buy else (entry - state.lowest_price)
                     adverse = (entry - state.lowest_price) if is_buy else (state.highest_price - entry)
+                    best = max(0.0, best)
+                    adverse = max(0.0, adverse)
+                    if context is not None:
+                        context["last_observed_at"] = time.time()
+                        context["observed_mfe"] = round(best, 2)
+                        context["observed_mae"] = round(adverse, 2)
+                        with self._state_lock:
+                            self.entry_contexts[str(ticket)] = context
+                        state_changed = True
                 # Server time on both sides, so the difference is the real holding time.
                 hold_minutes = (int(tick.time) - int(position.time)) / 60.0 if tick else 0.0
+                if context is None:
+                    context = {
+                        "status": "unknown_after_restart",
+                        "ticket": ticket,
+                        "initial_risk": None,
+                        "coverage": "since_current_process_observed",
+                    }
                 payload["positions"].append({
                     "ticket": ticket,
                     "direction": "BUY" if is_buy else "SELL",
@@ -853,11 +1140,27 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "profit": round(float(position.profit or 0), 2),
                     "virtual_sl": round(float(state.virtual_sl), 2) if state else 0,
                     "hold_minutes": round(max(0.0, hold_minutes), 1),
-                    "initial_risk": round(risk, 2),
-                    "r_now": round(move / risk, 2) if risk > 0 else 0,
-                    "max_favorable": round(max(0.0, best), 2),
-                    "max_adverse": round(max(0.0, adverse), 2),
+                    "initial_risk": round(risk, 2) if risk > 0 else None,
+                    "r_now": round(move / risk, 2) if risk > 0 else None,
+                    "max_favorable": round(best, 2) if best is not None else None,
+                    "max_adverse": round(adverse, 2) if adverse is not None else None,
+                    "entry_context": context,
                 })
+            if state_changed:
+                self.save_entry_contexts()
+            for item in payload["positions"]:
+                base.logger.info(
+                    "AI-3证据 ticket=%s context=%s risk=%s r_now=%s MFE=%s MAE=%s coverage=%s"
+                    % (
+                        item["ticket"],
+                        item["entry_context"].get("status"),
+                        item["initial_risk"],
+                        item["r_now"],
+                        item["max_favorable"],
+                        item["max_adverse"],
+                        item["entry_context"].get("coverage"),
+                    )
+                )
             raw = call_chat(
                 "AI-3",
                 AI3_MODEL,
@@ -936,6 +1239,7 @@ class ThreeAITrader(base.FibVolumePATrader):
     def run(self, once=False):
         if not self.connect_mt5():
             return 1
+        self.reconcile_entry_contexts()
         log_path = attach_ai_logger()
         base.logger.info(
             "三AI交易启动 symbol=%s magic=%s trading=%s ai=%s confidence=%s min_rr=%s models=%s/%s/%s log=%s"
@@ -1077,6 +1381,7 @@ def run_http_retry_self_test():
 
 
 def run_self_test():
+    global AI3_STATE_FILE
     fenced = extract_json_object("```json\n{\"action\":\"buy\",\"confidence\":0.8}\n```")
     assert fenced["action"] == "buy", fenced
     assert normalize_confidence(0.8) == 80
@@ -1084,26 +1389,42 @@ def run_self_test():
     assert not task_is_current(1, 10, 2, 10)
     assert task_is_current(2, 10, 2, 10)
 
+    def proposal(**values):
+        result = {
+            "trigger_evidence": "已收盘确认",
+            "invalidation": "确认周期收盘失守结构边界",
+            "target_basis": "前方可见结构目标",
+        }
+        result.update(values)
+        return result
+
     passed, reason = finalize_ai_proposal(
-        {"action": "buy", "confidence": 88, "stop_loss": 96, "take_profit": 107, "reasoning": "结构回踩"},
+        proposal(action="buy", confidence=88, stop_loss=96, take_profit=107, reasoning="结构回踩"),
         100, 2.0, "bull", "bull", None, 75,
     )
     assert passed is not None and passed.action == "buy", reason
+    assert passed.details["trigger_evidence"] == "已收盘确认", passed.details
+    assert passed.details["invalidation"] == "确认周期收盘失守结构边界", passed.details
     assert passed.take_profit <= 100 + 1.8 * (100 - passed.stop_loss) + 0.02
+    missing, missing_reason = finalize_ai_proposal(
+        {"action": "buy", "confidence": 90, "stop_loss": 96, "take_profit": 107, "reasoning": "无证据字段"},
+        100, 2.0, "bull", "bull", None, 75,
+    )
+    assert missing is None and "证据字段缺失" in missing_reason, missing_reason
 
     rejected, reject_reason = finalize_ai_proposal(
-        {"action": "buy", "confidence": 90, "stop_loss": 96, "take_profit": 102, "reasoning": "目标太近"},
+        proposal(action="buy", confidence=90, stop_loss=96, take_profit=102, reasoning="目标太近"),
         100, 2.0, "bull", "bull", None, 75,
     )
     assert rejected is None and "盈亏比" in reject_reason, reject_reason
 
     against, against_reason = finalize_ai_proposal(
-        {"action": "sell", "confidence": 91, "stop_loss": 104, "take_profit": 92, "reasoning": "逆势"},
+        proposal(action="sell", confidence=91, stop_loss=104, take_profit=92, reasoning="逆势"),
         100, 2.0, "bull", "bull", None, 75,
     )
     assert against is None and "不同向" in against_reason, against_reason
     wide, wide_reason = finalize_ai_proposal(
-        {"action": "buy", "confidence": 90, "stop_loss": 90, "take_profit": 120, "reasoning": "wide"},
+        proposal(action="buy", confidence=90, stop_loss=90, take_profit=120, reasoning="wide"),
         100, 2.0, "bull", "bull", None, 75,
     )
     cap_text = "%.2f" % base.MAX_SL_ABS
@@ -1112,7 +1433,7 @@ def run_self_test():
     tight_sl, tight_tp = clamp_proposal("sell", 100.0, 102.5, 90.0, 10.0)
     assert 100.0 < tight_sl <= 100.0 + base.MAX_SL_ABS + 0.02, (tight_sl, tight_tp)
     local_kept, local_reason = finalize_ai_proposal(
-        {"action": "sell", "confidence": 88, "stop_loss": 112, "take_profit": 90, "reasoning": "远影线"},
+        proposal(action="sell", confidence=88, stop_loss=112, take_profit=90, reasoning="远影线"),
         100, 10.0, "bear", "bear", None, 75, local_stop=103.2, local_target=94.0,
     )
     assert local_kept is not None and abs(local_kept.stop_loss - 103.2) < 0.001, local_reason
@@ -1122,7 +1443,7 @@ def run_self_test():
         {"open": 107.4, "high": 109.1, "low": 106.8, "close": 107.0},
     ])
     timed_kept, timed_reason = finalize_ai_proposal(
-        {"action": "sell", "confidence": 88, "stop_loss": 120, "take_profit": 90, "reasoning": "远影线"},
+        proposal(action="sell", confidence=88, stop_loss=120, take_profit=90, reasoning="远影线"),
         107.0, 10.0, "bear", "bear", None, 75, df_m5=near_m5,
     )
     assert timed_kept is not None and 0 < timed_kept.stop_loss - 107.0 <= base.MAX_SL_ABS + 0.02, timed_reason
@@ -1132,7 +1453,7 @@ def run_self_test():
         {"open": 100.0, "high": 112.0, "low": 99.0, "close": 99.5},
     ])
     far_kept, far_reason = finalize_ai_proposal(
-        {"action": "sell", "confidence": 88, "stop_loss": 120, "take_profit": 90, "reasoning": "远影线"},
+        proposal(action="sell", confidence=88, stop_loss=120, take_profit=90, reasoning="远影线"),
         99.5, 2.0, "bear", "bear", None, 75, df_m5=far_m5,
     )
     assert far_kept is None and cap_text in far_reason, far_reason
@@ -1143,7 +1464,7 @@ def run_self_test():
         {"open": 99.6, "high": 100.0 + base.MAX_SL_ABS + 1.4, "low": 99.0, "close": 99.4},
     ])
     inside_wick, inside_reason = finalize_ai_proposal(
-        {"action": "sell", "confidence": 88, "stop_loss": 102.0, "take_profit": 94.0, "reasoning": "影线内止损"},
+        proposal(action="sell", confidence=88, stop_loss=102.0, take_profit=94.0, reasoning="影线内止损"),
         100.0, 2.0, "bear", "bear", None, 75, df_m5=wick_m5, local_stop=102.0, local_target=94.0,
     )
     assert inside_wick is None and "影线" in inside_reason, inside_reason
@@ -1153,14 +1474,67 @@ def run_self_test():
         {"open": 99.9, "high": 101.0, "low": 99.4, "close": 99.6},
     ])
     moved, moved_reason = finalize_ai_proposal(
-        {"action": "sell", "confidence": 88, "stop_loss": 101.4, "take_profit": 96.0, "reasoning": "止损偏近"},
+        proposal(action="sell", confidence=88, stop_loss=101.4, take_profit=96.0, reasoning="止损偏近"),
         100.0, 2.0, "bear", "bear", None, 75, df_m5=near_wick,
     )
     assert moved is not None and moved.stop_loss >= 101.6 - 0.01, moved_reason
 
     assert ai2_allows({"decision": "APPROVE", "reasoning": "ok"})[0]
+    assert not ai2_allows({"decision": "APPROVE"})[0]
     assert not ai2_allows({"decision": "REJECT", "defects": ["盈亏比不足"]})[0]
     assert not ai2_allows(None)[0]
+
+    feature_rows = []
+    for index in range(40):
+        close = 100.0 + index * 0.1
+        feature_rows.append(
+            {
+                "time": index,
+                "open": close - 0.05,
+                "high": close + 0.2,
+                "low": close - 0.2,
+                "close": close,
+                "tick_volume": 100 + index,
+            }
+        )
+    feature_m15 = base.pd.DataFrame(feature_rows)
+    feature_h1 = base.pd.DataFrame(feature_rows + feature_rows)
+    feature_m5 = feature_m15.tail(10).copy()
+    feature_local = base.StrategyResult(
+        "buy", 80, False, "test", 99.0, 103.0, 80, 10,
+        {"regime": "trend", "session": "asia", "setup": "pullback", "location": "0.5", "pa_score": "20"},
+    )
+    feature_pack, _, _, _ = build_feature_pack(
+        feature_m15, feature_h1, feature_m5, feature_local,
+        quote={"bid": 103.0, "ask": 103.1, "time": 40}, decision_id="test-1",
+    )
+    assert feature_pack["decision_id"] == "test-1"
+    assert feature_pack["bars_are_closed"] is True
+    assert len(feature_pack["m15_bars"]) == 32
+    assert len(feature_pack["evidence_windows"]["m15_structure_bar_times"]) == 24
+    assert len(feature_pack["evidence_windows"]["m5_rejection_bar_times"]) == 3
+    assert feature_pack["reference_price"]["source"] == "previous_closed_m15_close"
+
+    import tempfile
+    old_state_file = AI3_STATE_FILE
+    with tempfile.TemporaryDirectory() as temp_dir:
+        AI3_STATE_FILE = os.path.join(temp_dir, "position-state.json")
+        state_writer = ThreeAITrader()
+        state_writer.entry_contexts = {
+            "123": {
+                "initial_risk": 2.5,
+                "setup": "pullback",
+                "trigger_evidence": "已收盘确认",
+                "invalidation": "收盘失守",
+                "target_basis": "前高",
+            }
+        }
+        state_writer.save_entry_contexts()
+        state_reader = ThreeAITrader()
+        assert state_reader.entry_contexts["123"]["initial_risk"] == 2.5
+        assert state_reader.entry_contexts["123"]["target_basis"] == "前高"
+    AI3_STATE_FILE = old_state_file
+
     assert not base.sl_change_is_tighter("BUY", 100, 99)
     assert base.sl_change_is_tighter("SELL", 110, 109)
     run_http_retry_self_test()

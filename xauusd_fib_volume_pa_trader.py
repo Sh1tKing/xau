@@ -186,7 +186,7 @@ class StrategyResult:
     take_profit: float
     score_buy: int
     score_sell: int
-    details: Dict[str, str]
+    details: Dict[str, object]
 
     def to_decision(self):
         return {
@@ -196,6 +196,7 @@ class StrategyResult:
             "reasoning": self.reasoning,
             "stop_loss": self.stop_loss,
             "take_profit": self.take_profit,
+            "details": self.details,
         }
 
 
@@ -993,6 +994,15 @@ def reward_risk_ratio(action: str, entry_price: float, stop_loss: float, take_pr
     return reward / risk
 
 
+def directional_stop_distance(action: str, entry_price: float, stop_loss: float) -> float:
+    """Return the live directional distance from execution price to stop."""
+    if action == "buy":
+        return float(entry_price) - float(stop_loss)
+    if action == "sell":
+        return float(stop_loss) - float(entry_price)
+    return 0.0
+
+
 def review_entry(
     action: str,
     entry_price: float,
@@ -1023,6 +1033,12 @@ def sl_change_is_tighter(direction: str, current_sl: float, new_sl: float) -> bo
     if direction == "SELL":
         return new_sl < current_sl
     return False
+
+
+def update_guardian_extremes(state: GuardianState, current_price: float) -> None:
+    """Track both favorable and adverse extrema for the observed position path."""
+    state.highest_price = max(float(state.highest_price), float(current_price))
+    state.lowest_price = min(float(state.lowest_price), float(current_price))
 
 
 def entry_risk_limits(atr: float) -> Tuple[float, float]:
@@ -1561,6 +1577,7 @@ class FibVolumePATrader:
         self.notified_close_tickets: Set[int] = set()
         # Confidence at entry, keyed by position ticket, so close messages can show it.
         self.entry_confidence: Dict[int, str] = {}
+        self.last_order_ticket = 0
 
     def entry_confidence_line(self, ticket: int) -> str:
         return f"开仓置信度: {self.entry_confidence.get(int(ticket), '未知(非本进程开仓或已重启)')}"
@@ -1967,7 +1984,7 @@ class FibVolumePATrader:
 
             if position.type == mt5.POSITION_TYPE_BUY:
                 current_price = float(tick.bid)
-                state.highest_price = max(state.highest_price, current_price)
+                update_guardian_extremes(state, current_price)
                 max_profit = max(0.0, state.highest_price - state.entry_price)
                 max_profit_atr = max_profit / max(atr, 0.01)
                 max_profit_r = max_profit / max(state.risk, 0.01)
@@ -2006,7 +2023,7 @@ class FibVolumePATrader:
 
             elif position.type == mt5.POSITION_TYPE_SELL:
                 current_price = float(tick.ask)
-                state.lowest_price = min(state.lowest_price, current_price)
+                update_guardian_extremes(state, current_price)
                 max_profit = max(0.0, state.entry_price - state.lowest_price)
                 max_profit_atr = max_profit / max(atr, 0.01)
                 max_profit_r = max_profit / max(state.risk, 0.01)
@@ -2048,6 +2065,8 @@ class FibVolumePATrader:
         if action not in ("buy", "sell"):
             return False
 
+        self.last_order_ticket = 0
+
         positions_count = self.current_position_count()
         if positions_count >= MAX_POSITIONS:
             logger.info(f"✋ 已有 {positions_count} 个 {SYMBOL} 持仓，达到上限 {MAX_POSITIONS}，不再开仓")
@@ -2071,6 +2090,14 @@ class FibVolumePATrader:
             logger.error(
                 f"❌ SL/TP方向非法，拒绝下单: action={action}, price={price}, "
                 f"SL={result.stop_loss}, TP={result.take_profit}"
+            )
+            return False
+
+        live_risk = directional_stop_distance(action, price, result.stop_loss)
+        if live_risk <= 0 or live_risk > MAX_SL_ABS + 0.001:
+            logger.info(
+                f"二审拒绝下单: 实时止损距离 {live_risk:.2f} > {MAX_SL_ABS:.2f}, "
+                f"action={action}, price={price}, SL={result.stop_loss}"
             )
             return False
 
@@ -2151,6 +2178,7 @@ class FibVolumePATrader:
         logger.info(f"✅ 下单成功: {action.upper()} {LOT_SIZE} {SYMBOL}, price={price}, SL={result.stop_loss}, TP={result.take_profit}")
         # On netting/hedging MT5 the new position ticket equals the opening order ticket.
         order_ticket = int(getattr(order_result, "order", 0) or 0)
+        self.last_order_ticket = order_ticket
         if order_ticket > 0:
             self.entry_confidence[order_ticket] = (
                 f"{result.confidence} (BUY={result.score_buy} SELL={result.score_sell})"
@@ -2344,6 +2372,8 @@ def run_self_test():
     buy_risk = buy_entry - result_buy.stop_loss
     assert 0 < buy_risk <= MAX_SL_ABS + 0.02, buy_risk
     assert reward_risk_ratio("buy", buy_entry, result_buy.stop_loss, result_buy.take_profit) >= MIN_REWARD_RISK
+    assert directional_stop_distance("buy", 108.1, 100.0) > MAX_SL_ABS
+    assert 0 < directional_stop_distance("buy", 107.9, 100.0) <= MAX_SL_ABS
 
     result_sell = build_fib_volume_pa_decision(sell_df, h1_bear, m5_quiet, 80)
     assert result_sell.action == "sell", result_sell
@@ -2351,6 +2381,8 @@ def run_self_test():
     sell_risk = result_sell.stop_loss - sell_entry
     assert 0 < sell_risk <= MAX_SL_ABS + 0.02, sell_risk
     assert reward_risk_ratio("sell", sell_entry, result_sell.stop_loss, result_sell.take_profit) >= MIN_REWARD_RISK
+    assert directional_stop_distance("sell", 91.9, 100.0) > MAX_SL_ABS
+    assert 0 < directional_stop_distance("sell", 92.1, 100.0) <= MAX_SL_ABS
 
     misaligned = build_fib_volume_pa_decision(buy_df, h1_bear, m5_quiet, 80)
     assert misaligned.action == "no", misaligned
@@ -2411,6 +2443,10 @@ def run_self_test():
     assert not sl_change_is_tighter("SELL", 110.0, 111.0)
     assert sl_change_is_tighter("SELL", 110.0, 109.0)
     assert sl_change_is_tighter("BUY", 0.0, 99.0)
+    extreme_state = GuardianState(1, "BUY", 100.0, 96.0, 108.0, 4.0, 100.0, 100.0)
+    update_guardian_extremes(extreme_state, 98.5)
+    update_guardian_extremes(extreme_state, 103.0)
+    assert extreme_state.highest_price == 103.0 and extreme_state.lowest_price == 98.5, extreme_state
 
     fail_prices = [100 + i * 0.5 for i in range(40)] + [120, 118, 116, 114, 112, 109, 103.8]
     fail_volumes = [100] * 40 + [90, 88, 85, 82, 80, 140, 155]
