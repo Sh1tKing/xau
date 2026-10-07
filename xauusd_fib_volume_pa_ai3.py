@@ -68,6 +68,10 @@ API_ALERT_COOLDOWN = env_int("FIB_PA_AI_ALERT_COOLDOWN", 900)
 AI3_STATE_FILE = os.path.join(base.LOG_DIR, "ai3_position_state.json")
 AI_DECISION_SNAPSHOT_DIR = os.path.join(base.LOG_DIR, "ai_decisions")
 _SNAPSHOT_LOCK = threading.RLock()
+QUALITY_LEVEL_POINTS = {"strong": 20, "adequate": 16, "weak": 8, "missing": 0}
+QUALITY_DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_evidence")
+QUALITY_CAUSES = {"volume", "shallow_retrace", "trigger_weakness", "opposing_structure", "stop_vulnerability", "target_uncertainty", "execution_drift", "missing_data", "hard_limit"}
+QUALITY_VERSION = "entry-quality-v1"
 
 base.MAGIC = AI_MAGIC
 base.ENABLE_TRADING = AI_ENABLE_TRADING
@@ -88,10 +92,10 @@ AI1_INSTRUCTIONS = (
     "breakout 必须引用突破K和后续回踩K的bar_time。突破K自己的影线不是后续回踩；回踩已经守住后，不要因为同一次推动在M15和M5留下多个相近极值就把确认清零。原箱体边缘收盘失守、出现独立的反向结构并收盘确认，或事实明确显示形态失效时，才重新判定。"
     "障碍优先引用computed_evidence.obstacles中的price、timeframe、bar_time、source和event_group。已核实的跨周期同一极值只算同一事件；单根过程极值不能自动升级为独立重要障碍。仍需在未克服的重要障碍前有1.5RR空间，不能为了开单删除真正的障碍。"
     "止盈必须说明给定数据中的目标依据和中间阻力/支撑，不能只为凑够RR把目标延远。确认量偏弱是质量扣分，不可编造放量确认。确认尚未完成、或第一个重要障碍前没有1.5RR空间时，返回no并写明等待条件。"
-    "confidence 是对所选action的确信程度，不是胜率；不要复制本地分，不要为了通过门槛抬分。reasoning依次说明setup证据、失效位置、目标依据和主要反证；证据缺失明确写未知。"
+    "交易质量按输入quality_rubric的五项评分，不猜胜率、不复制本地分、不为了通过门槛抬分。reasoning依次说明setup证据、失效位置、目标依据和主要反证；证据缺失明确写未知。"
     f"M5保护止损是否可用不取决于M15影线是否超过{SL_CAP}美元：只要它保护当前触发结构、覆盖最近3根M5极值和缓冲、并且距离参考入场不超过{SL_CAP}美元，就可以使用。更远的结构止损超过上限时必须no，禁止把止损改进影线里面。"
     f"H1 不支持该方向、止损超过 {SL_CAP} 美元、价格偏离 M15 EMA21 超过 1.5 ATR、止损止盈方向错误或盈亏比低于 1.5 时，action 必须是 no。"
-    "stop_loss 和 take_profit 用绝对价格。最终回复只能是一个 JSON 对象，不要 Markdown；字段为action、confidence、stop_loss、take_profit、reasoning、trigger_evidence、invalidation、target_basis、fact_conflicts数组、unknowns数组。"
+    "stop_loss 和 take_profit 用绝对价格。最终回复只能是一个 JSON 对象，不要 Markdown；字段为action、stop_loss、take_profit、reasoning、trigger_evidence、invalidation、target_basis、fact_conflicts数组、unknowns数组、quality_assessment、wait_basis。"
 )
 AI2_INSTRUCTIONS = (
     "你是独立风控审核官 AI-2。不能提出新交易，只能 APPROVE 或 REJECT。"
@@ -124,6 +128,18 @@ PRICE_ACTION_INSTRUCTIONS = (
 )
 AI1_INSTRUCTIONS += PRICE_ACTION_INSTRUCTIONS
 AI2_INSTRUCTIONS += PRICE_ACTION_INSTRUCTIONS
+AI1_INSTRUCTIONS += (
+    "quality_assessment按输入quality_rubric返回direction、dimensions和reservations。每个dimension含level、reason、evidence_refs、reservation_ids。"
+    "evidence_refs是相对本次输入的JSON Pointer，例如/computed_evidence/price_action/M15/sell/checks/false_break。"
+    "reservations每项含id、cause、event_group、dimension、severity(minor/material/blocking)、reason、evidence_refs。"
+    "同一原因和事件仅由一个dimension承担，其他维度可说明但不能重复扣分；只有minor保留意见时最低为adequate，不能选weak或missing。"
+    "weak必须有对应material证据，missing必须有blocking的缺失或失效证据。Python按固定等级加总，忽略自行给出的自由confidence。"
+    "action=no时仍评价允许方向的交易质量，并在wait_basis列出code、reason、evidence_refs；"
+    "code为hard_limit、missing_structure、missing_trigger、missing_data、target_space或material_counter_evidence。"
+    "某周期规则已命中不得以missing_trigger声称触发不存在；可以解释触发质量偏弱或不在setup位置。"
+    "结构位置、已有确认、止损保护、目标空间已成立且仅有minor保留意见时，应在允许方向上形成提案交后续审核，不能无限等待更漂亮形态。"
+    "方向、行情质量、未克服的重要障碍及有效的新反向结构仍由你判断，不能为了有订单删除它们。"
+)
 AI3_INSTRUCTIONS = (
     "你是持仓监控 AI-3。只能选择 hold、tighten_sl 或 close。"
     "禁止放宽止损，禁止加仓，禁止新开仓。tighten_sl 必须比当前止损更有利，并给出绝对价格。"
@@ -503,7 +519,7 @@ def build_computed_entry_evidence(df_m15, df_h1, df_m5, local_result, fib, atr, 
     range_edge = _range_edge_evidence(df_m15, atr, candidate_actions[0]) if setup == "range_edge" else {"available": False, "reason": "setup_not_range_edge"}
     obstacles = {action: _obstacle_candidates(df_m15, df_m5, fib, breakout, price, action) for action in candidate_actions}
     return {
-        "contract_version": "entry-evidence-v4",
+        "contract_version": "entry-evidence-v5",
         "price_action": price_action,
         "source": "python_local_functions",
         "closed_bar_source_shift": 1,
@@ -566,6 +582,7 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
         "computed_evidence": build_computed_entry_evidence(
             df_m15, df_h1, df_m5, local_result, fib, atr, price
         ),
+        "quality_rubric": quality_rubric(),
         "rules": {
             "h1_sets_direction": True,
             "m15_opposite_is_pullback": True,
@@ -590,7 +607,154 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
         "h1_bars": bars_for_prompt(df_h1, 8),
         "m5_bars": bars_for_prompt(df_m5, 8),
     }
+    plan_entry = float((local_result.details or {}).get("entry_price") or price)
+    pack["local_plan_feasibility"] = plan_feasibility(local_result.action, plan_entry, local_result.stop_loss, local_result.take_profit, pack["live_quote"])
     return pack, fib, atr, price
+
+
+def plan_feasibility(action, reference_entry, stop_loss, take_profit, quote):
+    """Snapshot arithmetic for one plan, never a substitute for order-time checks."""
+    result = {"action": action, "reference_entry": reference_entry, "stop_loss": stop_loss,
+              "take_profit": take_profit, "quote_time": quote.get("time"), "available": False}
+    if action not in ("buy", "sell") or not prices_are_valid(action, reference_entry, stop_loss, take_profit):
+        return result
+    live_entry = quote.get("ask" if action == "buy" else "bid")
+    try:
+        live_entry = float(live_entry)
+    except (TypeError, ValueError):
+        return result
+    if not base.math.isfinite(live_entry) or live_entry <= 0:
+        return result
+    sign = 1 if action == "buy" else -1
+    risk = sign * (live_entry - stop_loss)
+    reward = sign * (take_profit - live_entry)
+    result.update({"available": True, "live_entry": live_entry, "live_risk": round(risk, 6),
+                   "live_reward": round(reward, 6), "live_rr": round(reward / risk, 6) if risk > 0 else None,
+                   "stop_within_cap": bool(0 < risk <= base.MAX_SL_ABS),
+                   "rr_passes": bool(risk > 0 and reward >= base.MIN_REWARD_RISK * risk)})
+    return result
+
+
+def quality_rubric():
+    """A transparent ordinal scale, not a calibrated probability of profit."""
+    return {
+        "version": QUALITY_VERSION,
+        "meaning": "entry_quality_not_win_probability",
+        "level_points": QUALITY_LEVEL_POINTS,
+        "dimensions": {
+            "structure": "评价本时段setup的位置及有效性。符合现有Fib容差/探入或箱体/区间条件为adequate；浅回撤本身不是结构缺失。",
+            "trigger": "本地M15或M5已收盘规则命中可为adequate；更明确的独立确认可为strong，不强制双周期。颜色、弱量不否定已命中的false_break。",
+            "protection": "止损保护命名结构且覆盖最近3根M5极值和缓冲、距离不超过上限为adequate；不能只因相对ATR较紧就认定无保护。",
+            "target": "目标有给定依据、重要未克服障碍之前有空间且有效报价RR至少1.5为adequate；刚过1.5无需在其他项重复扣分。",
+            "counter_evidence": "没有可核实反向证据为strong；普通量、浅回撤、H1旧影线、未证实过程极值等minor意见为adequate；独立及时的反向结构为material。",
+        },
+        "reservations_policy": "一个cause/event仅归一个dimension；minor最多使strong变adequate。weak需material，missing需blocking。已在目标或触发项计入的风险不在反向证据项重复扣分。",
+        "reservation_causes": sorted(QUALITY_CAUSES),
+        "proposal_policy": "硬伤或必要证据缺失则no；已成立的候选仅有minor意见时给出提案，最终分数及Python/AI2决定是否放行。不要将不确定未来获利当成必要字段缺失。",
+        "quote_policy": "reference_price与live_quote来自不同时间，差异本身不是事实冲突；用live_quote核实当前可行性，AI2/Python还会复核执行。",
+    }
+
+
+def _evidence_pointer_exists(pack, pointer):
+    if not isinstance(pointer, str) or not pointer.startswith("/"):
+        return False
+    value = pack
+    try:
+        for token in pointer[1:].split("/"):
+            token = token.replace("~1", "/").replace("~0", "~")
+            value = value[int(token)] if isinstance(value, list) else value[token]
+        return value is not None
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False
+
+
+def normalize_ai1_quality(payload, pack):
+    """Validate the AI scorecard without promoting its action or inventing facts."""
+    if not isinstance(payload, dict):
+        return payload, "AI-1质量评估缺失: 无有效JSON"
+    card = payload.get("quality_assessment")
+    if not isinstance(card, dict):
+        return payload, "AI-1质量评估缺失: quality_assessment"
+    direction = card.get("direction")
+    action = str(payload.get("action", "no")).lower()
+    if direction not in ("buy", "sell") or action not in ("buy", "sell", "no") or (action != "no" and action != direction):
+        return payload, "AI-1质量评估无效: 方向不一致"
+    dimensions = card.get("dimensions")
+    reservations = card.get("reservations")
+    if not isinstance(dimensions, dict) or set(dimensions) != set(QUALITY_DIMENSIONS) or not isinstance(reservations, list):
+        return payload, "AI-1质量评估无效: 五项或reservations缺失"
+
+    def refs_valid(item):
+        refs = item.get("evidence_refs")
+        return isinstance(refs, list) and bool(refs) and all(_evidence_pointer_exists(pack, ref) for ref in refs)
+
+    issues = {}
+    causes = set()
+    for issue in reservations:
+        if not isinstance(issue, dict):
+            return payload, "AI-1质量评估无效: reservation格式"
+        identifier = issue.get("id")
+        cause = issue.get("cause")
+        event = issue.get("event_group")
+        if not isinstance(identifier, str) or not identifier or identifier in issues or not isinstance(cause, str) or cause not in QUALITY_CAUSES:
+            return payload, "AI-1质量评估无效: 原因标识缺失或重复"
+        if event is not None and not isinstance(event, str):
+            return payload, "AI-1质量评估无效: event_group格式"
+        if issue.get("dimension") not in QUALITY_DIMENSIONS or issue.get("severity") not in ("minor", "material", "blocking") or not isinstance(issue.get("reason"), str) or not issue["reason"].strip() or not refs_valid(issue):
+            return payload, "AI-1质量评估无效: 原因缺少维度/程度/真实证据"
+        key = (cause, event if event else tuple(sorted(issue["evidence_refs"])))
+        if key in causes:
+            return payload, "AI-1质量评估重复扣分: 同一原因和事件"
+        causes.add(key)
+        if action != "no" and issue["severity"] == "blocking":
+            return payload, "AI-1质量评估矛盾: 声明阻断条件却提出交易"
+        issues[identifier] = issue
+    score = 0
+    used = set()
+    for name in QUALITY_DIMENSIONS:
+        item = dimensions[name]
+        if not isinstance(item, dict) or not isinstance(item.get("level"), str) or item["level"] not in QUALITY_LEVEL_POINTS or not isinstance(item.get("reason"), str) or not item["reason"].strip() or not refs_valid(item):
+            return payload, "AI-1质量评估无效: %s缺少等级/理由/真实证据" % name
+        identifiers = item.get("reservation_ids")
+        if not isinstance(identifiers, list) or any(not isinstance(i, str) for i in identifiers):
+            return payload, "AI-1质量评估无效: %s原因引用" % name
+        for identifier in identifiers:
+            if identifier in used or identifier not in issues or issues[identifier]["dimension"] != name:
+                return payload, "AI-1质量评估重复或错误扣分: " + identifier
+            used.add(identifier)
+        severities = {issues[i]["severity"] for i in identifiers}
+        level = item["level"]
+        if (level == "strong" and severities
+                or level == "adequate" and severities.intersection({"material", "blocking"})
+                or level == "weak" and not severities.intersection({"material", "blocking"})
+                or level == "missing" and "blocking" not in severities):
+            return payload, "AI-1质量评估程度不符: " + name
+        if name == "trigger" and level == "missing":
+            facts = pack.get("computed_evidence", {}).get("price_action", {})
+            if any(facts.get(tf, {}).get(direction, {}).get("score", 0) > 0 for tf in ("M15", "M5")):
+                return payload, "AI-1事实误读: 本周期已有触发，不能评为不存在"
+        score += QUALITY_LEVEL_POINTS[level]
+    if used != set(issues):
+        return payload, "AI-1质量评估无效: 未归属原因"
+    waits = payload.get("wait_basis")
+    if action == "no":
+        if not isinstance(waits, list) or not waits:
+            return payload, "AI-1观望依据缺失: wait_basis"
+        for wait in waits:
+            if not isinstance(wait, dict) or wait.get("code") not in ("hard_limit", "missing_structure", "missing_trigger", "missing_data", "target_space", "material_counter_evidence") or not isinstance(wait.get("reason"), str) or not wait["reason"].strip() or not refs_valid(wait):
+                return payload, "AI-1观望依据无效: 缺少可核实条件"
+            if wait["code"] == "material_counter_evidence" and not any(issue["severity"] in ("material", "blocking") for issue in issues.values()):
+                return payload, "AI-1观望依据矛盾: 仅有轻微保留意见"
+            if wait["code"] == "missing_trigger":
+                facts = pack.get("computed_evidence", {}).get("price_action", {})
+                if any(facts.get(tf, {}).get(direction, {}).get("score", 0) > 0 for tf in ("M15", "M5")):
+                    return payload, "AI-1事实误读: 已命中规则，不能以缺少触发观望"
+    normalized = dict(payload)
+    normalized["model_reported_confidence"] = payload.get("confidence")
+    normalized["confidence"] = score
+    normalized["quality_score"] = score
+    normalized["quality_version"] = QUALITY_VERSION
+    return normalized, ""
 def normalize_confidence(value):
     try:
         number = float(value)
@@ -939,6 +1103,9 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
             "fact_conflicts": fact_conflicts,
             "unknowns": unknowns,
             "entry_price_source": entry_price_source,
+            "quality_score": payload.get("quality_score"),
+            "quality_version": payload.get("quality_version"),
+            "quality_assessment": payload.get("quality_assessment"),
         },
     )
     return result, full_reason
@@ -1123,6 +1290,9 @@ class ThreeAITrader(base.FibVolumePATrader):
             "local_action_before_ai": details.get("local_action_before_ai"),
             "local_confidence": details.get("local_confidence"),
             "ai_confidence": result.confidence,
+            "quality_score": details.get("quality_score"),
+            "quality_version": details.get("quality_version"),
+            "quality_assessment": details.get("quality_assessment"),
             "trigger_evidence": details.get("trigger_evidence"),
             "invalidation": details.get("invalidation"),
             "target_basis": details.get("target_basis"),
@@ -1363,7 +1533,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI1_EFFORT,
                 AI1_INSTRUCTIONS,
                 prompt_json(
-                    "请只输出 JSON: {\"action\":\"buy|sell|no\",\"confidence\":0-100,\"stop_loss\":0,\"take_profit\":0,\"reasoning\":\"...\",\"trigger_evidence\":\"...\",\"invalidation\":\"...\",\"target_basis\":\"...\",\"fact_conflicts\":[],\"unknowns\":[]}",
+                    "请只输出JSON，含action、stop_loss、take_profit、reasoning、trigger_evidence、invalidation、target_basis、fact_conflicts、unknowns；quality_assessment={direction,dimensions:{structure,trigger,protection,target,counter_evidence},reservations:[]}，各维度={level,reason,evidence_refs:[],reservation_ids:[]}；wait_basis=[]（no必须列明等待依据）。由Python汇总质量分，不输出自由confidence。",
                     pack,
                 ),
                 AI1_TIMEOUT,
@@ -1379,17 +1549,20 @@ class ThreeAITrader(base.FibVolumePATrader):
                 self.alert_api_failure("AI-1", "没有可见 JSON")
                 return
             entry_price = float((local_result.details or {}).get("entry_price") or price)
-            parsed = extract_json_object(raw)
-            proposal, reason = finalize_ai_proposal(
-                parsed, entry_price, atr, pack["h1_trend"], pack["m15_trend"], fib,
-                df_m15=df_m15, df_m5=df_m5, regime=pack.get("regime"),
-                regime_location=(local_result.details or {}).get("location"),
-                pa_score=int((local_result.details or {}).get("pa_score") or 0),
-                local_stop=local_result.stop_loss, local_target=local_result.take_profit,
-                setup=(local_result.details or {}).get("setup", "pullback"),
-            )
+            parsed_raw = extract_json_object(raw)
+            parsed, quality_error = normalize_ai1_quality(parsed_raw, pack)
+            proposal, reason = None, quality_error
+            if not quality_error:
+                proposal, reason = finalize_ai_proposal(
+                    parsed, entry_price, atr, pack["h1_trend"], pack["m15_trend"], fib,
+                    df_m15=df_m15, df_m5=df_m5, regime=pack.get("regime"),
+                    regime_location=(local_result.details or {}).get("location"),
+                    pa_score=int((local_result.details or {}).get("pa_score") or 0),
+                    local_stop=local_result.stop_loss, local_target=local_result.take_profit,
+                    setup=(local_result.details or {}).get("setup", "pullback"),
+                )
             ai_confidence = None
-            if isinstance(parsed, dict):
+            if isinstance(parsed, dict) and not quality_error:
                 ai_confidence = normalize_confidence(parsed.get("confidence", 0))
             append_decision_snapshot(
                 decision_id,
@@ -1397,12 +1570,13 @@ class ThreeAITrader(base.FibVolumePATrader):
                 {
                     "raw": raw,
                     "parsed": parsed,
+                    "quality_error": quality_error,
                     "proposal": proposal.to_decision() if proposal is not None else None,
                     "python_reason": reason,
                 },
             )
             action_line = "AI-1动作: %s" % format_ai_action(parsed)
-            confidence_line = "%s，本地置信度: %s (BUY=%s SELL=%s)，AI-1 置信度: %s，门槛: 本地%s / AI%s" % (
+            confidence_line = "%s，本地置信度: %s (BUY=%s SELL=%s)，AI-1质量分: %s，门槛: 本地%s / AI%s" % (
                 action_line,
                 local_result.confidence,
                 local_result.score_buy,
@@ -1415,6 +1589,12 @@ class ThreeAITrader(base.FibVolumePATrader):
                 "AI-1 结果 decision=%s local_action=%s %s: %s | %s"
                 % (decision_id, local_result.action, action_line, reason, confidence_line)
             )
+            if not quality_error:
+                card = parsed["quality_assessment"]
+                base.logger.info("AI-1质量明细 decision=%s version=%s grades=%s reservations=%s wait_basis=%s",
+                                 decision_id, QUALITY_VERSION,
+                                 {key: item["level"] for key, item in card["dimensions"].items()},
+                                 card["reservations"], parsed.get("wait_basis", []))
             if proposal is None:
                 if "观望" not in reason and "未给出" not in reason:
                     self.notify_lines(
@@ -1464,6 +1644,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                 "decision_id": decision_id,
                 "reference_entry_price": entry_price,
                 "entry_price": final_entry_price,
+                "final_plan_feasibility": plan_feasibility(proposal.action, final_entry_price,
+                                                          proposal.stop_loss, proposal.take_profit, pack["live_quote"]),
                 "atr": pack["atr"],
                 "h1_trend": pack["h1_trend"],
                 "m15_trend": pack["m15_trend"],
@@ -1754,8 +1936,9 @@ class ThreeAITrader(base.FibVolumePATrader):
         )
         base.logger.info(
             "AI证据契约=%s，决策快照目录=%s，参考入场=上一根已收盘M15"
-            % ("entry-evidence-v4", AI_DECISION_SNAPSHOT_DIR)
+            % ("entry-evidence-v5", AI_DECISION_SNAPSHOT_DIR)
         )
+        base.logger.info("AI质量评分=%s，等级分值=%s，门槛=%s（非胜率）", QUALITY_VERSION, QUALITY_LEVEL_POINTS, AI_CONFIDENCE)
         base.logger.info("AI URLs: AI1=%s AI2=%s AI3=%s" % (AI1_URL, AI2_URL, AI3_URL))
         base.logger.info(
             "AI keys: AI1=%s AI2=%s AI3=%s"
@@ -2041,7 +2224,7 @@ def run_self_test():
     assert feature_pack["reference_price"]["source"] == "previous_closed_m15_close"
     assert feature_pack["bar_closure"]["source_shift"] == 1
     computed = feature_pack["computed_evidence"]
-    assert computed["contract_version"] == "entry-evidence-v4"
+    assert computed["contract_version"] == "entry-evidence-v5"
     assert computed["closed_bar_source_shift"] == 1
     assert computed["m5_timing"]["buy"]["event_group"] == "m5_confirmation_window"
     assert "obstacles" in computed and "buy" in computed["obstacles"]

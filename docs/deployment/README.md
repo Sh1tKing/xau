@@ -1,6 +1,6 @@
 # 三AI黄金策略服务器部署
 
-此部署包的代码提交以 `MANIFEST.json` 为准，证据版本 `entry-evidence-v4`。
+此部署包的代码提交以 `MANIFEST.json` 为准，证据版本 `entry-evidence-v5`，评分版本 `entry-quality-v1`。
 运行入口是 `xauusd_fib_volume_pa_ai3.py`，它会导入同目录的 `xauusd_fib_volume_pa_trader.py`。
 
 ## 服务器环境
@@ -16,7 +16,7 @@
 3. 双击 `install.cmd`，安装依赖到该文件夹的 `.venv`。安装脚本不会启动交易。
 4. 打开MT5终端。迁移同一账户前，先在原机器停止旧交易脚本，避免两台机器同时管理同一账户。
 5. 双击 `start.cmd` 启动三AI策略。该操作会按 `.env` 的交易开关运行，可能实际下单；只运行一个实例。
-6. 查看启动输出：证据版本应为 `entry-evidence-v4`，门槛应与 `.env` 一致。新日志自动生成在 `xau_fib_pa_logs`。
+6. 查看启动输出：证据版本应为 `entry-evidence-v5`、质量评分应为 `entry-quality-v1`，门槛应与 `.env` 一致。AI75现在比较五项质量总分（非胜率），本地55仍是本地评分门槛。新日志自动生成在 `xau_fib_pa_logs`，每次AI结果后可查看质量明细与观望依据。
 
 退出脚本使用控制台 `Ctrl+C`。此包是前台运行方式，没有注册Windows服务或开机任务。关闭控制台、注销Windows用户或服务器重启会中断运行，需自行重新启动。
 
