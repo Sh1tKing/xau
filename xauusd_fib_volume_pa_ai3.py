@@ -225,6 +225,20 @@ def normalize_confidence(value):
     return int(max(0, min(100, round(number))))
 
 
+def format_ai_action(payload):
+    """Make the raw AI-1 action explicit in logs and notifications."""
+    if not isinstance(payload, dict):
+        return "未知"
+    action = str(payload.get("action", "")).strip().lower()
+    if action == "buy":
+        return "BUY"
+    if action == "sell":
+        return "SELL"
+    if action == "no":
+        return "观望"
+    return "无效"
+
+
 def extract_json_object(text):
     if not text or not str(text).strip():
         return None
@@ -942,7 +956,9 @@ class ThreeAITrader(base.FibVolumePATrader):
             ai_confidence = None
             if isinstance(parsed, dict):
                 ai_confidence = normalize_confidence(parsed.get("confidence", 0))
-            confidence_line = "本地置信度: %s (BUY=%s SELL=%s)，AI-1 置信度: %s，门槛: 本地%s / AI%s" % (
+            action_line = "AI-1动作: %s" % format_ai_action(parsed)
+            confidence_line = "%s，本地置信度: %s (BUY=%s SELL=%s)，AI-1 置信度: %s，门槛: 本地%s / AI%s" % (
+                action_line,
                 local_result.confidence,
                 local_result.score_buy,
                 local_result.score_sell,
@@ -951,8 +967,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI_CONFIDENCE,
             )
             base.logger.info(
-                "AI-1 结果 decision=%s local_action=%s: %s | %s"
-                % (decision_id, local_result.action, reason, confidence_line)
+                "AI-1 结果 decision=%s local_action=%s %s: %s | %s"
+                % (decision_id, local_result.action, action_line, reason, confidence_line)
             )
             if proposal is None:
                 if "观望" not in reason and "未给出" not in reason:
@@ -1386,6 +1402,11 @@ def run_self_test():
     assert fenced["action"] == "buy", fenced
     assert normalize_confidence(0.8) == 80
     assert normalize_confidence(75) == 75
+    assert format_ai_action({"action": "no"}) == "观望"
+    assert format_ai_action({"action": "buy"}) == "BUY"
+    assert format_ai_action({"action": "sell"}) == "SELL"
+    assert format_ai_action({"action": "other"}) == "无效"
+    assert format_ai_action(None) == "未知"
     assert not task_is_current(1, 10, 2, 10)
     assert task_is_current(2, 10, 2, 10)
 
