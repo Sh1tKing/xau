@@ -114,6 +114,16 @@ OBSTACLE_EVIDENCE_INSTRUCTIONS = (
 )
 AI1_INSTRUCTIONS += OBSTACLE_EVIDENCE_INSTRUCTIONS
 AI2_INSTRUCTIONS += OBSTACLE_EVIDENCE_INSTRUCTIONS
+PRICE_ACTION_INSTRUCTIONS = (
+    "价格行为必须按computed_evidence.price_action中的M15/M5、方向及bar_time分别核对。"
+    "本地details.price_action是M15评分及可选M5加分的汇总，不是仅指M5。M15触发而M5无触发可以同时成立，不得写入fact_conflicts。"
+    "false_break使用本周期最新已收盘K与前6根极值比较：sell为high>prior_extreme且close<prior_extreme，buy镜像；"
+    "这条本地规则不要求sell收阴或长上影，也不要求buy收阳或长下影。不能因K线颜色或M5零分宣称M15假突破不存在。"
+    "M15或M5已确认的触发均须纳入评估，不额外要求两周期同时触发；H1方向、setup位置和风险限制仍须满足。"
+    "可结合相反证据降低质量评价，但必须区分已成立的触发事实与质量意见，不得把质量疑虑写成事实冲突。"
+)
+AI1_INSTRUCTIONS += PRICE_ACTION_INSTRUCTIONS
+AI2_INSTRUCTIONS += PRICE_ACTION_INSTRUCTIONS
 AI3_INSTRUCTIONS = (
     "你是持仓监控 AI-3。只能选择 hold、tighten_sl 或 close。"
     "禁止放宽止损，禁止加仓，禁止新开仓。tighten_sl 必须比当前止损更有利，并给出绝对价格。"
@@ -442,6 +452,19 @@ def _obstacle_candidates(df_m15, df_m5, fib, breakout, price, action):
     return sorted(candidates, key=lambda item: abs(float(item["price"]) - float(price)))
 
 
+def _price_action_evidence(df, timeframe, action, atr):
+    facts = {}
+    score, description = base.classify_price_action(df, action, atr, evidence=facts)
+    facts.update({"timeframe": timeframe, "score": int(score), "description": description,
+                  "bar_time": int(df.iloc[-1]["time"]) if df is not None and len(df) and "time" in df.columns else None,
+                  "bars": bars_for_prompt(df, 8),
+                  "prior_bar_times": bar_times_for_prompt(df.iloc[-7:-1], 6) if df is not None else [],
+                  "source": "classify_price_action"})
+    if facts.get("checks", {}).get("liquidity_sweep"):
+        facts["sweep_input_bars"] = bars_for_prompt(df, len(df))
+    return facts
+
+
 def build_computed_entry_evidence(df_m15, df_h1, df_m5, local_result, fib, atr, price):
     """Build deterministic facts; this function never changes local scores or decisions."""
     details = local_result.details or {}
@@ -450,14 +473,18 @@ def build_computed_entry_evidence(df_m15, df_h1, df_m5, local_result, fib, atr, 
     setup = details.get("setup", "")
     m5_atr = base.calculate_atr(df_m5)
     timing = {}
+    price_action = {"M15": {}, "M5": {}}
     for action in candidate_actions:
+        price_action["M15"][action] = _price_action_evidence(df_m15, "M15", action, atr)
+        price_action["M5"][action] = _price_action_evidence(df_m5, "M5", action, m5_atr)
         extreme = base.recent_m5_extreme(df_m5, action)
         anchor = base.m5_rejection_anchor(df_m5, action, atr)
         buffer = base.stop_buffer(atr)
         protected_stop = None
         if extreme is not None:
             protected_stop = extreme + buffer if action == "sell" else extreme - buffer
-        m5_pa, m5_pa_text = (base.classify_price_action(df_m5, action, m5_atr) if df_m5 is not None and len(df_m5) >= 3 else (0, "数据不足"))
+        m5_pa = price_action["M5"][action]["score"]
+        m5_pa_text = price_action["M5"][action]["description"]
         blocked, blocked_text = base.m5_blocks_entry(df_m5, action)
         timing[action] = {
             "bars": bars_for_prompt(df_m5, 3),
@@ -476,7 +503,8 @@ def build_computed_entry_evidence(df_m15, df_h1, df_m5, local_result, fib, atr, 
     range_edge = _range_edge_evidence(df_m15, atr, candidate_actions[0]) if setup == "range_edge" else {"available": False, "reason": "setup_not_range_edge"}
     obstacles = {action: _obstacle_candidates(df_m15, df_m5, fib, breakout, price, action) for action in candidate_actions}
     return {
-        "contract_version": "entry-evidence-v3",
+        "contract_version": "entry-evidence-v4",
+        "price_action": price_action,
         "source": "python_local_functions",
         "closed_bar_source_shift": 1,
         "candidate_actions": candidate_actions,
@@ -1726,7 +1754,7 @@ class ThreeAITrader(base.FibVolumePATrader):
         )
         base.logger.info(
             "AI证据契约=%s，决策快照目录=%s，参考入场=上一根已收盘M15"
-            % ("entry-evidence-v3", AI_DECISION_SNAPSHOT_DIR)
+            % ("entry-evidence-v4", AI_DECISION_SNAPSHOT_DIR)
         )
         base.logger.info("AI URLs: AI1=%s AI2=%s AI3=%s" % (AI1_URL, AI2_URL, AI3_URL))
         base.logger.info(
@@ -2013,7 +2041,7 @@ def run_self_test():
     assert feature_pack["reference_price"]["source"] == "previous_closed_m15_close"
     assert feature_pack["bar_closure"]["source_shift"] == 1
     computed = feature_pack["computed_evidence"]
-    assert computed["contract_version"] == "entry-evidence-v3"
+    assert computed["contract_version"] == "entry-evidence-v4"
     assert computed["closed_bar_source_shift"] == 1
     assert computed["m5_timing"]["buy"]["event_group"] == "m5_confirmation_window"
     assert "obstacles" in computed and "buy" in computed["obstacles"]

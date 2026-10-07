@@ -32,6 +32,26 @@ def mirror(frame):
 
 
 class EntryEvidenceTests(unittest.TestCase):
+    def test_m15_false_break_can_coexist_with_m5_no_trigger(self):
+        m15 = bars([(4118, 4121.39, 4116, 4119, 100)] * 7 +
+                   [(4116.99, 4121.77, 4116.28, 4121.02, 100)])
+        m5 = bars([(4119.5, 4122, 4118, 4120, 100)] * 7 +
+                  [(4119.97, 4121.77, 4119.62, 4121.02, 100)], step=300)
+        for action, a, b in [('sell', m15, m5), ('buy', mirror(m15), mirror(m5))]:
+            first = ai._price_action_evidence(a, 'M15', action, 5.77)
+            second = ai._price_action_evidence(b, 'M5', action, 2.0)
+            self.assertTrue(first['checks']['false_break'])
+            self.assertEqual(first['score'], 20)
+            self.assertEqual(second['score'], 0)
+            self.assertEqual(first['prior_bar_times'], list(a.time.iloc[-7:-1]))
+            self.assertEqual((first['score'], first['description']), base.classify_price_action(a, action, 5.77))
+
+    def test_price_action_insufficient_data_is_unknown(self):
+        facts = ai._price_action_evidence(None, 'M5', 'sell', 0)
+        self.assertFalse(facts['available'])
+        self.assertIsNone(facts['bar_time'])
+        self.assertNotIn('checks', facts)
+
     def breakout(self, touch):
         return bars([(100, 101, 99, 100, 100)] * 40 + [
             (100, 106, 99.5, 103, 90),

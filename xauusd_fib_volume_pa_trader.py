@@ -831,7 +831,10 @@ def detect_liquidity_sweep(df: pd.DataFrame, action: str, atr: float) -> Tuple[b
             return True, "M15扫高点后收回"
     return False, ""
 
-def classify_price_action(df: pd.DataFrame, action: str, atr: float) -> Tuple[int, str]:
+def classify_price_action(df: pd.DataFrame, action: str, atr: float, evidence=None) -> Tuple[int, str]:
+    if evidence is not None:
+        evidence.clear()
+        evidence.update({"available": False, "action": action})
     if df is None or len(df) < 8:
         return 0, "价格行为样本不足"
 
@@ -909,6 +912,21 @@ def classify_price_action(df: pd.DataFrame, action: str, atr: float) -> Tuple[in
         score += 22
         notes.append(sweep_note)
 
+    if evidence is not None and action in ("buy", "sell"):
+        evidence.update({
+            "available": True,
+            "atr": float(atr),
+            "min_body": float(min_body),
+            "prior_extreme": float(prior_low if action == "buy" else prior_high),
+            "prior_extreme_field": "low" if action == "buy" else "high",
+            "checks": {
+                "engulfing": bool(engulfing),
+                "wick_rejection": bool(lower_rejection if action == "buy" else upper_rejection),
+                "false_break": bool(false_break),
+                "previous_bar_break_confirm": bool(retest_confirm),
+                "liquidity_sweep": bool(swept),
+            },
+        })
     return min(score, 30), "，".join(notes) if notes else "无明确价格行为触发"
 
 
