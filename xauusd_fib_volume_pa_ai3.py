@@ -66,6 +66,8 @@ AI_HTTP_RETRIES = max(1, env_int("FIB_PA_AI_HTTP_RETRIES", 5))
 AI_HTTP_RETRY_PAUSE = 2.0
 API_ALERT_COOLDOWN = env_int("FIB_PA_AI_ALERT_COOLDOWN", 900)
 AI3_STATE_FILE = os.path.join(base.LOG_DIR, "ai3_position_state.json")
+AI_DECISION_SNAPSHOT_DIR = os.path.join(base.LOG_DIR, "ai_decisions")
+_SNAPSHOT_LOCK = threading.RLock()
 
 base.MAGIC = AI_MAGIC
 base.ENABLE_TRADING = AI_ENABLE_TRADING
@@ -77,25 +79,29 @@ AI1_INSTRUCTIONS = (
     "pullback：tight_range 时 action 必须是 no；wide_range 只做边缘且要有拒绝K线。"
     "range_edge：只在 24 根 M15 区间的边缘、有拒绝K线时做，中轴必须是 no，目标看区间另一侧。"
     "breakout：必须是放量突破后回踩箱体边缘并守住；没有回踩的追突破必须是 no。breakout 不受 tight_range 限制。"
-    f"方向只看 H1。M15 负责斐波那契、成交量和价格行为。M5 不单独决定方向；最近3根M5的拒绝极值加缓冲后仍不超过{SL_CAP}美元时，可以用该极值进场。H4 不是否决条件。"
+    f"方向只看 H1。M15 负责斐波那契、成交量和价格行为。M5 不单独决定方向，但在H1方向已经允许时，结构附近已收盘的M5拒绝/吞没可以完成入场时机确认；最近3根M5的拒绝极值加缓冲后仍不超过{SL_CAP}美元时，可以用该极值保护止损。H4 不是否决条件。"
     "M15 与 H1 暂时反向是回撤，不是冲突，不能因此 no。"
     "H1 同向只表示允许的交易方向，不代表当前存在入场信号。分别检查方向、setup结构有效性、已收盘K线确认、目标前的障碍。"
-    "先核实事实，再依次说明在哪里、哪根已收盘K线证明触发、什么价位和周期使理由失效、目标前有什么障碍、最强反证是什么。"
-    "pullback 的旧波段已被收盘破坏时，不能只凭H1同向把破坏解释为普通回撤；只有给定数据支持新结构及新的确认才可提出交易，否则 no。单根影线刺穿后收回不等于收盘破坏。"
+    "输入中的computed_evidence和bar_time/price是Python从同一批已收盘K线计算的事实，优先引用它们；不要重算出另一套Fib、箱体、量能或影线数值。先核实事实，再依次说明在哪里、哪根已收盘K线证明触发、什么价位和周期使理由失效、目标前有什么障碍、最强反证是什么。"
+    "如果事实字段互相矛盾，返回no并在fact_conflicts写明冲突；如果关键字段缺失，返回no并在unknowns写明未知，不得猜测。"
+    "pullback 的旧波段已被收盘破坏时，不能只凭H1同向把破坏解释为普通回撤；只有给定数据支持新结构及新的确认才可提出交易，否则 no。单根影线刺穿后收回不等于收盘破坏。Fib核心区必须按computed_evidence给出的容差和最近3根探入确认解释，不要把收盘略低于38.2或略高于61.8自动当成结构失效。"
+    "breakout 必须引用突破K和后续回踩K的bar_time。突破K自己的影线不是后续回踩；回踩已经守住后，不要因为同一次推动在M15和M5留下多个相近极值就把确认清零。原箱体边缘收盘失守、出现独立的反向结构并收盘确认，或事实明确显示形态失效时，才重新判定。"
+    "障碍必须引用computed_evidence.obstacles中的price、timeframe、bar_time、source和event_group。相同推动在多个周期的映射只算同一事件；单根过程极值不能自动升级为独立重要障碍。仍需在未克服的重要障碍前有1.5RR空间，不能为了开单删除真正的障碍。"
     "止盈必须说明给定数据中的目标依据和中间阻力/支撑，不能只为凑够RR把目标延远。确认量偏弱是质量扣分，不可编造放量确认。确认尚未完成、或第一个重要障碍前没有1.5RR空间时，返回no并写明等待条件。"
     "confidence 是对所选action的确信程度，不是胜率；不要复制本地分，不要为了通过门槛抬分。reasoning依次说明setup证据、失效位置、目标依据和主要反证；证据缺失明确写未知。"
-    f"M15影线离收盘价超过{SL_CAP}美元时，如果最近3根M5的拒绝极值仍在{SL_CAP}美元内，止损放在该M5极值外；禁止把更远的影线止损改小。"
+    f"M5保护止损是否可用不取决于M15影线是否超过{SL_CAP}美元：只要它保护当前触发结构、覆盖最近3根M5极值和缓冲、并且距离参考入场不超过{SL_CAP}美元，就可以使用。更远的结构止损超过上限时必须no，禁止把止损改进影线里面。"
     f"H1 不支持该方向、止损超过 {SL_CAP} 美元、价格偏离 M15 EMA21 超过 1.5 ATR、止损止盈方向错误或盈亏比低于 1.5 时，action 必须是 no。"
-    "stop_loss 和 take_profit 用绝对价格。最终回复只能是一个 JSON 对象，不要 Markdown。"
+    "stop_loss 和 take_profit 用绝对价格。最终回复只能是一个 JSON 对象，不要 Markdown；字段为action、confidence、stop_loss、take_profit、reasoning、trigger_evidence、invalidation、target_basis、fact_conflicts数组、unknowns数组。"
 )
 AI2_INSTRUCTIONS = (
     "你是独立风控审核官 AI-2。不能提出新交易，只能 APPROVE 或 REJECT。"
     f"只有明确缺陷才能 REJECT：setup 为 pullback 却处在 tight_range、range_edge 却在区间中轴、breakout 没有回踩箱体就追单、止损方向错误、盈亏比低于 1.5、H1 不支持该方向、止损超过 {SL_CAP} 美元、追价超过 1.5 ATR、止损或止盈缺失、关键数据缺失、订单自相矛盾。"
     "M15 与 H1 暂时反向、轻微背离、逆 H4、波动大或感觉不确定，都不能单独 REJECT。"
-    "根据market_evidence独立核实，不要把AI-1的reasoning当作已核实事实。明确的setup结构失效且没有新结构确认、声称回踩/放量但K线数据反驳，也属于订单自相矛盾，应REJECT并指出对应证据。单根影线收回不能当作收盘破坏。"
+    "根据market_evidence及computed_evidence独立核实，不要把AI-1的reasoning当作已核实事实。明确的setup结构失效且没有新结构确认、声称回踩/放量但K线数据反驳，也属于订单自相矛盾，应REJECT并指出对应bar_time、price和source。单根影线收回不能当作收盘破坏。"
+    "核对Fib时使用Python给出的容差、recent_probe和confirmation_extension；核对M5时机时，M5可以在H1方向已经确定后提供入场确认，但不能改变方向。核对障碍时按event_group去重：同一次突破在M15/M5的过程极值不能重复算成多个独立硬障碍，真正独立的反向结构仍必须保留。"
     "仅仅本地action=no、量能普通、ADX偏弱或RR接近合格下限不能单独否决；必须区分质量保留意见与可核实的硬伤。数据不足以核实必要条件时指出缺失字段，不得补造事实。"
     "审核Python调整后的最终方案，不审核已经被替换的AI-1原始止损或止盈；如果最终目标与AI理由不一致，要求给出可核实的调整依据，否则REJECT。"
-    "最终回复只能是一个 JSON 对象，不要 Markdown。"
+    "最终回复只能是一个 JSON 对象，不要 Markdown；字段为decision、defects数组、reasoning、fact_conflicts数组。APPROVE时defects和fact_conflicts必须为空。"
 )
 AI3_INSTRUCTIONS = (
     "你是持仓监控 AI-3。只能选择 hold、tighten_sl 或 close。"
@@ -152,6 +158,280 @@ def fib_payload(fib):
     }
 
 
+def _rounded_number(value, digits=2):
+    try:
+        return round(float(value), digits)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bar_payload(row, role=None):
+    """Return one JSON-safe candle record with an optional evidence role."""
+    if row is None:
+        return None
+    result = {
+        "time": int(getattr(row, "time", 0) or 0),
+        "open": _rounded_number(getattr(row, "open", 0.0)),
+        "high": _rounded_number(getattr(row, "high", 0.0)),
+        "low": _rounded_number(getattr(row, "low", 0.0)),
+        "close": _rounded_number(getattr(row, "close", 0.0)),
+        "tick_volume": _rounded_number(getattr(row, "tick_volume", 0.0)),
+    }
+    if role:
+        result["role"] = role
+    return result
+
+
+def _extreme_bar(df, column, mode="min", role=None):
+    if df is None or len(df) == 0 or column not in df.columns:
+        return None
+    try:
+        index = df[column].idxmin() if mode == "min" else df[column].idxmax()
+        return _bar_payload(df.loc[index], role=role)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _closest_bar(df, column, target, role=None):
+    if df is None or len(df) == 0 or column not in df.columns or target is None:
+        return None
+    try:
+        index = (df[column].astype(float) - float(target)).abs().idxmin()
+        return _bar_payload(df.loc[index], role=role)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _fib_evidence(df_m15, fib, atr, price):
+    if fib is None or not fib.levels:
+        return {"available": False, "reason": "no_valid_entry_fib"}
+    levels = {key: _rounded_number(value) for key, value in fib.levels.items()}
+    tolerance = max(0.35 * float(atr), 0.5)
+    if fib.direction == "bull":
+        core_low = levels["61.8"] - tolerance
+        core_high = levels["38.2"] + tolerance
+        deep_low = levels["78.6"] - tolerance
+        probe = float(df_m15["low"].tail(3).min()) if df_m15 is not None and len(df_m15) >= 3 else None
+        probe_bar = _extreme_bar(df_m15.tail(3), "low", "min", "recent_probe") if probe is not None else None
+    else:
+        core_low = levels["38.2"] - tolerance
+        core_high = levels["61.8"] + tolerance
+        deep_high = levels["78.6"] + tolerance
+        probe = float(df_m15["high"].tail(3).max()) if df_m15 is not None and len(df_m15) >= 3 else None
+        probe_bar = _extreme_bar(df_m15.tail(3), "high", "max", "recent_probe") if probe is not None else None
+    fib_result = {
+        "available": True,
+        "direction": fib.direction,
+        "swing_low": _rounded_number(fib.swing_low),
+        "swing_high": _rounded_number(fib.swing_high),
+        "swing_low_bar": _closest_bar(df_m15, "low", fib.swing_low, "fib_swing_low"),
+        "swing_high_bar": _closest_bar(df_m15, "high", fib.swing_high, "fib_swing_high"),
+        "levels": levels,
+        "tolerance": _rounded_number(tolerance),
+        "core_zone": {"low": _rounded_number(core_low), "high": _rounded_number(core_high)},
+        "recent_probe": _rounded_number(probe),
+        "recent_probe_bar": probe_bar,
+        "reference_price": _rounded_number(price),
+        "reference_in_core": bool(core_low <= price <= core_high),
+    }
+    if fib.direction == "bull":
+        fib_result["deep_zone"] = {"low": _rounded_number(deep_low), "high": _rounded_number(core_low)}
+        fib_result["probe_in_core"] = bool(probe is not None and core_low <= probe <= core_high)
+        fib_result["probe_in_deep"] = bool(probe is not None and deep_low <= probe < core_low)
+    else:
+        fib_result["deep_zone"] = {"low": _rounded_number(core_high), "high": _rounded_number(deep_high)}
+        fib_result["probe_in_core"] = bool(probe is not None and core_low <= probe <= core_high)
+        fib_result["probe_in_deep"] = bool(probe is not None and core_high < probe <= deep_high)
+    fib_result["confirmation_extension"] = _rounded_number(max(0.8 * float(atr), 1.2))
+    return fib_result
+
+
+def _breakout_evidence(df_m15, atr, action):
+    """Expose the same breakout window used by base.score_breakout without rescoring it."""
+    if df_m15 is None or len(df_m15) < base.BREAKOUT_BOX + 26:
+        return {"available": False, "reason": "insufficient_breakout_bars"}
+    work = df_m15.reset_index(drop=True)
+    box = work.iloc[-(base.BREAKOUT_BOX + 4):-4]
+    recent = work.iloc[-4:]
+    low = float(box["low"].min())
+    high = float(box["high"].max())
+    edge = high if action == "buy" else low
+    sign = 1 if action == "buy" else -1
+    pushes = recent.iloc[:-1]
+    broke = pushes[sign * (pushes["close"] - edge) > 0.1 * float(atr)]
+    volume_base = float(work["tick_volume"].iloc[-24:-4].mean())
+    result = {
+        "available": True,
+        "direction": action,
+        "box_low": _rounded_number(low),
+        "box_high": _rounded_number(high),
+        "box_atr": _rounded_number((high - low) / float(atr)) if atr else None,
+        "box_edge": _rounded_number(edge),
+        "box_bar_times": bar_times_for_prompt(box, len(box)),
+        "breakout_bar": None,
+        "retest_bars": [],
+        "retest_probe": None,
+        "retest_distance_to_edge": None,
+        "retest_holds": False,
+        "breakout_volume_baseline": _rounded_number(volume_base),
+        "breakout_volume_ratio": None,
+        "breakout_closed": bool(not broke.empty),
+        "same_event_group": "breakout_sequence",
+    }
+    if broke.empty:
+        return result
+    first_index = int(broke.index[0])
+    breakout_row = recent.loc[first_index]
+    result["breakout_bar"] = _bar_payload(breakout_row, "breakout_close")
+    if volume_base > 0:
+        result["breakout_volume_ratio"] = _rounded_number(float(broke["tick_volume"].max()) / volume_base)
+    after = recent.loc[first_index + 1:]
+    result["retest_bars"] = [_bar_payload(row, "post_breakout_retest") for row in after.itertuples(index=False)]
+    if not after.empty:
+        probe = float(after["low"].min()) if action == "buy" else float(after["high"].max())
+        result["retest_probe"] = _rounded_number(probe)
+        result["retest_distance_to_edge"] = _rounded_number(abs(probe - edge))
+        result["retest_holds"] = bool(sign * (float(recent.iloc[-1]["close"]) - edge) > 0)
+    return result
+
+
+def _range_edge_evidence(df_m15, atr, action):
+    if df_m15 is None or len(df_m15) < base.RANGE_LOOKBACK:
+        return {"available": False, "reason": "insufficient_range_bars"}
+    window = df_m15.tail(base.RANGE_LOOKBACK)
+    low = float(window["low"].min())
+    high = float(window["high"].max())
+    width = max(high - low, 1e-9)
+    price = float(df_m15["close"].iloc[-1])
+    location = (price - low) / width
+    edge_location = location if action == "buy" else 1.0 - location
+    return {
+        "available": True,
+        "direction": action,
+        "low": _rounded_number(low),
+        "high": _rounded_number(high),
+        "width_atr": _rounded_number(width / float(atr)) if atr else None,
+        "location": _rounded_number(location),
+        "edge_location": _rounded_number(edge_location),
+        "window_bar_times": bar_times_for_prompt(window, len(window)),
+        "low_bar": _extreme_bar(window, "low", "min", "range_low"),
+        "high_bar": _extreme_bar(window, "high", "max", "range_high"),
+    }
+
+
+def _obstacle_candidates(df_m15, df_m5, fib, breakout, price, action):
+    """Return candidate obstacles with source/time/event metadata for AI review."""
+    target_side = (lambda value: value < price) if action == "sell" else (lambda value: value > price)
+    candidates = []
+
+    def add(value, source, timeframe, bar_time=None, event_group=None, classification="unknown"):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return
+        if not target_side(value):
+            return
+        for existing in candidates:
+            if abs(existing["price"] - value) <= 0.01:
+                existing.setdefault("observed", []).append({
+                    "source": source,
+                    "timeframe": timeframe,
+                    "bar_time": bar_time,
+                    "event_group": event_group,
+                })
+                return
+        candidates.append({
+            "price": _rounded_number(value),
+            "source": source,
+            "timeframe": timeframe,
+            "bar_time": int(bar_time) if bar_time else None,
+            "event_group": event_group or "unknown_event",
+            "classification": classification,
+            "observed": [],
+        })
+
+    if fib is not None:
+        swing_value = fib.swing_low if action == "sell" else fib.swing_high
+        swing_field = "low" if action == "sell" else "high"
+        swing_ref = _closest_bar(df_m15, swing_field, swing_value, "fib_swing_endpoint")
+        add(swing_value, "fib_swing_endpoint", "M15", swing_ref.get("time") if swing_ref else None, "entry_fib_structure", "independent_structure")
+
+    if breakout and breakout.get("available"):
+        edge = breakout.get("box_edge")
+        add(edge, "breakout_box_edge", "M15", None, "breakout_box", "setup_boundary")
+        breakout_time = (breakout.get("breakout_bar") or {}).get("time")
+        for field, mode in (("low", "min"), ("high", "max")):
+            ref = _extreme_bar(df_m15.tail(4), field, mode, "post_breakout_extreme")
+            if ref:
+                group = "breakout_sequence" if breakout_time and ref["time"] >= breakout_time else "recent_m15_window"
+                add(ref[field], "post_breakout_extreme", "M15", ref["time"], group, "process_extreme")
+
+    if df_m15 is not None and len(df_m15):
+        recent = df_m15.tail(8)
+        field = "low" if action == "sell" else "high"
+        mode = "min" if action == "sell" else "max"
+        ref = _extreme_bar(recent, field, mode, "recent_m15_extreme")
+        if ref:
+            add(ref[field], "recent_m15_extreme", "M15", ref["time"], "recent_m15_window", "recent_structure")
+
+    if df_m5 is not None and len(df_m5):
+        recent_m5 = df_m5.tail(3)
+        field = "low" if action == "sell" else "high"
+        mode = "min" if action == "sell" else "max"
+        ref = _extreme_bar(recent_m5, field, mode, "m5_process_extreme")
+        if ref:
+            add(ref[field], "m5_process_extreme", "M5", ref["time"], "m5_confirmation_window", "process_extreme")
+    return sorted(candidates, key=lambda item: abs(float(item["price"]) - float(price)))
+
+
+def build_computed_entry_evidence(df_m15, df_h1, df_m5, local_result, fib, atr, price):
+    """Build deterministic facts; this function never changes local scores or decisions."""
+    details = local_result.details or {}
+    h1_trend = base.trend_from_ema(df_h1, 50)
+    candidate_actions = ["buy"] if h1_trend == "bull" else ["sell"] if h1_trend == "bear" else ["buy", "sell"]
+    setup = details.get("setup", "")
+    m5_atr = base.calculate_atr(df_m5)
+    timing = {}
+    for action in candidate_actions:
+        extreme = base.recent_m5_extreme(df_m5, action)
+        anchor = base.m5_rejection_anchor(df_m5, action, atr)
+        buffer = base.stop_buffer(atr)
+        protected_stop = None
+        if extreme is not None:
+            protected_stop = extreme + buffer if action == "sell" else extreme - buffer
+        m5_pa, m5_pa_text = (base.classify_price_action(df_m5, action, m5_atr) if df_m5 is not None and len(df_m5) >= 3 else (0, "数据不足"))
+        blocked, blocked_text = base.m5_blocks_entry(df_m5, action)
+        timing[action] = {
+            "bars": bars_for_prompt(df_m5, 3),
+            "extreme": _rounded_number(extreme),
+            "protected_stop": _rounded_number(protected_stop),
+            "stop_buffer": _rounded_number(buffer),
+            "risk_from_reference": _rounded_number(base.directional_stop_distance(action, price, protected_stop)) if protected_stop is not None else None,
+            "anchor": {"entry": _rounded_number(anchor[0]), "extreme": _rounded_number(anchor[1])} if anchor else None,
+            "price_action_score": int(m5_pa),
+            "price_action": m5_pa_text,
+            "blocked": bool(blocked),
+            "blocked_reason": blocked_text,
+            "event_group": "m5_confirmation_window",
+        }
+    breakout = _breakout_evidence(df_m15, atr, candidate_actions[0]) if setup == "breakout" else {"available": False, "reason": "setup_not_breakout"}
+    range_edge = _range_edge_evidence(df_m15, atr, candidate_actions[0]) if setup == "range_edge" else {"available": False, "reason": "setup_not_range_edge"}
+    obstacles = {action: _obstacle_candidates(df_m15, df_m5, fib, breakout, price, action) for action in candidate_actions}
+    return {
+        "contract_version": "entry-evidence-v2",
+        "source": "python_local_functions",
+        "closed_bar_source_shift": 1,
+        "candidate_actions": candidate_actions,
+        "setup": setup,
+        "fib": _fib_evidence(df_m15, fib, atr, price),
+        "m5_timing": timing,
+        "breakout": breakout,
+        "range_edge": range_edge,
+        "obstacles": obstacles,
+        "quote_is_snapshot_only": True,
+    }
+
+
 def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_id=None):
     atr = base.calculate_atr(df_m15)
     price = float(df_m15["close"].iloc[-1])
@@ -166,6 +446,13 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
         "price": round(price, 2),
         "decision_id": decision_id,
         "bars_are_closed": True,
+        "bar_closure": {
+            "source_shift": 1,
+            "m15_last_closed_bar_time": reference_bar_time,
+            "m5_last_closed_bar_time": int(df_m5["time"].iloc[-1]) if "time" in df_m5.columns else 0,
+            "h1_last_closed_bar_time": int(df_h1["time"].iloc[-1]) if "time" in df_h1.columns else 0,
+            "live_quote_is_not_a_bar": True,
+        },
         "reference_price": {
             "price": round(price, 2),
             "source": "previous_closed_m15_close",
@@ -190,6 +477,9 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
         "score_sell": local_result.score_sell,
         "local_reasoning": local_result.reasoning,
         "details": local_result.details,
+        "computed_evidence": build_computed_entry_evidence(
+            df_m15, df_h1, df_m5, local_result, fib, atr, price
+        ),
         "rules": {
             "h1_sets_direction": True,
             "m15_opposite_is_pullback": True,
@@ -447,8 +737,18 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
         action = "no"
     confidence = normalize_confidence(payload.get("confidence", 0))
     reasoning = str(payload.get("reasoning", "")).strip()
+    fact_conflicts = payload.get("fact_conflicts") or []
+    if not isinstance(fact_conflicts, list):
+        fact_conflicts = [str(fact_conflicts)]
+    fact_conflicts = [str(item).strip() for item in fact_conflicts if str(item).strip()]
+    unknowns = payload.get("unknowns") or []
+    if not isinstance(unknowns, list):
+        unknowns = [str(unknowns)]
+    unknowns = [str(item).strip() for item in unknowns if str(item).strip()]
     if action == "no":
         return None, reasoning or "AI-1 选择观望"
+    if fact_conflicts:
+        return None, "AI-1事实冲突，拒绝猜测: " + "；".join(fact_conflicts[:4])
     required_evidence = {
         "trigger_evidence": payload.get("trigger_evidence"),
         "invalidation": payload.get("invalidation"),
@@ -487,6 +787,7 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
     else:
         stop_loss, take_profit = 0.0, 0.0
 
+    entry_price_source = "previous_closed_m15_close"
     if not prices_are_valid(action, entry, stop_loss, take_profit):
         replaced = False
         if prices_are_valid(action, entry, local_stop, local_target):
@@ -500,6 +801,7 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
             if timed is None:
                 return None, "Python拒绝: 结构止损超过小资金上限 %.2f" % base.MAX_SL_ABS
             entry, setup_price = timed
+            entry_price_source = "m5_rejection_fallback_close"
             stop_loss, take_profit = base.calculate_targets(action, entry, atr, fib, setup_price)
             if not prices_are_valid(action, entry, stop_loss, take_profit):
                 return None, "Python拒绝: 结构止损超过小资金上限 %.2f" % base.MAX_SL_ABS
@@ -548,6 +850,9 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
             "trigger_evidence": required_evidence["trigger_evidence"],
             "invalidation": required_evidence["invalidation"],
             "target_basis": required_evidence["target_basis"],
+            "fact_conflicts": fact_conflicts,
+            "unknowns": unknowns,
+            "entry_price_source": entry_price_source,
         },
     )
     return result, full_reason
@@ -558,10 +863,17 @@ def ai2_allows(payload):
     defects = payload.get("defects") or []
     if not isinstance(defects, list):
         defects = [str(defects)]
+    fact_conflicts = payload.get("fact_conflicts") or []
+    if not isinstance(fact_conflicts, list):
+        fact_conflicts = [str(fact_conflicts)]
+    fact_conflicts = [str(item).strip() for item in fact_conflicts if str(item).strip()]
     reasoning = str(payload.get("reasoning", "")).strip()
     if decision != "APPROVE":
         defect_text = "，".join(str(item) for item in defects) if defects else "未列明"
         return False, "AI-2 拒绝: %s，缺陷=%s。%s" % (decision or "EMPTY", defect_text, reasoning)
+    if defects or fact_conflicts:
+        defect_text = "，".join(str(item) for item in defects + fact_conflicts)
+        return False, "AI-2拒绝: APPROVE同时列出缺陷或事实冲突: %s" % (defect_text or "未列明")
     if not reasoning:
         return False, "AI-2拒绝: 审核理由缺失"
     return True, reasoning
@@ -573,6 +885,27 @@ def task_is_current(seq, bar_time, current_seq, current_bar):
 
 def prompt_json(title, payload):
     return title + "\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def append_decision_snapshot(decision_id, stage, payload):
+    """Persist redacted decision evidence without ever writing credentials."""
+    record = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "decision_id": str(decision_id),
+        "stage": str(stage),
+        "payload": payload,
+    }
+    try:
+        os.makedirs(AI_DECISION_SNAPSHOT_DIR, exist_ok=True)
+        path = os.path.join(AI_DECISION_SNAPSHOT_DIR, "%s.jsonl" % datetime.now().strftime("%Y-%m-%d"))
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":"), default=str)
+        with _SNAPSHOT_LOCK:
+            with open(path, "a", encoding="utf-8") as snapshot_file:
+                snapshot_file.write(line + "\n")
+                snapshot_file.flush()
+    except (OSError, TypeError, ValueError) as exc:
+        base.logger.warning("决策证据快照保存失败 stage=%s: %s: %s", stage, type(exc).__name__, exc)
+
 
 class ThreeAITrader(base.FibVolumePATrader):
     def __init__(self):
@@ -665,6 +998,9 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "trigger_evidence": None,
                     "invalidation": None,
                     "target_basis": None,
+                    "fact_conflicts": None,
+                    "unknowns": None,
+                    "entry_price_source": None,
                     "coverage": "since_restart",
                     "coverage_started_at": time.time(),
                 }
@@ -704,6 +1040,10 @@ class ThreeAITrader(base.FibVolumePATrader):
             "trigger_evidence": details.get("trigger_evidence"),
             "invalidation": details.get("invalidation"),
             "target_basis": details.get("target_basis"),
+            "fact_conflicts": details.get("fact_conflicts", []),
+            "unknowns": details.get("unknowns", []),
+            "entry_price_source": details.get("entry_price_source"),
+            "reference_entry_price": details.get("reference_entry_price", details.get("entry_price")),
             "reference_price_source": details.get("reference_price_source"),
             "coverage": "from_entry",
             "coverage_started_at": time.time(),
@@ -895,6 +1235,14 @@ class ThreeAITrader(base.FibVolumePATrader):
             pack, fib, atr, price = build_feature_pack(
                 df_m15, df_h1, df_m5, local_result, quote=quote, decision_id=decision_id
             )
+            append_decision_snapshot(
+                decision_id,
+                "ai1_input",
+                {
+                    "market_evidence": pack,
+                    "local_result": local_result.to_decision(),
+                },
+            )
             reject = ""
             if local_result.action == "no" and "拒绝:" in (local_result.reasoning or ""):
                 reject = " 拒绝:" + local_result.reasoning.split("拒绝:", 1)[1].strip().replace("\n", " ")[:160]
@@ -929,7 +1277,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI1_EFFORT,
                 AI1_INSTRUCTIONS,
                 prompt_json(
-                    "请只输出 JSON: {\"action\":\"buy|sell|no\",\"confidence\":0-100,\"stop_loss\":0,\"take_profit\":0,\"reasoning\":\"...\",\"trigger_evidence\":\"...\",\"invalidation\":\"...\",\"target_basis\":\"...\"}",
+                    "请只输出 JSON: {\"action\":\"buy|sell|no\",\"confidence\":0-100,\"stop_loss\":0,\"take_profit\":0,\"reasoning\":\"...\",\"trigger_evidence\":\"...\",\"invalidation\":\"...\",\"target_basis\":\"...\",\"fact_conflicts\":[],\"unknowns\":[]}",
                     pack,
                 ),
                 AI1_TIMEOUT,
@@ -941,6 +1289,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 base.logger.info("AI-1 返回已过期，丢弃 seq=%s" % seq)
                 return
             if not raw:
+                append_decision_snapshot(decision_id, "ai1_empty", {"reason": "no_visible_json"})
                 self.alert_api_failure("AI-1", "没有可见 JSON")
                 return
             entry_price = float((local_result.details or {}).get("entry_price") or price)
@@ -956,6 +1305,16 @@ class ThreeAITrader(base.FibVolumePATrader):
             ai_confidence = None
             if isinstance(parsed, dict):
                 ai_confidence = normalize_confidence(parsed.get("confidence", 0))
+            append_decision_snapshot(
+                decision_id,
+                "ai1_result",
+                {
+                    "raw": raw,
+                    "parsed": parsed,
+                    "proposal": proposal.to_decision() if proposal is not None else None,
+                    "python_reason": reason,
+                },
+            )
             action_line = "AI-1动作: %s" % format_ai_action(parsed)
             confidence_line = "%s，本地置信度: %s (BUY=%s SELL=%s)，AI-1 置信度: %s，门槛: 本地%s / AI%s" % (
                 action_line,
@@ -990,9 +1349,14 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "session": pack.get("session"),
                     "setup": pack.get("setup"),
                     "reference_price_source": pack["reference_price"].get("source"),
+                    "reference_entry_price": entry_price,
                     "trigger_evidence": parsed.get("trigger_evidence") if isinstance(parsed, dict) else None,
                     "invalidation": parsed.get("invalidation") if isinstance(parsed, dict) else None,
                     "target_basis": parsed.get("target_basis") if isinstance(parsed, dict) else None,
+                    "fact_conflicts": parsed.get("fact_conflicts", []) if isinstance(parsed, dict) else [],
+                    "unknowns": parsed.get("unknowns", []) if isinstance(parsed, dict) else [],
+                    "entry_price_source": proposal.details.get("entry_price_source", "previous_closed_m15_close"),
+                    "computed_evidence_contract": pack.get("computed_evidence", {}).get("contract_version"),
                     "ai_requested_stop_loss": requested_sl,
                     "ai_requested_take_profit": requested_tp,
                     "final_stop_loss": proposal.stop_loss,
@@ -1000,17 +1364,20 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "python_finalization": reason,
                 }
             )
+            final_entry_price = float(proposal.details.get("entry_price") or entry_price)
             review_pack = {
                 "proposal": proposal.to_decision(),
                 "ai1_raw_proposal": parsed,
                 "python_finalization": {
-                    "final_entry_price": proposal.details.get("entry_price", entry_price),
+                    "reference_entry_price": entry_price,
+                    "final_entry_price": final_entry_price,
                     "final_stop_loss": proposal.stop_loss,
                     "final_take_profit": proposal.take_profit,
                     "reason": reason,
                 },
                 "decision_id": decision_id,
-                "entry_price": entry_price,
+                "reference_entry_price": entry_price,
+                "entry_price": final_entry_price,
                 "atr": pack["atr"],
                 "h1_trend": pack["h1_trend"],
                 "m15_trend": pack["m15_trend"],
@@ -1030,7 +1397,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI2_EFFORT,
                 AI2_INSTRUCTIONS,
                 prompt_json(
-                    "请只输出 JSON: {\"decision\":\"APPROVE|REJECT\",\"defects\":[],\"reasoning\":\"...\"}",
+                    "请只输出 JSON: {\"decision\":\"APPROVE|REJECT\",\"defects\":[],\"reasoning\":\"...\",\"fact_conflicts\":[]}",
                     review_pack,
                 ),
                 AI2_TIMEOUT,
@@ -1042,9 +1409,22 @@ class ThreeAITrader(base.FibVolumePATrader):
                 base.logger.info("AI-2 返回已过期，丢弃 seq=%s" % seq)
                 return
             if not review_raw:
+                append_decision_snapshot(decision_id, "ai2_empty", {"proposal": proposal.to_decision()})
                 self.alert_api_failure("AI-2", "没有可见 JSON，拒绝开仓")
                 return
-            allowed, review_reason = ai2_allows(extract_json_object(review_raw))
+            review_payload = extract_json_object(review_raw)
+            allowed, review_reason = ai2_allows(review_payload)
+            append_decision_snapshot(
+                decision_id,
+                "ai2_result",
+                {
+                    "raw": review_raw,
+                    "parsed": review_payload,
+                    "allowed": allowed,
+                    "reason": review_reason,
+                    "proposal": proposal.to_decision(),
+                },
+            )
             base.logger.info("AI-2 结果 decision=%s: %s" % (decision_id, review_reason))
             if not allowed:
                 self.notify_lines(
@@ -1061,7 +1441,15 @@ class ThreeAITrader(base.FibVolumePATrader):
                 return
             proposal.reasoning = "%s。%s" % (proposal.reasoning, review_reason)
             proposal.details["ai2_review"] = review_reason
-            self.place_order(proposal)
+            placed = self.place_order(proposal)
+            append_decision_snapshot(
+                decision_id,
+                "execution_result",
+                {
+                    "placed": bool(placed),
+                    "proposal": proposal.to_decision(),
+                },
+            )
         except AIRequestError as exc:
             self.alert_api_failure(exc.role, exc.detail)
         except Exception as exc:
@@ -1272,6 +1660,10 @@ class ThreeAITrader(base.FibVolumePATrader):
                 log_path,
             )
         )
+        base.logger.info(
+            "AI证据契约=%s，决策快照目录=%s，参考入场=上一根已收盘M15"
+            % ("entry-evidence-v2", AI_DECISION_SNAPSHOT_DIR)
+        )
         base.logger.info("AI URLs: AI1=%s AI2=%s AI3=%s" % (AI1_URL, AI2_URL, AI3_URL))
         base.logger.info(
             "AI keys: AI1=%s AI2=%s AI3=%s"
@@ -1397,7 +1789,7 @@ def run_http_retry_self_test():
 
 
 def run_self_test():
-    global AI3_STATE_FILE
+    global AI3_STATE_FILE, AI_DECISION_SNAPSHOT_DIR
     fenced = extract_json_object("```json\n{\"action\":\"buy\",\"confidence\":0.8}\n```")
     assert fenced["action"] == "buy", fenced
     assert normalize_confidence(0.8) == 80
@@ -1444,6 +1836,23 @@ def run_self_test():
         100, 2.0, "bull", "bull", None, 75,
     )
     assert against is None and "不同向" in against_reason, against_reason
+    conflicted, conflict_reason = finalize_ai_proposal(
+        proposal(
+            action="buy",
+            confidence=91,
+            stop_loss=96,
+            take_profit=107,
+            reasoning="事实冲突",
+            fact_conflicts=["Fib方向与H1冲突"],
+        ),
+        100,
+        2.0,
+        "bull",
+        "bull",
+        None,
+        75,
+    )
+    assert conflicted is None and "事实冲突" in conflict_reason, conflict_reason
     wide, wide_reason = finalize_ai_proposal(
         proposal(action="buy", confidence=90, stop_loss=90, take_profit=120, reasoning="wide"),
         100, 2.0, "bull", "bull", None, 75,
@@ -1468,6 +1877,7 @@ def run_self_test():
         107.0, 10.0, "bear", "bear", None, 75, df_m5=near_m5,
     )
     assert timed_kept is not None and 0 < timed_kept.stop_loss - 107.0 <= base.MAX_SL_ABS + 0.02, timed_reason
+    assert timed_kept.details["entry_price_source"] == "m5_rejection_fallback_close", timed_kept.details
     far_m5 = base.pd.DataFrame([
         {"open": 100.0, "high": 111.0, "low": 99.0, "close": 100.0},
         {"open": 100.0, "high": 111.5, "low": 99.0, "close": 100.0},
@@ -1501,6 +1911,8 @@ def run_self_test():
     assert moved is not None and moved.stop_loss >= 101.6 - 0.01, moved_reason
 
     assert ai2_allows({"decision": "APPROVE", "reasoning": "ok"})[0]
+    assert not ai2_allows({"decision": "APPROVE", "defects": ["有缺陷"], "reasoning": "ok"})[0]
+    assert not ai2_allows({"decision": "APPROVE", "fact_conflicts": ["数据冲突"], "reasoning": "ok"})[0]
     assert not ai2_allows({"decision": "APPROVE"})[0]
     assert not ai2_allows({"decision": "REJECT", "defects": ["盈亏比不足"]})[0]
     assert not ai2_allows(None)[0]
@@ -1535,6 +1947,33 @@ def run_self_test():
     assert len(feature_pack["evidence_windows"]["m15_structure_bar_times"]) == 24
     assert len(feature_pack["evidence_windows"]["m5_rejection_bar_times"]) == 3
     assert feature_pack["reference_price"]["source"] == "previous_closed_m15_close"
+    assert feature_pack["bar_closure"]["source_shift"] == 1
+    computed = feature_pack["computed_evidence"]
+    assert computed["contract_version"] == "entry-evidence-v2"
+    assert computed["closed_bar_source_shift"] == 1
+    assert computed["m5_timing"]["buy"]["event_group"] == "m5_confirmation_window"
+    assert "obstacles" in computed and "buy" in computed["obstacles"]
+
+    obstacle_m15 = base.pd.DataFrame(
+        [
+            {"time": 1, "open": 100, "high": 101, "low": 95, "close": 96, "tick_volume": 100},
+            {"time": 2, "open": 96, "high": 99, "low": 95, "close": 98, "tick_volume": 120},
+            {"time": 3, "open": 98, "high": 99, "low": 96, "close": 97, "tick_volume": 110},
+        ]
+    )
+    obstacle_m5 = obstacle_m15.copy()
+    grouped = _obstacle_candidates(
+        obstacle_m15,
+        obstacle_m5,
+        None,
+        {"available": True, "box_edge": 99.0, "breakout_bar": {"time": 2}},
+        100.0,
+        "sell",
+    )
+    low_candidate = next(item for item in grouped if item["price"] == 95.0)
+    assert any(item["source"] == "m5_process_extreme" for item in low_candidate["observed"]), grouped
+    fib_fact = _fib_evidence(obstacle_m15, base.build_fib_levels("bear", 90.0, 110.0), 2.0, 98.0)
+    assert fib_fact["reference_in_core"] is True and fib_fact["tolerance"] == 0.7, fib_fact
 
     import tempfile
     old_state_file = AI3_STATE_FILE
@@ -1555,6 +1994,17 @@ def run_self_test():
         assert state_reader.entry_contexts["123"]["initial_risk"] == 2.5
         assert state_reader.entry_contexts["123"]["target_basis"] == "前高"
     AI3_STATE_FILE = old_state_file
+
+    old_snapshot_dir = AI_DECISION_SNAPSHOT_DIR
+    with tempfile.TemporaryDirectory() as temp_dir:
+        AI_DECISION_SNAPSHOT_DIR = temp_dir
+        append_decision_snapshot("test-snapshot", "self_test", {"secret": "not included", "value": 1})
+        snapshot_files = os.listdir(temp_dir)
+        assert snapshot_files, snapshot_files
+        with open(os.path.join(temp_dir, snapshot_files[0]), "r", encoding="utf-8") as snapshot_file:
+            snapshot_text = snapshot_file.read()
+        assert "test-snapshot" in snapshot_text and "value" in snapshot_text, snapshot_text
+    AI_DECISION_SNAPSHOT_DIR = old_snapshot_dir
 
     assert not base.sl_change_is_tighter("BUY", 100, 99)
     assert base.sl_change_is_tighter("SELL", 110, 109)
