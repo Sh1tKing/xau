@@ -78,6 +78,10 @@ AI1_INSTRUCTIONS = (
     "breakout：必须是放量突破后回踩箱体边缘并守住；没有回踩的追突破必须是 no。breakout 不受 tight_range 限制。"
     f"方向只看 H1。M15 负责斐波那契、成交量和价格行为。M5 不单独决定方向；最近3根M5的拒绝极值加缓冲后仍不超过{SL_CAP}美元时，可以用该极值进场。H4 不是否决条件。"
     "M15 与 H1 暂时反向是回撤，不是冲突，不能因此 no。"
+    "H1 同向只表示允许的交易方向，不代表当前存在入场信号。分别检查方向、setup结构有效性、已收盘K线确认、目标前的障碍。"
+    "pullback 的旧波段已被收盘破坏时，不能只凭H1同向把破坏解释为普通回撤；只有给定数据支持新结构及新的确认才可提出交易，否则 no。单根影线刺穿后收回不等于收盘破坏。"
+    "止盈必须说明给定数据中的目标依据和中间阻力/支撑，不能只为凑够RR把目标延远。确认量偏弱是质量扣分，不可编造放量确认。"
+    "confidence 是对所选action的确信程度，不是胜率；不要复制本地分，不要为了通过门槛抬分。reasoning依次说明setup证据、失效位置、目标依据和主要反证；证据缺失明确写未知。"
     f"M15影线离收盘价超过{SL_CAP}美元时，如果最近3根M5的拒绝极值仍在{SL_CAP}美元内，止损放在该M5极值外；禁止把更远的影线止损改小。"
     f"H1 不支持该方向、止损超过 {SL_CAP} 美元、价格偏离 M15 EMA21 超过 1.5 ATR、止损止盈方向错误或盈亏比低于 1.5 时，action 必须是 no。"
     "stop_loss 和 take_profit 用绝对价格。最终回复只能是一个 JSON 对象，不要 Markdown。"
@@ -86,6 +90,8 @@ AI2_INSTRUCTIONS = (
     "你是独立风控审核官 AI-2。不能提出新交易，只能 APPROVE 或 REJECT。"
     f"只有明确缺陷才能 REJECT：setup 为 pullback 却处在 tight_range、range_edge 却在区间中轴、breakout 没有回踩箱体就追单、止损方向错误、盈亏比低于 1.5、H1 不支持该方向、止损超过 {SL_CAP} 美元、追价超过 1.5 ATR、止损或止盈缺失、关键数据缺失、订单自相矛盾。"
     "M15 与 H1 暂时反向、轻微背离、逆 H4、波动大或感觉不确定，都不能单独 REJECT。"
+    "根据market_evidence独立核实，不要把AI-1的reasoning当作已核实事实。明确的setup结构失效且没有新结构确认、声称回踩/放量但K线数据反驳，也属于订单自相矛盾，应REJECT并指出对应证据。单根影线收回不能当作收盘破坏。"
+    "仅仅本地action=no、量能普通、ADX偏弱或RR接近合格下限不能单独否决；必须区分质量保留意见与可核实的硬伤。数据不足以核实必要条件时指出缺失字段，不得补造事实。"
     "最终回复只能是一个 JSON 对象，不要 Markdown。"
 )
 AI3_INSTRUCTIONS = (
@@ -95,6 +101,8 @@ AI3_INSTRUCTIONS = (
     "不要等价格碰到初始止损才处理：浮亏单如果持续 hold_minutes 较久、r_now 一直为负、M1/M5 收盘不断朝止损方向推进或跌破入场结构，"
     "且没有出现有利方向的拒绝K线，应该 close，或者把止损收紧到最近 M1/M5 结构外，减少亏损。"
     "单根影线刺穿但收盘收回不算结构失效。浮盈单可以把止损收紧到入场价以上（BUY）或以下（SELL）来锁定利润。"
+    "输入的r_now和profit只是当前快照，hold_minutes只是持仓时长，均不能证明持续浮亏；没有历史序列不得声称一直亏损。用已给M1/M5收盘序列说明推进或拒绝的具体证据。"
+    "未提供原始入场结构时，不得断言原始入场结构已失效；可以依据明确的近期M1/M5结构恶化提前减亏。仅持仓时间长、单次浮亏或一根反向K线不足以close。"
     "最终回复只能是一个 JSON 对象，不要 Markdown。"
 )
 
@@ -166,8 +174,9 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result):
             "h1_sets_direction": True,
             "m15_opposite_is_pullback": True,
             "h4_is_not_a_veto": True,
-            "tight_range_is_no": True,
-            "wide_range_only_at_edges": True,
+            "pullback_tight_range_is_no": True,
+            "pullback_wide_range_only_at_edges": True,
+            "breakout_and_range_edge_use_own_conditions": True,
             "max_stop_abs": base.MAX_SL_ABS,
             "chase_max_atr": base.CHASE_MAX_ATR,
             "min_rr": base.MIN_REWARD_RISK,
@@ -743,6 +752,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 "min_rr": base.MIN_REWARD_RISK,
                 "local_action": local_result.action,
                 "local_reasoning": local_result.reasoning,
+                "market_evidence": pack,
             }
             review_raw = call_chat(
                 "AI-2",
