@@ -1354,6 +1354,19 @@ def score_range_edge(action: str, df_m15: pd.DataFrame, atr: float, h1_trend: st
     return max(0, min(100, score)), setup_details(box_text, volume, pa_score, pa_text, trend_text, edge_score), structure
 
 
+def breakout_retest_facts(recent, broke, edge, atr, action):
+    """Shared closed-bar retest facts for local scoring and AI evidence."""
+    sign = 1 if action == "buy" else -1
+    after = recent.loc[broke.index[0] + 1:] if not broke.empty else recent.iloc[:0]
+    field = "low" if action == "buy" else "high"
+    touches = after[sign * (after[field] - edge) <= 0.35 * atr]
+    probe = None if after.empty else float(after[field].min() if action == "buy" else after[field].max())
+    holds = bool(not broke.empty and sign * (float(recent.iloc[-1]["close"]) - edge) > 0)
+    return {"after": after, "touches": touches, "probe": probe,
+            "retested": bool(not touches.empty), "close_holds_edge": holds,
+            "retest_holds": bool(not touches.empty and holds)}
+
+
 def score_breakout(action: str, df_m15: pd.DataFrame, atr: float, h1_trend: str, m15_trend: str):
     work = df_m15.reset_index(drop=True)
     direction = "bull" if action == "buy" else "bear"
@@ -1382,11 +1395,7 @@ def score_breakout(action: str, df_m15: pd.DataFrame, atr: float, h1_trend: str,
     if sign * (float(last["close"]) - edge) <= 0:
         return 0, setup_details(box_text + "，回踩收回箱体，突破失败", empty_volume, pa_score, pa_text, trend_text, 0), structure
     # The retest must happen after the first breakout close; the breakout bar's own wick is still inside the box.
-    after = recent.loc[broke.index[0] + 1:]
-    retested = False
-    if not after.empty:
-        probe = float(after["low"].min()) if action == "buy" else float(after["high"].max())
-        retested = sign * (probe - edge) <= 0.35 * atr
+    retested = breakout_retest_facts(recent, broke, edge, atr, action)["retested"]
     break_ratio = float(broke["tick_volume"].max()) / vol_ma
     break_score = 25 if break_ratio >= 1.3 else 15 if break_ratio >= 1.1 else 5
     volume = {"score": break_score, "summary": "突破K量能 %.2fx" % break_ratio}

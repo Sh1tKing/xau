@@ -78,7 +78,7 @@ AI1_INSTRUCTIONS = (
     "先看 session 和 setup。setup 是本地按时段选出的进场方式：pullback 是趋势回撤，range_edge 是区间边缘反转，breakout 是突破后回踩。"
     "pullback：tight_range 时 action 必须是 no；wide_range 只做边缘且要有拒绝K线。"
     "range_edge：只在 24 根 M15 区间的边缘、有拒绝K线时做，中轴必须是 no，目标看区间另一侧。"
-    "breakout：必须是放量突破后回踩箱体边缘并守住；没有回踩的追突破必须是 no。breakout 不受 tight_range 限制。"
+    "breakout：必须收盘突破后回踩箱体边缘并守住；没有回踩的追突破必须是 no。量能仅加减分，普通量或弱量不能单独否决，引用Python给定的量能基线和比值。breakout 不受 tight_range 限制。"
     f"方向只看 H1。M15 负责斐波那契、成交量和价格行为。M5 不单独决定方向，但在H1方向已经允许时，结构附近已收盘的M5拒绝/吞没可以完成入场时机确认；最近3根M5的拒绝极值加缓冲后仍不超过{SL_CAP}美元时，可以用该极值保护止损。H4 不是否决条件。"
     "M15 与 H1 暂时反向是回撤，不是冲突，不能因此 no。"
     "H1 同向只表示允许的交易方向，不代表当前存在入场信号。分别检查方向、setup结构有效性、已收盘K线确认、目标前的障碍。"
@@ -86,7 +86,7 @@ AI1_INSTRUCTIONS = (
     "如果事实字段互相矛盾，返回no并在fact_conflicts写明冲突；如果关键字段缺失，返回no并在unknowns写明未知，不得猜测。"
     "pullback 的旧波段已被收盘破坏时，不能只凭H1同向把破坏解释为普通回撤；只有给定数据支持新结构及新的确认才可提出交易，否则 no。单根影线刺穿后收回不等于收盘破坏。Fib核心区必须按computed_evidence给出的容差和最近3根探入确认解释，不要把收盘略低于38.2或略高于61.8自动当成结构失效。"
     "breakout 必须引用突破K和后续回踩K的bar_time。突破K自己的影线不是后续回踩；回踩已经守住后，不要因为同一次推动在M15和M5留下多个相近极值就把确认清零。原箱体边缘收盘失守、出现独立的反向结构并收盘确认，或事实明确显示形态失效时，才重新判定。"
-    "障碍必须引用computed_evidence.obstacles中的price、timeframe、bar_time、source和event_group。相同推动在多个周期的映射只算同一事件；单根过程极值不能自动升级为独立重要障碍。仍需在未克服的重要障碍前有1.5RR空间，不能为了开单删除真正的障碍。"
+    "障碍优先引用computed_evidence.obstacles中的price、timeframe、bar_time、source和event_group。已核实的跨周期同一极值只算同一事件；单根过程极值不能自动升级为独立重要障碍。仍需在未克服的重要障碍前有1.5RR空间，不能为了开单删除真正的障碍。"
     "止盈必须说明给定数据中的目标依据和中间阻力/支撑，不能只为凑够RR把目标延远。确认量偏弱是质量扣分，不可编造放量确认。确认尚未完成、或第一个重要障碍前没有1.5RR空间时，返回no并写明等待条件。"
     "confidence 是对所选action的确信程度，不是胜率；不要复制本地分，不要为了通过门槛抬分。reasoning依次说明setup证据、失效位置、目标依据和主要反证；证据缺失明确写未知。"
     f"M5保护止损是否可用不取决于M15影线是否超过{SL_CAP}美元：只要它保护当前触发结构、覆盖最近3根M5极值和缓冲、并且距离参考入场不超过{SL_CAP}美元，就可以使用。更远的结构止损超过上限时必须no，禁止把止损改进影线里面。"
@@ -103,9 +103,22 @@ AI2_INSTRUCTIONS = (
     "审核Python调整后的最终方案，不审核已经被替换的AI-1原始止损或止盈；如果最终目标与AI理由不一致，要求给出可核实的调整依据，否则REJECT。"
     "最终回复只能是一个 JSON 对象，不要 Markdown；字段为decision、defects数组、reasoning、fact_conflicts数组。APPROVE时defects和fact_conflicts必须为空。"
 )
+OBSTACLE_EVIDENCE_INSTRUCTIONS = (
+    "障碍列表是候选集合，不是自动否决清单，也不穷尽所有结构。Fib端点不天然是独立强障碍；"
+    "classification=unknown和strength=unassessed必须结合origin_bar及observed中的反向价格行为、收盘突破证据判断，不能直接升级成硬障碍。"
+    "event_group仅标识已核实的同一根来源K线极值；相同价格但不同时间的触碰必须分别保留。"
+    "event_group为空表示归属未知，不能将所有未知项合并。同组内仍需阅读每次观察的反向证据。候选障碍归属未知本身不等同于入场关键条件缺失，不能单独否决。"
+    "closed_breakthrough的not_observed_in_window仅表示所给窗口未发现，不代表历史从未突破；"
+    "opposing_price_action为现有本地分类器输出，不自动等同于有效反转。"
+    "若引用列表外的独立结构，必须指出输入中真实存在的timeframe、bar_time、price和来源，归属不明写未知。"
+)
+AI1_INSTRUCTIONS += OBSTACLE_EVIDENCE_INSTRUCTIONS
+AI2_INSTRUCTIONS += OBSTACLE_EVIDENCE_INSTRUCTIONS
 AI3_INSTRUCTIONS = (
     "你是持仓监控 AI-3。只能选择 hold、tighten_sl 或 close。"
     "禁止放宽止损，禁止加仓，禁止新开仓。tighten_sl 必须比当前止损更有利，并给出绝对价格。"
+    "核实入场理由失效时必须使用该理由指定周期的已收盘K线：M15边界用m15_bars，H1边界用h1_bars，"
+    "不能从M1/M5收盘推断M15/H1已收盘破坏。对应周期或时间覆盖不足时失效证据为未知，不能凭此close。"
     "窄震荡里的上下影线和轻微回撤选择 hold，交给本地虚拟锁盈。"
     "不必等价格碰到初始止损才处理，但不能仅因当前浮亏或持仓时间提前退出。只有指定失效边界被已收盘K线越过，"
     "或至少两根相邻已收盘M1朝不利方向推进、最近M5结构同步恶化且没有有利拒绝时，才可close；否则优先hold。"
@@ -128,17 +141,7 @@ def attach_ai_logger():
 def bars_for_prompt(df, limit=8):
     if df is None or len(df) == 0:
         return []
-    rows = []
-    for row in df.tail(limit).itertuples(index=False):
-        rows.append({
-            "time": int(getattr(row, "time", 0) or 0),
-            "open": round(float(row.open), 2),
-            "high": round(float(row.high), 2),
-            "low": round(float(row.low), 2),
-            "close": round(float(row.close), 2),
-            "tick_volume": round(float(getattr(row, "tick_volume", 0.0) or 0.0), 2),
-        })
-    return rows
+    return [_bar_payload(row) for row in df.tail(limit).itertuples(index=False)]
 
 
 def bar_times_for_prompt(df, limit):
@@ -179,6 +182,8 @@ def _bar_payload(row, role=None):
     }
     if role:
         result["role"] = role
+    parts = base.candle_parts({key: float(getattr(row, key)) for key in ("open", "high", "low", "close")})
+    result["candle_parts"] = {key: _rounded_number(parts[key], 6) for key in ("body", "range", "upper", "lower")}
     return result
 
 
@@ -196,8 +201,9 @@ def _closest_bar(df, column, target, role=None):
     if df is None or len(df) == 0 or column not in df.columns or target is None:
         return None
     try:
-        index = (df[column].astype(float) - float(target)).abs().idxmin()
-        return _bar_payload(df.loc[index], role=role)
+        matches = df[(df[column].astype(float) - float(target)).abs() < 1e-8]
+        # Price alone cannot identify which repeated touch supplied a Fib endpoint.
+        return _bar_payload(matches.iloc[0], role=role) if len(matches) == 1 else None
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -205,7 +211,7 @@ def _closest_bar(df, column, target, role=None):
 def _fib_evidence(df_m15, fib, atr, price):
     if fib is None or not fib.levels:
         return {"available": False, "reason": "no_valid_entry_fib"}
-    levels = {key: _rounded_number(value) for key, value in fib.levels.items()}
+    levels = {key: float(value) for key, value in fib.levels.items()}
     tolerance = max(0.35 * float(atr), 0.5)
     if fib.direction == "bull":
         core_low = levels["61.8"] - tolerance
@@ -273,6 +279,9 @@ def _breakout_evidence(df_m15, atr, action):
         "retest_probe": None,
         "retest_distance_to_edge": None,
         "retest_holds": False,
+        "retested": False,
+        "close_holds_edge": False,
+        "post_breakout_bars": [],
         "breakout_volume_baseline": _rounded_number(volume_base),
         "breakout_volume_ratio": None,
         "breakout_closed": bool(not broke.empty),
@@ -285,13 +294,15 @@ def _breakout_evidence(df_m15, atr, action):
     result["breakout_bar"] = _bar_payload(breakout_row, "breakout_close")
     if volume_base > 0:
         result["breakout_volume_ratio"] = _rounded_number(float(broke["tick_volume"].max()) / volume_base)
-    after = recent.loc[first_index + 1:]
-    result["retest_bars"] = [_bar_payload(row, "post_breakout_retest") for row in after.itertuples(index=False)]
-    if not after.empty:
-        probe = float(after["low"].min()) if action == "buy" else float(after["high"].max())
+    facts = base.breakout_retest_facts(recent, broke, edge, atr, action)
+    result["same_event_group"] = "breakout_%s" % result["breakout_bar"]["time"]
+    result["post_breakout_bars"] = bars_for_prompt(facts["after"], len(facts["after"]))
+    result["retest_bars"] = [_bar_payload(row, "edge_retest") for row in facts["touches"].itertuples(index=False)]
+    result.update({key: facts[key] for key in ("retested", "close_holds_edge", "retest_holds")})
+    if facts["probe"] is not None:
+        probe = facts["probe"]
         result["retest_probe"] = _rounded_number(probe)
         result["retest_distance_to_edge"] = _rounded_number(abs(probe - edge))
-        result["retest_holds"] = bool(sign * (float(recent.iloc[-1]["close"]) - edge) > 0)
     return result
 
 
@@ -320,67 +331,114 @@ def _range_edge_evidence(df_m15, atr, action):
 
 
 def _obstacle_candidates(df_m15, df_m5, fib, breakout, price, action):
-    """Return candidate obstacles with source/time/event metadata for AI review."""
+    """Candidates, not automatic vetoes; merge only a verified candle event."""
     target_side = (lambda value: value < price) if action == "sell" else (lambda value: value > price)
     candidates = []
+    field = "low" if action == "sell" else "high"
+    opposite = "buy" if action == "sell" else "sell"
+    sign = -1 if action == "sell" else 1
+    breakout_time = ((breakout or {}).get("breakout_bar") or {}).get("time")
 
-    def add(value, source, timeframe, bar_time=None, event_group=None, classification="unknown"):
+    def event_for(value, timeframe, bar_time):
+        if not bar_time:
+            return None
+        if timeframe == "M5" and df_m15 is not None and "time" in df_m15.columns:
+            parents = df_m15[(df_m15["time"] <= bar_time) & (df_m15["time"] + 900 > bar_time)]
+            if len(parents) == 1 and abs(float(parents.iloc[0][field]) - value) < 1e-8:
+                # Equality and temporal containment establish the shared extremum.
+                return "M15_%d_%s" % (int(parents.iloc[0]["time"]), field)
+        return "%s_%d_%s" % (timeframe, int(bar_time), field)
+
+    def add(value, source, timeframe, bar_time=None):
         try:
             value = float(value)
         except (TypeError, ValueError):
             return
         if not target_side(value):
             return
+        event_group = event_for(value, timeframe, bar_time)
+        observation = {"source": source, "timeframe": timeframe, "bar_time": bar_time, "event_group": event_group}
+        frame = df_m15 if timeframe == "M15" else df_m5
+        origin = None
+        broken_bars = []
+        rejection = {"status": "unknown"}
+        if bar_time and frame is not None and "time" in frame.columns:
+            prefix = frame[frame["time"] <= bar_time]
+            matching = frame[frame["time"] == bar_time]
+            if len(matching) == 1:
+                origin = _bar_payload(matching.iloc[0])
+                later = frame[frame["time"] > bar_time]
+                broken_bars = bars_for_prompt(later[sign * (later["close"] - value) > 0], len(later))
+                if len(prefix) >= 8:
+                    score, description = base.classify_price_action(prefix, opposite, base.calculate_atr(prefix))
+                    rejection = {"status": "evaluated", "action": opposite, "score": int(score),
+                                 "description": description, "bar_time": int(bar_time), "timeframe": timeframe}
+        breakthrough = {"status": "observed" if broken_bars else "not_observed_in_window" if origin else "unknown",
+                        "bars": broken_bars, "timeframe": timeframe}
+        observation.update({"origin_bar": origin, "closed_breakthrough": breakthrough,
+                            "opposing_price_action": rejection})
         for existing in candidates:
-            if abs(existing["price"] - value) <= 0.01:
-                existing.setdefault("observed", []).append({
-                    "source": source,
-                    "timeframe": timeframe,
-                    "bar_time": bar_time,
-                    "event_group": event_group,
-                })
+            if event_group and existing["event_group"] == event_group and abs(existing["price"] - value) < 1e-8:
+                existing["observed"].append(observation)
                 return
+        # Only the breakout candle itself is known to be the breakout impulse.
+        # Later rejection candles and old Fib points need independent assessment.
+        classification = "process_extreme" if timeframe == "M15" and bar_time == breakout_time and bar_time else "unknown"
+        if source == "breakout_box_edge":
+            classification = "setup_boundary"
         candidates.append({
-            "price": _rounded_number(value),
+            "price": value,
             "source": source,
             "timeframe": timeframe,
             "bar_time": int(bar_time) if bar_time else None,
-            "event_group": event_group or "unknown_event",
+            "event_group": event_group,
             "classification": classification,
+            "strength": "unassessed",
+            "origin_bar": origin,
+            "closed_breakthrough": breakthrough,
+            "opposing_price_action": rejection,
             "observed": [],
         })
 
     if fib is not None:
         swing_value = fib.swing_low if action == "sell" else fib.swing_high
         swing_field = "low" if action == "sell" else "high"
-        swing_ref = _closest_bar(df_m15, swing_field, swing_value, "fib_swing_endpoint")
-        add(swing_value, "fib_swing_endpoint", "M15", swing_ref.get("time") if swing_ref else None, "entry_fib_structure", "independent_structure")
+        matches = df_m15[(df_m15[swing_field] - swing_value).abs() < 1e-8] if df_m15 is not None else []
+        if len(matches):
+            for row in matches.itertuples(index=False):
+                add(swing_value, "fib_swing_endpoint_candidate", "M15", getattr(row, "time", None))
+        else:
+            add(swing_value, "fib_swing_endpoint", "M15")
 
     if breakout and breakout.get("available"):
         edge = breakout.get("box_edge")
-        add(edge, "breakout_box_edge", "M15", None, "breakout_box", "setup_boundary")
-        breakout_time = (breakout.get("breakout_bar") or {}).get("time")
-        for field, mode in (("low", "min"), ("high", "max")):
-            ref = _extreme_bar(df_m15.tail(4), field, mode, "post_breakout_extreme")
-            if ref:
-                group = "breakout_sequence" if breakout_time and ref["time"] >= breakout_time else "recent_m15_window"
-                add(ref[field], "post_breakout_extreme", "M15", ref["time"], group, "process_extreme")
+        add(edge, "breakout_box_edge", "M15")
+        ref = _extreme_bar(df_m15.tail(4), field, "min" if action == "sell" else "max", "post_breakout_extreme")
+        if ref:
+            add(ref[field], "post_breakout_extreme", "M15", ref["time"])
 
     if df_m15 is not None and len(df_m15):
         recent = df_m15.tail(8)
         field = "low" if action == "sell" else "high"
         mode = "min" if action == "sell" else "max"
-        ref = _extreme_bar(recent, field, mode, "recent_m15_extreme")
-        if ref:
-            add(ref[field], "recent_m15_extreme", "M15", ref["time"], "recent_m15_window", "recent_structure")
+        value = float(recent[field].min() if mode == "min" else recent[field].max())
+        for row in recent[(recent[field] - value).abs() < 1e-8].itertuples(index=False):
+            add(value, "recent_m15_extreme", "M15", getattr(row, "time", None))
+        # Retain confirmed secondary turns, including lower highs/higher lows
+        # which would disappear if only the window's absolute extreme survived.
+        window = df_m15.tail(24).reset_index(drop=True)
+        highs, lows = base.find_pivots(window)
+        for index in (lows if action == "sell" else highs):
+            row = window.iloc[index]
+            add(row[field], "confirmed_m15_pivot", "M15", int(row["time"]) if "time" in row else None)
 
     if df_m5 is not None and len(df_m5):
         recent_m5 = df_m5.tail(3)
         field = "low" if action == "sell" else "high"
         mode = "min" if action == "sell" else "max"
-        ref = _extreme_bar(recent_m5, field, mode, "m5_process_extreme")
-        if ref:
-            add(ref[field], "m5_process_extreme", "M5", ref["time"], "m5_confirmation_window", "process_extreme")
+        value = float(recent_m5[field].min() if mode == "min" else recent_m5[field].max())
+        for row in recent_m5[(recent_m5[field] - value).abs() < 1e-8].itertuples(index=False):
+            add(value, "m5_process_extreme", "M5", getattr(row, "time", None))
     return sorted(candidates, key=lambda item: abs(float(item["price"]) - float(price)))
 
 
@@ -418,7 +476,7 @@ def build_computed_entry_evidence(df_m15, df_h1, df_m5, local_result, fib, atr, 
     range_edge = _range_edge_evidence(df_m15, atr, candidate_actions[0]) if setup == "range_edge" else {"available": False, "reason": "setup_not_range_edge"}
     obstacles = {action: _obstacle_candidates(df_m15, df_m5, fib, breakout, price, action) for action in candidate_actions}
     return {
-        "contract_version": "entry-evidence-v2",
+        "contract_version": "entry-evidence-v3",
         "source": "python_local_functions",
         "closed_bar_source_shift": 1,
         "candidate_actions": candidate_actions,
@@ -1476,6 +1534,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                 return
             df_m1 = self.get_rates(base.mt5.TIMEFRAME_M1, 40, shift=1)
             df_m5 = self.get_rates(base.mt5.TIMEFRAME_M5, 40, shift=1)
+            df_m15 = self.get_rates(base.mt5.TIMEFRAME_M15, 40, shift=1)
+            df_h1 = self.get_rates(base.mt5.TIMEFRAME_H1, 40, shift=1)
             tick = None
             with self._mt5_lock:
                 tick = base.mt5.symbol_info_tick(base.SYMBOL)
@@ -1486,6 +1546,10 @@ class ThreeAITrader(base.FibVolumePATrader):
                 "atr_m5": round(base.calculate_atr(df_m5), 2),
                 "m1_bars": bars_for_prompt(df_m1, 12),
                 "m5_bars": bars_for_prompt(df_m5, 8),
+                "m15_bars": bars_for_prompt(df_m15, 16),
+                "h1_bars": bars_for_prompt(df_h1, 8),
+                "bar_closure": {"source_shift": 1, "time_is": "bar_open_time",
+                                "timeframe_seconds": {"M1": 60, "M5": 300, "M15": 900, "H1": 3600}},
                 "positions": [],
             }
             state_changed = False
@@ -1662,7 +1726,7 @@ class ThreeAITrader(base.FibVolumePATrader):
         )
         base.logger.info(
             "AI证据契约=%s，决策快照目录=%s，参考入场=上一根已收盘M15"
-            % ("entry-evidence-v2", AI_DECISION_SNAPSHOT_DIR)
+            % ("entry-evidence-v3", AI_DECISION_SNAPSHOT_DIR)
         )
         base.logger.info("AI URLs: AI1=%s AI2=%s AI3=%s" % (AI1_URL, AI2_URL, AI3_URL))
         base.logger.info(
@@ -1949,7 +2013,7 @@ def run_self_test():
     assert feature_pack["reference_price"]["source"] == "previous_closed_m15_close"
     assert feature_pack["bar_closure"]["source_shift"] == 1
     computed = feature_pack["computed_evidence"]
-    assert computed["contract_version"] == "entry-evidence-v2"
+    assert computed["contract_version"] == "entry-evidence-v3"
     assert computed["closed_bar_source_shift"] == 1
     assert computed["m5_timing"]["buy"]["event_group"] == "m5_confirmation_window"
     assert "obstacles" in computed and "buy" in computed["obstacles"]
