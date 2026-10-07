@@ -1,4 +1,5 @@
 .env
+/server_deploy/
 __pycache__/
 xau_logs/
 xau_fib_pa_logs/
