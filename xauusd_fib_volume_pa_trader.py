@@ -84,9 +84,39 @@ class DurableFileHandler(logging.FileHandler):
             self.handleError(record)
 
 
+class DailyDurableFileHandler(DurableFileHandler):
+    """Keep each record in its local calendar day's file without a restart."""
+
+    def __init__(self, log_dir, prefix, encoding="utf-8"):
+        self.log_dir = os.path.abspath(log_dir)
+        self.prefix = prefix
+        self.log_date = datetime.now().strftime("%Y-%m-%d")
+        os.makedirs(self.log_dir, exist_ok=True)
+        super().__init__(self.filename_for_date(self.log_date), encoding=encoding)
+
+    def filename_for_date(self, log_date):
+        return os.path.join(self.log_dir, "%s%s.log" % (self.prefix, log_date))
+
+    def emit(self, record):
+        self.acquire()
+        try:
+            record_date = datetime.fromtimestamp(record.created).strftime("%Y-%m-%d")
+            if record_date != self.log_date:
+                if self.stream is not None:
+                    self.flush()
+                    self.stream.close()
+                    self.stream = None
+                self.baseFilename = self.filename_for_date(record_date)
+                self.log_date = record_date
+            super().emit(record)
+        except Exception:
+            self.handleError(record)
+        finally:
+            self.release()
+
+
 def setup_logger():
     os.makedirs(LOG_DIR, exist_ok=True)
-    log_filename = os.path.join(LOG_DIR, f"Fib_PA_{datetime.now().strftime('%Y-%m-%d')}.log")
     logger = logging.getLogger("xauusd_fib_volume_pa")
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -98,7 +128,7 @@ def setup_logger():
         console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
 
-        file_handler = DurableFileHandler(log_filename, encoding="utf-8")
+        file_handler = DailyDurableFileHandler(LOG_DIR, "Fib_PA_", encoding="utf-8")
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
 

@@ -159,11 +159,16 @@ AI3_INSTRUCTIONS = (
 
 
 def attach_ai_logger():
-    log_path = os.path.join(base.LOG_DIR, "Fib_PA_AI3_%s.log" % datetime.now().strftime("%Y-%m-%d"))
-    handler = base.DurableFileHandler(log_path, encoding="utf-8")
+    log_dir = os.path.normcase(os.path.abspath(base.LOG_DIR))
+    for existing in base.logger.handlers:
+        if (isinstance(existing, base.DailyDurableFileHandler)
+                and os.path.normcase(existing.log_dir) == log_dir
+                and existing.prefix == "Fib_PA_AI3_"):
+            return existing.baseFilename
+    handler = base.DailyDurableFileHandler(base.LOG_DIR, "Fib_PA_AI3_", encoding="utf-8")
     handler.setFormatter(base.logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
     base.logger.addHandler(handler)
-    return log_path
+    return handler.baseFilename
 
 def bars_for_prompt(df, limit=8):
     if df is None or len(df) == 0:
