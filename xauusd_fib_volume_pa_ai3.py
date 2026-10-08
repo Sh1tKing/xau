@@ -61,7 +61,7 @@ AI1_EFFORT = os.getenv("FIB_PA_AI1_EFFORT", "medium")
 AI2_EFFORT = os.getenv("FIB_PA_AI2_EFFORT", "low")
 AI3_EFFORT = os.getenv("FIB_PA_AI3_EFFORT", "low")
 AI1_TIMEOUT = env_int("FIB_PA_AI1_TIMEOUT", 60)
-AI2_TIMEOUT = env_int("FIB_PA_AI2_TIMEOUT", 40)
+AI2_TIMEOUT = env_int("FIB_PA_AI2_TIMEOUT", 90)
 AI3_TIMEOUT = env_int("FIB_PA_AI3_TIMEOUT", 40)
 # 5 次 60 秒超时大约 300 秒。接管时间必须盖住重试，否则下一根 K 线会丢掉后面的结果。
 ENTRY_TAKEOVER_SEC = env_int("FIB_PA_AI_ENTRY_TAKEOVER_SEC", 360)
@@ -83,7 +83,7 @@ AI_USAGE_DIR = os.path.join(base.LOG_DIR, "ai_usage")
 _USAGE_LOCK = threading.RLock()
 _CHAT_OPTIONS_LOCK = threading.RLock()
 _CHAT_OPTIONS = {}
-COST_CONTROL_VERSION = "cost-latency-v1"
+COST_CONTROL_VERSION = "cost-latency-v2"
 QUALITY_LEVEL_POINTS = {"strong": 20, "adequate": 16, "weak": 8, "missing": 0}
 QUALITY_DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_evidence")
 QUALITY_CAUSES = {"volume", "shallow_retrace", "trigger_weakness", "opposing_structure", "stop_vulnerability", "target_uncertainty", "execution_drift", "missing_data", "hard_limit"}
@@ -932,6 +932,19 @@ def backup_chat_config(role, model, effort, url, api_key):
             for field, name in names.items()}
 
 
+def chat_request_timeout(role, primary_timeout, using_backup=False):
+    """A backup may use its own wait without creating another model route."""
+    role_id = {"AI-1": "1", "AI-2": "2", "AI-3": "3"}.get(role)
+    if not using_backup or role_id is None:
+        return primary_timeout
+    value = os.getenv("FIB_PA_AI%s_BACKUP_TIMEOUT" % role_id, "").strip().strip('"').strip("'")
+    try:
+        candidate = int(value)
+    except (TypeError, ValueError):
+        return primary_timeout
+    return candidate if candidate > 0 else primary_timeout
+
+
 def record_ai_usage(event):
     """One record per actual POST; a timeout has unknown usage, never zero cost."""
     try:
@@ -1025,6 +1038,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
     attempted = 0
     for attempt in range(1, AI_HTTP_RETRIES + 1):
         channel = "backup" if using_backup else "primary"
+        request_timeout = chat_request_timeout(role, timeout, using_backup)
         label = channel
         option_key = (active["url"], active["model"])
         default_token_field = "max_completion_tokens" if active["model"].lower().startswith(("gpt-", "o1", "o3", "o4")) else "max_tokens"
@@ -1055,6 +1069,15 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
         headers = {"Content-Type": "application/json", "Authorization": "Bearer " + active["key"]}
         attempted = attempt
         started = time.monotonic()
+        response_progress = {}
+
+        def response_headers_received(response, *args, **kwargs):
+            response_progress.update({
+                "http_status": response.status_code,
+                "headers_elapsed_sec": round(time.monotonic() - started, 3),
+                "request_id": response.headers.get("x-request-id") or response.headers.get("request-id"),
+            })
+            return response
 
         def record_attempt(outcome, result=None, response=None):
             finish = chat_finish_reason(result)
@@ -1066,9 +1089,12 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 "attempt": attempt, "request_budget": AI_HTTP_RETRIES, "channel": channel,
                 "host": urlsplit(active["url"]).hostname, "model": active["model"],
                 "response_model": result.get("model") if isinstance(result, dict) else None,
-                "request_id": response_headers.get("x-request-id") or response_headers.get("request-id"),
-                "response_id": response_id, "http_status": getattr(response, "status_code", None),
+                "request_id": response_headers.get("x-request-id") or response_headers.get("request-id") or response_progress.get("request_id"),
+                "response_id": response_id, "http_status": getattr(response, "status_code", None) or response_progress.get("http_status"),
                 "outcome": outcome, "elapsed_sec": round(time.monotonic() - started, 3),
+                "read_timeout_sec": request_timeout,
+                "headers_elapsed_sec": response_progress.get("headers_elapsed_sec"),
+                "body_complete": response is not None,
                 "prompt_chars": len(prompt), "instructions_chars": len(instructions),
                 "reasoning_effort_sent": data.get("reasoning_effort"),
                 "token_limit": data[token_field], "token_limit_field": token_field,
@@ -1077,7 +1103,8 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             })
 
         try:
-            response = requests.post(active["url"], headers=headers, json=data, timeout=timeout)
+            response = requests.post(active["url"], headers=headers, json=data, timeout=request_timeout,
+                                     hooks={"response": response_headers_received})
         except (requests.Timeout, requests.ConnectionError) as exc:
             transport_failures += 1
             last_problem = "%s: %s" % (type(exc).__name__, exc)
@@ -1085,6 +1112,10 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                                 role, attempt, AI_HTTP_RETRIES, label, last_problem)
             is_read_timeout = (isinstance(exc, requests.Timeout) and not isinstance(exc, requests.ConnectTimeout)
                                or "read timed out" in str(exc).lower())
+            if is_read_timeout and response_progress:
+                base.logger.warning("%s 已收到HTTP %s响应头(%.2fs)，正文读取超时，等待=%ss (%s)",
+                                    role, response_progress["http_status"], response_progress["headers_elapsed_sec"],
+                                    request_timeout, label)
             record_attempt("read_timeout" if is_read_timeout else "connection_failure")
             if not task_alive():
                 return ""
@@ -2183,17 +2214,18 @@ class ThreeAITrader(base.FibVolumePATrader):
             "AI keys: AI1=%s AI2=%s AI3=%s"
             % ("set" if AI1_KEY else "missing", "set" if AI2_KEY else "missing", "set" if AI3_KEY else "missing")
         )
-        for role, model, effort, url, key in (
-            ("AI-1", AI1_MODEL, AI1_EFFORT, AI1_URL, AI1_KEY),
-            ("AI-2", AI2_MODEL, AI2_EFFORT, AI2_URL, AI2_KEY),
-            ("AI-3", AI3_MODEL, AI3_EFFORT, AI3_URL, AI3_KEY),
+        for role, model, effort, url, key, timeout in (
+            ("AI-1", AI1_MODEL, AI1_EFFORT, AI1_URL, AI1_KEY, AI1_TIMEOUT),
+            ("AI-2", AI2_MODEL, AI2_EFFORT, AI2_URL, AI2_KEY, AI2_TIMEOUT),
+            ("AI-3", AI3_MODEL, AI3_EFFORT, AI3_URL, AI3_KEY, AI3_TIMEOUT),
         ):
             backup = backup_chat_config(role, model, effort, url, key)
             primary = {"model": model, "effort": effort, "url": url, "key": key}
-            base.logger.info("%s 备用配置: %s host=%s model=%s effort=%s key=%s", role,
+            base.logger.info("%s 备用配置: %s host=%s model=%s effort=%s key=%s timeout=%ss 主路timeout=%ss", role,
                              "独立备用" if backup != primary else "沿用主配置",
                              urlsplit(backup["url"]).hostname, backup["model"], backup["effort"],
-                             "set" if backup["key"] else "missing")
+                             "set" if backup["key"] else "missing",
+                             chat_request_timeout(role, timeout, True), timeout)
         self.notify_lines(
             "🚀 %s 三AI交易启动" % base.SYMBOL,
             [
@@ -2282,7 +2314,7 @@ def run_http_retry_self_test():
         base.logger = self_test_logger
         state = {"n": 0}
 
-        def flaky(url, headers=None, json=None, timeout=None):
+        def flaky(url, headers=None, json=None, timeout=None, **kwargs):
             state["n"] += 1
             if state["n"] < 3:
                 raise requests.ReadTimeout("read timed out")
@@ -2294,7 +2326,7 @@ def run_http_retry_self_test():
 
         state["n"] = 0
 
-        def always_down(url, headers=None, json=None, timeout=None):
+        def always_down(url, headers=None, json=None, timeout=None, **kwargs):
             state["n"] += 1
             raise requests.ConnectionError("connection refused")
 
@@ -2307,7 +2339,7 @@ def run_http_retry_self_test():
 
         state["n"] = 0
 
-        def timeout_once(url, headers=None, json=None, timeout=None):
+        def timeout_once(url, headers=None, json=None, timeout=None, **kwargs):
             state["n"] += 1
             raise requests.Timeout("slow")
 

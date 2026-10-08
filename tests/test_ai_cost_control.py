@@ -62,6 +62,57 @@ class CostControlTests(unittest.TestCase):
         self.assertIsNone(event["usage"])
         self.assertIsNone(event["cost"])
 
+    def test_each_backup_can_have_its_own_timeout_and_blank_inherits(self):
+        for role, number in (("AI-1", 1), ("AI-2", 2), ("AI-3", 3)):
+            name = f"FIB_PA_AI{number}_BACKUP_TIMEOUT"
+            for value in ("", " ", '""', "invalid", "0", "-1"):
+                with self.subTest(role=role, value=value), patch.dict(ai.os.environ, {name: value}):
+                    self.assertEqual(ai.chat_request_timeout(role, 90, True), 90)
+            with patch.dict(ai.os.environ, {name: '"40"'}):
+                self.assertEqual(ai.chat_request_timeout(role, 90, True), 40)
+                self.assertEqual(ai.chat_request_timeout(role, 90, False), 90)
+
+    def test_timeout_only_setting_does_not_create_an_independent_backup(self):
+        with patch.dict(ai.os.environ, {"FIB_PA_AI2_BACKUP_TIMEOUT": "40"}), \
+             patch.object(ai.requests, "post", side_effect=ai.requests.ReadTimeout("read timed out")) as post:
+            with self.assertRaises(ai.AIRequestError):
+                self.call(role="AI-2")
+        self.assertEqual(post.call_count, 1)
+
+    def test_ai2_primary_and_backup_use_90_and_40_seconds_with_same_evidence(self):
+        with patch.dict(ai.os.environ, {"AI2_BACKUP_URL": "https://api.deepseek.com/chat/completions",
+                                       "AI2_BACKUP_KEY": "BACKUP-SECRET", "FIB_PA_AI2_BACKUP_MODEL": "deepseek-v4-pro",
+                                       "FIB_PA_AI2_BACKUP_EFFORT": "low", "FIB_PA_AI2_BACKUP_TIMEOUT": "40"}), \
+             patch.object(ai.requests, "post", side_effect=[ai.requests.ReadTimeout("read timed out"),
+                          Response('{"decision":"REJECT","defects":["hard defect"],"reasoning":"reviewed","fact_conflicts":[]}')]) as post:
+            raw = ai.call_chat("AI-2", "grok-4.7", "medium", "independent review", "full evidence", 90,
+                               "https://primary.example.test/chat/completions", "SECRET-KEY")
+        self.assertEqual(json.loads(raw)["decision"], "REJECT")
+        first, second = post.call_args_list
+        self.assertEqual([first.kwargs["timeout"], second.kwargs["timeout"]], [90, 40])
+        self.assertEqual(second.kwargs["json"]["reasoning_effort"], "low")
+        self.assertEqual(first.kwargs["json"]["messages"], second.kwargs["json"]["messages"])
+        self.assertEqual([event["read_timeout_sec"] for event in self.events()], [90, 40])
+
+    def test_body_read_timeout_keeps_received_headers_and_no_complete_body(self):
+        def slow_body(*args, **kwargs):
+            response = Response()
+            hook = kwargs.get("hooks", {}).get("response")
+            if hook:
+                hook(response)
+            raise ai.requests.ConnectionError("Read timed out")
+        with patch.object(ai.requests, "post", side_effect=slow_body) as post:
+            with self.assertRaises(ai.AIRequestError):
+                self.call()
+        self.assertEqual(post.call_count, 1)
+        event = self.events()[0]
+        self.assertEqual(event["http_status"], 200)
+        self.assertEqual(event["request_id"], "request-123")
+        self.assertIsNotNone(event["headers_elapsed_sec"])
+        self.assertFalse(event["body_complete"])
+        self.assertEqual(event["outcome"], "read_timeout")
+        self.assertIsNone(event["usage"])
+
     def test_two_slow_routes_do_not_generate_five_paid_copies(self):
         self.backup()
         with patch.object(ai.requests, "post", side_effect=ai.requests.ReadTimeout("read timed out")) as post:
