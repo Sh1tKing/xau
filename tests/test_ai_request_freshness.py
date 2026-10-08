@@ -33,6 +33,7 @@ class FreshnessTests(unittest.TestCase):
                       patch.dict(ai._CHAT_OPTIONS, {}, clear=True),
                       patch.object(ai, "AI3_STATE_FILE", str(Path(self.temp.name) / "state.json")),
                       patch.object(ai, "AI_USAGE_DIR", self.temp.name),
+                      patch.object(ai, "AI1_URL", "https://primary.example.test/chat"),
                       patch.object(ai, "append_decision_snapshot"),
                       patch.object(ai.time, "sleep"),
                       patch.object(ai.base, "send_feishu_notification")):

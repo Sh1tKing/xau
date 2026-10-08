@@ -85,6 +85,7 @@ _CHAT_OPTIONS_LOCK = threading.RLock()
 _CHAT_OPTIONS = {}
 COST_CONTROL_VERSION = "cost-latency-v2"
 MARKET_FRESHNESS_VERSION = "request-freshness-v1"
+RESPONSE_CONTRACT_VERSION = "response-contract-v1"
 QUALITY_LEVEL_POINTS = {"strong": 20, "adequate": 16, "weak": 8, "missing": 0}
 QUALITY_DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_evidence")
 QUALITY_CAUSES = {"volume", "shallow_retrace", "trigger_weakness", "opposing_structure", "stop_vulnerability", "target_uncertainty", "execution_drift", "missing_data", "hard_limit"}
@@ -171,7 +172,8 @@ AI3_INSTRUCTIONS = (
     "未提供原始入场结构时，不得断言原始入场结构已失效；可以依据明确的近期M1/M5结构恶化提前减亏。仅持仓时间长、单次浮亏或一根反向K线不足以close。"
     "先对照entry_context核实原入场理由，不重新评分。"
     "max_adverse为null或覆盖范围有限时，不得写成从未回撤；只用可见区间的MFE/MAE，并明确coverage。"
-    "原始K线省略的candle_parts可由OHLC还原。输出紧凑JSON，reasoning≤100汉字，保留判断所需周期/时间/价位，不复述全部行情。"
+    "原始K线省略的candle_parts可由OHLC还原。输出完整JSON：action、ticket（原持仓票号）、new_stop_loss（非收紧时为null）、reasoning。"
+    "reasoning≤100汉字，保留判断所需周期/时间/价位，不复述全部行情。"
 )
 
 
@@ -821,6 +823,8 @@ def normalize_ai1_quality(payload, pack):
     card = payload.get("quality_assessment")
     if not isinstance(card, dict):
         return payload, "AI-1质量评估缺失: quality_assessment"
+    if "wait_basis" in card:
+        return payload, "AI-1字段层级错误: wait_basis必须位于顶层，不能嵌在quality_assessment内"
     direction = card.get("direction")
     action = str(payload.get("action", "no")).lower()
     if direction not in ("buy", "sell") or action not in ("buy", "sell", "no") or (action != "no" and action != direction):
@@ -925,35 +929,125 @@ def format_ai_action(payload):
     return "无效"
 
 
-def extract_json_object(text):
+def parse_json_object(text):
+    """Extract one complete object without repairing incomplete trading decisions."""
     if not text or not str(text).strip():
-        return None
-    cleaned = str(text).strip()
+        return None, "JSON正文为空"
+    cleaned = str(text).strip().lstrip("\ufeff")
     if cleaned.startswith("```"):
         lines = cleaned.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
+        if len(lines) < 3 or lines[-1].strip() != "```":
+            return None, "JSON代码块未闭合"
+        cleaned = "\n".join(lines[1:-1]).strip()
+    if cleaned.startswith("["):
+        return None, "JSON顶层必须是对象，不能从数组中挑选交易"
     start = cleaned.find("{")
     end = cleaned.rfind("}")
-    if start < 0 or end <= start:
-        return None
+    if start < 0:
+        return None, "正文没有JSON对象"
+
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("重复JSON字段: %s" % key[:60])
+            result[key] = value
+        return result
+
+    def finite_constant(value):
+        raise ValueError("JSON包含非有限数值: %s" % value)
+
+    def finite_float(value):
+        number = float(value)
+        return number if base.math.isfinite(number) else finite_constant(value)
+
+    # Keep the incomplete suffix for an accurate EOF location instead of silently
+    # selecting a valid nested object or synthesizing a missing closing brace.
+    candidate = cleaned[start:] if cleaned.startswith("{") or end <= start else cleaned[start:end + 1]
     try:
-        data = json.loads(cleaned[start:end + 1])
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
+        data = json.loads(candidate, object_pairs_hook=unique_keys, parse_constant=finite_constant, parse_float=finite_float)
+    except json.JSONDecodeError as exc:
+        return None, "JSON语法错误: %s（行%s 列%s，正文%s字符）" % (exc.msg, exc.lineno, exc.colno, len(cleaned))
+    except ValueError as exc:
+        return None, str(exc)
+    return (data, "") if isinstance(data, dict) else (None, "JSON顶层必须是对象")
+
+
+def extract_json_object(text):
+    return parse_json_object(text)[0]
+
+
+def _object_schema(properties):
+    return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
+
+
+def response_json_schema(role):
+    text = {"type": "string"}
+    texts = {"type": "array", "items": text}
+    price = {"anyOf": [{"type": "number"}, {"type": "null"}]}
+    if role == "AI-1":
+        dimension = _object_schema({"level": {"type": "string", "enum": list(QUALITY_LEVEL_POINTS)},
+                                    "reason": text, "evidence_refs": texts, "reservation_ids": texts})
+        reservation = _object_schema({
+            "id": text, "cause": {"type": "string", "enum": sorted(QUALITY_CAUSES)},
+            "event_group": {"anyOf": [text, {"type": "null"}]},
+            "dimension": {"type": "string", "enum": list(QUALITY_DIMENSIONS)},
+            "severity": {"type": "string", "enum": ["minor", "material", "blocking"]},
+            "reason": text, "evidence_refs": texts})
+        wait = _object_schema({"code": {"type": "string", "enum": ["hard_limit", "missing_structure", "missing_trigger",
+                               "missing_data", "target_space", "material_counter_evidence"]},
+                               "reason": text, "evidence_refs": texts})
+        return _object_schema({
+            "action": {"type": "string", "enum": ["buy", "sell", "no"]}, "stop_loss": price, "take_profit": price,
+            "reasoning": text, "trigger_evidence": text, "invalidation": text, "target_basis": text,
+            "fact_conflicts": texts, "unknowns": texts,
+            "quality_assessment": _object_schema({"direction": {"type": "string", "enum": ["buy", "sell"]},
+                "dimensions": _object_schema({name: dimension for name in QUALITY_DIMENSIONS}),
+                "reservations": {"type": "array", "items": reservation}}),
+            "wait_basis": {"type": "array", "items": wait}})
+    if role == "AI-2":
+        return _object_schema({"decision": {"type": "string", "enum": ["APPROVE", "REJECT"]},
+                               "defects": texts, "reasoning": text, "fact_conflicts": texts})
+    if role == "AI-3":
+        return _object_schema({"action": {"type": "string", "enum": ["hold", "tighten_sl", "close"]},
+                               "ticket": {"type": "integer"}, "new_stop_loss": price, "reasoning": text})
+    return None
+
+
+def ai1_json_template():
+    return {"action": "no", "stop_loss": None, "take_profit": None,
+            "reasoning": "<本次结论>", "trigger_evidence": "<实际触发或缺失>",
+            "invalidation": "<失效条件>", "target_basis": "<目标依据>", "fact_conflicts": [], "unknowns": [],
+            "quality_assessment": {"direction": "buy", "dimensions": {
+                name: {"level": "adequate", "reason": "<本项证据结论>", "evidence_refs": ["/<本次真实路径>"],
+                       "reservation_ids": []} for name in QUALITY_DIMENSIONS}, "reservations": []},
+            "wait_basis": [{"code": "missing_trigger", "reason": "<实际等待条件>", "evidence_refs": ["/<本次真实路径>"]}]}
+
+
+AI1_INSTRUCTIONS += (
+    "严格输出一个完整JSON对象，闭合所有括号，不输出Markdown或分析过程。wait_basis必须在顶层，与quality_assessment并列，"
+    "quality_assessment内部只有direction/dimensions/reservations。以下仅示范层级，示例方向/等级/理由/路径不可复用，须按实际证据重填；"
+    "有交易提案时wait_basis为空数组。格式模板：" + json.dumps(ai1_json_template(), ensure_ascii=False, separators=(",", ":"))
+)
+
+
+def request_protocol(url):
+    return "anthropic" if urlsplit(url).path.rstrip("/").endswith("/messages") else "chat"
 
 
 def extract_chat_text(result):
     if not isinstance(result, dict):
         return ""
+    if result.get("type") == "message":
+        return "\n".join(block["text"].strip() for block in result.get("content", [])
+                         if isinstance(block, dict) and block.get("type") == "text"
+                         and isinstance(block.get("text"), str) and block["text"].strip())
     for choice in result.get("choices") or []:
         if not isinstance(choice, dict):
             continue
         message = choice.get("message") or {}
+        if not isinstance(message, dict):
+            continue
         content = message.get("content")
         if isinstance(content, str) and content.strip():
             return content.strip()
@@ -974,14 +1068,11 @@ def summarize_chat_result(result):
     if not isinstance(result, dict):
         return str(result)[:300]
     choices = result.get("choices") or []
-    finish = None
-    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-        finish = choices[0].get("finish_reason")
     return {
         "id": result.get("id"),
         "model": result.get("model"),
         "choices": len(choices) if isinstance(choices, list) else 0,
-        "finish_reason": finish,
+        "finish_reason": chat_finish_reason(result),
         "usage": result.get("usage"),
     }
 
@@ -1056,6 +1147,20 @@ def normalized_chat_usage(result):
     def number(*values):
         return next((value for value in values if isinstance(value, (int, float)) and not isinstance(value, bool)), None)
 
+    if result.get("type") == "message":
+        uncached = number(raw.get("input_tokens"))
+        cache_read = number(raw.get("cache_read_input_tokens"))
+        cache_write = number(raw.get("cache_creation_input_tokens"))
+        # Native Messages input_tokens excludes cache reads and writes. Unknown
+        # fields remain unknown; never guess a fully inclusive total from them.
+        inclusive = sum((uncached, cache_read, cache_write)) if all(
+            value is not None for value in (uncached, cache_read, cache_write)) else None
+        output = number(raw.get("output_tokens"))
+        return {"input_tokens": inclusive, "uncached_input_tokens": uncached, "output_tokens": output,
+                "total_tokens": inclusive + output if inclusive is not None and output is not None else None,
+                "reasoning_tokens": number(raw.get("reasoning_tokens")), "cache_read_tokens": cache_read,
+                "cache_write_tokens": cache_write, "input_semantics": "anthropic_cache_exclusive"}
+
     # Providers differ on whether cached input is included; do not add it again.
     return {
         "input_tokens": number(raw.get("prompt_tokens"), raw.get("input_tokens")),
@@ -1070,6 +1175,8 @@ def normalized_chat_usage(result):
 
 
 def chat_finish_reason(result):
+    if isinstance(result, dict) and result.get("type") == "message":
+        return result.get("stop_reason")
     choices = result.get("choices") if isinstance(result, dict) else None
     return choices[0].get("finish_reason") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
 
@@ -1088,6 +1195,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
     read_failures = {"primary": 0, "backup": 0}
     context = request_context or {}
     call_id = "%s-%s" % (role, time.time_ns())
+    schema = response_json_schema(role)
 
     def task_alive():
         return still_current is None or still_current()
@@ -1114,11 +1222,13 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
         channel = "backup" if using_backup else "primary"
         request_timeout = chat_request_timeout(role, timeout, using_backup)
         label = channel
+        protocol = request_protocol(active["url"])
         option_key = (active["url"], active["model"])
         default_token_field = "max_completion_tokens" if active["model"].lower().startswith(("gpt-", "o1", "o3", "o4")) else "max_tokens"
         with _CHAT_OPTIONS_LOCK:
             options = dict(_CHAT_OPTIONS.get(option_key, {}))
-        token_field = options.get("token_field", default_token_field)
+        token_field = "max_tokens" if protocol == "anthropic" else options.get("token_field", default_token_field)
+        json_mode = options.get("json_mode", "schema") if schema else "prompt"
         omit_reasoning = omit_reasoning or options.get("omit_reasoning", False)
         if low_retry:
             label += "/low_retry"
@@ -1149,9 +1259,26 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             token_field: AI_MAX_TOKENS.get(role, 4096),
         }
         this_effort = "low" if low_retry else active["effort"]
-        if this_effort and not omit_reasoning:
-            data["reasoning_effort"] = this_effort
         headers = {"Content-Type": "application/json", "Authorization": "Bearer " + active["key"]}
+        if protocol == "anthropic":
+            data["system"] = instructions
+            data["messages"] = [{"role": "user", "content": request_prompt}]
+            output_config = {}
+            if this_effort and not omit_reasoning:
+                output_config["effort"] = this_effort
+            if json_mode == "schema":
+                output_config["format"] = {"type": "json_schema", "schema": schema}
+            if output_config:
+                data["output_config"] = output_config
+            headers["anthropic-version"] = "2023-06-01"
+        else:
+            if this_effort and not omit_reasoning:
+                data["reasoning_effort"] = this_effort
+            if json_mode == "schema":
+                data["response_format"] = {"type": "json_schema", "json_schema": {
+                    "name": role.replace("-", "_").lower() + "_decision", "strict": True, "schema": schema}}
+            elif json_mode == "object":
+                data["response_format"] = {"type": "json_object"}
         attempted = attempt
         started = time.monotonic()
         response_progress = {}
@@ -1164,7 +1291,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             })
             return response
 
-        def record_attempt(outcome, result=None, response=None):
+        def record_attempt(outcome, result=None, response=None, json_error=None):
             finish = chat_finish_reason(result)
             response_headers = getattr(response, "headers", {}) or {}
             response_id = result.get("id") if isinstance(result, dict) else None
@@ -1182,7 +1309,10 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 "body_complete": response is not None,
                 "prompt_chars": len(request_prompt), "instructions_chars": len(instructions),
                 "snapshot_id": snapshot.get("snapshot_id"), "request_quote": snapshot.get("quote"),
-                "reasoning_effort_sent": data.get("reasoning_effort"),
+                "protocol": protocol, "response_contract_version": RESPONSE_CONTRACT_VERSION,
+                "json_mode_sent": json_mode, "json_error": json_error,
+                "reasoning_effort_sent": (data.get("output_config", {}).get("effort") if protocol == "anthropic"
+                                          else data.get("reasoning_effort")),
                 "token_limit": data[token_field], "token_limit_field": token_field,
                 "finish_reason": finish, "usage": normalized_chat_usage(result),
                 "cost": None,  # Rates and timeout billing belong to the provider, not guesses.
@@ -1228,18 +1358,46 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
         if finish_reason in ("length", "max_tokens"):
             record_attempt("truncated", result, response)
             raise AIRequestError(role, "输出达到token上限，拒绝不完整决策且不重复付费请求；查看ai_usage调整本角色MAX_TOKENS")
-        unsupported_parameter = any(word in response.text.lower() for word in (
-            "unsupported", "unknown", "unrecognized", "not supported", "unexpected", "not allowed"))
-        if response.status_code == 400 and unsupported_parameter and "reasoning" in response.text.lower() and "reasoning_effort" in data:
+        error_object = result.get("error") if isinstance(result, dict) else None
+        error_text = (str(error_object.get("message", "")) + " " + str(error_object.get("param", ""))
+                      if isinstance(error_object, dict) else response.text).lower()
+        unsupported_parameter = any(word in error_text for word in (
+            "unsupported", "unknown", "unrecognized", "not supported", "unexpected", "not allowed", "not permitted", "extra_forbidden"))
+        if response.status_code == 400 and unsupported_parameter:
+            format_rejected = (json_mode != "prompt" and any(name in error_text for name in (
+                "response_format", "json_schema", "output_config.format")))
+            whole_config_rejected = (protocol == "anthropic" and "output_config" in error_text
+                                     and ".format" not in error_text and ".effort" not in error_text)
+            if format_rejected or whole_config_rejected:
+                record_attempt("unsupported_json_format", result, response)
+                next_mode = "object" if (protocol == "chat" and json_mode == "schema"
+                                        and "json_schema" in error_text and "response_format" not in error_text) else "prompt"
+                with _CHAT_OPTIONS_LOCK:
+                    route_options = _CHAT_OPTIONS.setdefault(option_key, {})
+                    route_options["json_mode"] = next_mode
+                    if whole_config_rejected:
+                        route_options["omit_reasoning"] = True
+                        omit_reasoning = True
+                last_problem = "接口不支持结构化参数，降级为%s，继续保留本地契约校验和生成上限" % next_mode
+                base.logger.warning("%s %s (%s)", role, last_problem, label)
+                continue
+        effort_rejected = (("reasoning" in error_text and "reasoning_effort" in data)
+                           or (protocol == "anthropic" and "effort" in error_text
+                               and "effort" in data.get("output_config", {})))
+        if response.status_code == 400 and unsupported_parameter and effort_rejected:
             record_attempt("unsupported_reasoning", result, response)
             omit_reasoning = True
             with _CHAT_OPTIONS_LOCK:
                 _CHAT_OPTIONS.setdefault(option_key, {})["omit_reasoning"] = True
-            last_problem = "接口拒绝reasoning参数"
-            base.logger.warning("%s 拒绝 reasoning 参数，去掉后重试 (%s)", role, label)
+            last_problem = "接口拒绝推理档位参数"
+            base.logger.warning("%s 拒绝推理档位参数，去掉后重试 (%s)", role, label)
             continue
-        if response.status_code == 400 and unsupported_parameter and token_field in response.text.lower():
+        if response.status_code == 400 and unsupported_parameter and token_field in error_text:
             record_attempt("unsupported_token_limit", result, response)
+            if protocol == "anthropic":
+                if switch_to_backup():
+                    continue
+                raise AIRequestError(role, "Messages接口拒绝必填max_tokens，停止请求，不移除上限或改用Chat字段")
             if token_fallback_used:
                 raise AIRequestError(role, "接口拒绝两种token上限参数，停止请求，不能移除费用上限后无限生成")
             token_fallback_used = True
@@ -1256,11 +1414,24 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             last_problem = "接口返回非JSON响应"
             record_attempt("non_json", result, response)
         else:
+            usage = normalized_chat_usage(result) or {}
+            reported_output = usage.get("output_tokens")
+            if reported_output is not None and reported_output > data[token_field]:
+                record_attempt("token_limit_exceeded", result, response)
+                raise AIRequestError(role, "上游报告输出%s token超过发送上限%s，停止本轮；需核查中转参数映射/计量，已发生费用不能由客户端撤回"
+                                     % (reported_output, data[token_field]))
+            if finish_reason in ("refusal", "content_filter") or (protocol == "anthropic" and finish_reason not in ("end_turn", "stop_sequence")):
+                record_attempt("non_final_decision", result, response)
+                raise AIRequestError(role, "接口未返回可执行的最终决策，结束标记=%s，不重复生成" % finish_reason)
             text = extract_chat_text(result)
-            record_attempt("success" if text else "empty_output", result, response)
+            json_error = parse_json_object(text)[1] if text else None
+            record_attempt("invalid_decision_json" if text and json_error else "success" if text else "empty_output",
+                           result, response, json_error)
             if text:
-                if attempt > 1:
-                    base.logger.info("%s 第 %s/%s 次请求成功 (%s)", role, attempt, AI_HTTP_RETRIES, label)
+                if json_error:
+                    base.logger.warning("%s 正文格式拒绝: %s (%s)，保留原文快照，不补括号或付费重审", role, json_error, label)
+                if attempt > 1 and not json_error:
+                    base.logger.info("%s 第 %s/%s 次请求收到可解析JSON (%s)，仍需策略校验", role, attempt, AI_HTTP_RETRIES, label)
                 return text
             last_problem = "接口可见输出为空"
         base.logger.warning("%s 调用失败 (%s/%s, %s): %s", role, attempt, AI_HTTP_RETRIES, label, last_problem)
@@ -1970,8 +2141,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                 self.alert_api_failure("AI-1", "没有可见 JSON")
                 return
             entry_price = float((local_result.details or {}).get("entry_price") or price)
-            parsed_raw = extract_json_object(raw)
-            parsed, quality_error = normalize_ai1_quality(parsed_raw, pack)
+            parsed_raw, json_error = parse_json_object(raw)
+            parsed, quality_error = (None, "AI-1输出格式错误: " + json_error) if json_error else normalize_ai1_quality(parsed_raw, pack)
             proposal, reason = None, quality_error
             if not quality_error:
                 proposal, reason = finalize_ai_proposal(
@@ -1992,6 +2163,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "raw": raw,
                     "parsed": parsed,
                     "quality_error": quality_error,
+                    "json_error": json_error or None,
                     "proposal": proposal.to_decision() if proposal is not None else None,
                     "python_reason": reason,
                 },
@@ -2076,8 +2248,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                 append_decision_snapshot(decision_id, "ai2_empty", {"proposal": proposal.to_decision()})
                 self.alert_api_failure("AI-2", "没有可见 JSON，拒绝开仓")
                 return
-            review_payload = extract_json_object(review_raw)
-            allowed, review_reason = ai2_allows(review_payload)
+            review_payload, review_json_error = parse_json_object(review_raw)
+            allowed, review_reason = (False, "AI-2输出格式错误: " + review_json_error) if review_json_error else ai2_allows(review_payload)
             append_decision_snapshot(
                 decision_id,
                 "ai2_result",
@@ -2086,6 +2258,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "parsed": review_payload,
                     "allowed": allowed,
                     "reason": review_reason,
+                    "json_error": review_json_error or None,
                     "proposal": proposal.to_decision(),
                 },
             )
@@ -2280,7 +2453,11 @@ class ThreeAITrader(base.FibVolumePATrader):
             if {int(p.ticket) for p in self.get_positions()} != expected_tickets:
                 base.logger.info("AI-3返回时原持仓已改变，丢弃旧回复")
                 return
-            self.execute_ai3(extract_json_object(raw))
+            payload, json_error = parse_json_object(raw)
+            if json_error:
+                base.logger.warning("AI-3输出格式错误: %s，本地护盘继续", json_error)
+                return
+            self.execute_ai3(payload)
         except MarketSnapshotError as exc:
             base.logger.info("AI-3行情刷新停止本轮: %s", exc)
         except AIRequestError as exc:
@@ -2364,6 +2541,8 @@ class ThreeAITrader(base.FibVolumePATrader):
         base.logger.info("AI质量评分=%s，等级分值=%s，门槛=%s（非胜率）", QUALITY_VERSION, QUALITY_LEVEL_POINTS, AI_CONFIDENCE)
         base.logger.info("AI行情刷新=%s 每次POST采集新行情，AI-2及下单前复核现价，旧提案不跨收盘K线执行",
                          MARKET_FRESHNESS_VERSION)
+        base.logger.info("AI协议与JSON=%s 按主备URL分别适配；优先严格Schema，明确不支持才降级，格式错误不执行",
+                         RESPONSE_CONTRACT_VERSION)
         base.logger.info("AI成本控制=%s token上限=%s 同通道读超时补发=%s 用量目录=%s",
                          COST_CONTROL_VERSION, AI_MAX_TOKENS, AI_READ_TIMEOUT_RETRIES, AI_USAGE_DIR)
         base.logger.info("AI URLs: AI1=%s AI2=%s AI3=%s" % (AI1_URL, AI2_URL, AI3_URL))
