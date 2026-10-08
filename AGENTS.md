@@ -71,6 +71,8 @@
 
 ## 已知问题
 
+- 2026-10-08 行情刷新 `request-freshness-v1`：昨晚票据595017736实际SELL成交4128.23、止损4128.63，一秒后在4128.63平仓、净亏0.40；不能归因AI-3主动平仓。旧代码重试复用快照，AI-2也沿用AI-1报价，执行仅检查最大止损和RR，贴近止损会出现虚高RR。现 `xauusd_fib_volume_pa_ai3.py` 的 `call_chat(refresh_request=...)` 在每次实际POST前重建请求（含主备、参数兼容），采集失败不重发旧提示词；AI-1结果绑定成功请求的完整行情/质量卡，AI-2每次刷新Bid/Ask，对照原快照并重算固定SL/TP执行区间。区间由既有 `entry_risk_limits(atr)` 和RR1.5推导，止损触发侧还需 `stop_buffer(atr)` 空间，实时EMA21追价不得超过1.5ATR；不是允许AI移动止损或扩大区间。新的已收盘H1/M15/M5出现时旧提案停止审核/执行。下单前用同一提交tick再检查，AI-3重试刷新原持仓/行情，原票消失不接管新仓。基础脚本新增默认空校验钩子，纯本地策略与M15参考价不变；开仓通知区分提交报价/回执成交价。用量日志带snapshot_id/request_quote，启动日志显示刷新版本。离线回归见 `tests/test_ai_request_freshness.py`；没有改.env/模型档位、没有增加付费重试，没有启动进程，不能据此声称提高收益或彻底消除秒损。
+
 - 2026-10-08 `cost-latency-v2`验收：71项离线测试及2项内置自检通过，交易日志/持仓状态哈希不变。修复后真实call_chat完整历史审核：Grok主路仍有90.6秒读超时；自动切DeepSeek low/40秒后，备用17.6秒返回完整REJECT，整轮110.2秒。备用直接验证19.8秒也成功。已恢复的是完整备用审核链路，不保证主路从不超时、服务器时延或历史单必定开仓。没有启动/重启交易，URL/密钥/模型保持用户配置。
 
 - 2026-10-08 AI2完整审核超时修复 `cost-latency-v2`：修正配置后的11:26轮确认主路Grok与官网DeepSeek都读超时，备用切换有效。最新完整快照本机复放：Grok medium约85.7秒返回；DeepSeek V4 Pro medium（官方映射high）0.47秒收到HTTP200头、44.6秒返回length，4096 token全部用于reasoning，最终content空；同输入仅改low约13.8秒返回完整REJECT。不能把“连得上官网”当成完整审核能在40秒内完成，也不能仅延时后放行截断。`AI2_TIMEOUT`默认90秒，本地/部署.env同步；部署已配置的DeepSeek备用effort改low并设`FIB_PA_AI2_BACKUP_TIMEOUT=40`。新增各角色可选`FIB_PA_AI{n}_BACKUP_TIMEOUT`，正整数秒，空/非法/非正值继承主路；单独超时项不形成独立备用，未改URL/密钥/模型。requests响应hook保留响应头状态/ID/耗时，正文超时用量仍未知；usage新增read_timeout_sec/headers_elapsed_sec/body_complete。保留总预算5、读超时不重复补发、AI1/AI2共享360秒、截断拒绝和全部策略硬限制。上次小请求探测不足以验证完整审核的思考额度；以完整快照验收，但单次本机成功不保证服务器时延或收益。不因有效REJECT继续切模型。回归见tests/test_ai_cost_control.py，部署需用户自行重启，代理不启动交易。

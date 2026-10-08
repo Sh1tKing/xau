@@ -140,6 +140,7 @@ class QualityScorecardTests(unittest.TestCase):
         trader = SimpleNamespace(current_position_count=lambda: 0)
         trader.validate_order_prices = lambda *args: ai.base.FibVolumePATrader.validate_order_prices(trader, *args)
         result = ai.base.StrategyResult("sell", 96, False, "quality passed", 4125.07, 4110.15, 0, 0, {})
+        trader.validate_execution_prices = lambda result, tick: ""
         with patch.object(ai.base.mt5, "symbol_info_tick", return_value=SimpleNamespace(bid=4118.34, ask=4118.67)), \
              patch.object(ai.base.mt5, "order_send") as order_send:
             self.assertFalse(ai.base.FibVolumePATrader.place_order(trader, result))

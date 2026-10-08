@@ -2117,6 +2117,10 @@ class FibVolumePATrader:
                 else:
                     state.breach_started_at = None
 
+    def validate_execution_prices(self, result: StrategyResult, tick) -> str:
+        """Optional execution checks for subclasses using independently reviewed plans."""
+        return ""
+
     def place_order(self, result: StrategyResult):
         action = result.action
         if action not in ("buy", "sell"):
@@ -2148,6 +2152,11 @@ class FibVolumePATrader:
                 f"❌ SL/TP方向非法，拒绝下单: action={action}, price={price}, "
                 f"SL={result.stop_loss}, TP={result.take_profit}"
             )
+            return False
+
+        execution_error = self.validate_execution_prices(result, tick)
+        if execution_error:
+            logger.info(f"执行复核拒绝下单: {execution_error}, action={action}, price={price}")
             return False
 
         live_risk = directional_stop_distance(action, price, result.stop_loss)
@@ -2232,7 +2241,10 @@ class FibVolumePATrader:
             )
             return False
 
-        logger.info(f"✅ 下单成功: {action.upper()} {LOT_SIZE} {SYMBOL}, price={price}, SL={result.stop_loss}, TP={result.take_profit}")
+        fill_price = float(getattr(order_result, "price", 0) or 0)
+        if not math.isfinite(fill_price) or fill_price <= 0:
+            fill_price = None
+        logger.info(f"✅ 下单成功: {action.upper()} {LOT_SIZE} {SYMBOL}, price={price}, fill_price={fill_price}, SL={result.stop_loss}, TP={result.take_profit}")
         # On netting/hedging MT5 the new position ticket equals the opening order ticket.
         order_ticket = int(getattr(order_result, "order", 0) or 0)
         self.last_order_ticket = order_ticket
@@ -2249,10 +2261,11 @@ class FibVolumePATrader:
             [
                 f"方向: {action.upper()}",
                 f"手数: {LOT_SIZE}",
-                f"成交价: {price}",
+                f"提交报价: {price}",
+                f"成交价: {fill_price if fill_price is not None else '未知（回执未返回）'}",
                 f"止损: {result.stop_loss}",
                 f"止盈: {result.take_profit}",
-                    f"盈亏比: {live_rr:.2f}",
+                f"提交报价盈亏比: {live_rr:.2f}",
                 f"置信度: {result.confidence}",
                 f"BUY评分: {result.score_buy}",
                 f"SELL评分: {result.score_sell}",

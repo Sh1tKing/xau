@@ -84,6 +84,7 @@ _USAGE_LOCK = threading.RLock()
 _CHAT_OPTIONS_LOCK = threading.RLock()
 _CHAT_OPTIONS = {}
 COST_CONTROL_VERSION = "cost-latency-v2"
+MARKET_FRESHNESS_VERSION = "request-freshness-v1"
 QUALITY_LEVEL_POINTS = {"strong": 20, "adequate": 16, "weak": 8, "missing": 0}
 QUALITY_DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_evidence")
 QUALITY_CAUSES = {"volume", "shallow_retrace", "trigger_weakness", "opposing_structure", "stop_vulnerability", "target_uncertainty", "execution_drift", "missing_data", "hard_limit"}
@@ -124,6 +125,13 @@ AI2_INSTRUCTIONS = (
     "最终目标与AI理由不同须有可核实调整依据，否则REJECT；数据不足指出字段，不猜事实。"
     "输出紧凑JSON：decision、defects数组、reasoning、fact_conflicts数组；APPROVE两数组为空。"
     "reasoning≤120汉字，缺陷只列独立硬伤及必要时间/价格/来源，不复述行情和评分卡。"
+)
+AI1_INSTRUCTIONS += (
+    "live_quote是本次请求重新采集的报价，不是参考K线收盘价；按当前报价核实方案可执行性，不能把止损贴近现价形成的高RR当作质量提升。"
+)
+AI2_INSTRUCTIONS += (
+    "ai1_snapshot是原分析报价，market_evidence.live_quote是本次审核新报价；比较变化，按final_plan_feasibility核实当前执行区间、止损触发侧剩余空间及追价。"
+    "executable=false是当前方案硬伤；不得扩大执行区间或移动SL/TP来放行。APPROVE只针对本次快照，Python仍会复核下单瞬间报价。"
 )
 OBSTACLE_EVIDENCE_INSTRUCTIONS = (
     "obstacles是候选且不穷尽结构，Fib端点不天然为独立强障碍。unknown/unassessed结合origin_bar/observed评估，不自动硬否决。"
@@ -577,6 +585,7 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
         },
         "live_quote": quote or {"bid": None, "ask": None, "time": None},
         "atr": round(atr, 2),
+        "m15_ema21": base.ema_last(df_m15["close"], 21),
         "h1_trend": h1_trend,
         "m15_trend": m15_trend,
         "m15_ema21_distance_atr": round(base.ema_distance_atr(df_m15, atr, 21), 2),
@@ -623,7 +632,9 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
         "m5_bars": bars_for_prompt(df_m5, 8),
     }
     plan_entry = float((local_result.details or {}).get("entry_price") or price)
-    pack["local_plan_feasibility"] = plan_feasibility(local_result.action, plan_entry, local_result.stop_loss, local_result.take_profit, pack["live_quote"])
+    pack["local_plan_feasibility"] = plan_feasibility(local_result.action, plan_entry, local_result.stop_loss,
+                                                     local_result.take_profit, pack["live_quote"], atr,
+                                                     pack["m15_ema21"])
     return pack, fib, atr, price
 
 
@@ -685,7 +696,7 @@ def compact_review_pack(review):
     return {"market_evidence": result.pop("market_evidence"), **result}
 
 
-def plan_feasibility(action, reference_entry, stop_loss, take_profit, quote):
+def plan_feasibility(action, reference_entry, stop_loss, take_profit, quote, atr=None, ema21=None):
     """Snapshot arithmetic for one plan, never a substitute for order-time checks."""
     result = {"action": action, "reference_entry": reference_entry, "stop_loss": stop_loss,
               "take_profit": take_profit, "quote_time": quote.get("time"), "available": False}
@@ -704,8 +715,70 @@ def plan_feasibility(action, reference_entry, stop_loss, take_profit, quote):
     result.update({"available": True, "live_entry": live_entry, "live_risk": round(risk, 6),
                    "live_reward": round(reward, 6), "live_rr": round(reward / risk, 6) if risk > 0 else None,
                    "stop_within_cap": bool(0 < risk <= base.MAX_SL_ABS),
-                   "rr_passes": bool(risk > 0 and reward >= base.MIN_REWARD_RISK * risk)})
+                    "rr_passes": bool(risk > 0 and reward >= base.MIN_REWARD_RISK * risk)})
+    if atr is not None:
+        if not base.math.isfinite(float(atr)) or float(atr) <= 0:
+            result["executable"] = False
+            return result
+        min_risk, max_risk = base.entry_risk_limits(atr)
+        rr_edge = (take_profit + base.MIN_REWARD_RISK * stop_loss) / (1 + base.MIN_REWARD_RISK)
+        lower, upper = ((stop_loss + min_risk, min(stop_loss + max_risk, rr_edge)) if action == "buy"
+                        else (max(stop_loss - max_risk, rr_edge), stop_loss - min_risk))
+        trigger_price = quote.get("bid" if action == "buy" else "ask")
+        try:
+            trigger_price = float(trigger_price)
+            clearance = sign * (trigger_price - stop_loss)
+        except (TypeError, ValueError):
+            clearance = float("nan")
+        min_clearance = base.stop_buffer(atr)
+        chase = abs(live_entry - float(ema21)) / atr if ema21 is not None else None
+        result.update({
+            "entry_bounds": {"lower": round(lower, 6), "upper": round(upper, 6),
+                             "source": "fixed_sl_tp_existing_risk_limits"},
+            "min_live_risk": min_risk,
+            "within_entry_bounds": lower - 1e-6 <= live_entry <= upper + 1e-6,
+            "remaining_stop_space": round(clearance, 6) if base.math.isfinite(clearance) else None,
+            "min_stop_clearance": min_clearance,
+            "protection_space_passes": base.math.isfinite(clearance) and clearance + 1e-6 >= min_clearance,
+            "chase_distance_atr": round(chase, 6) if chase is not None else None,
+            "chase_passes": chase is None or base.math.isfinite(chase) and chase <= base.CHASE_MAX_ATR + 1e-6,
+        })
+        result["executable"] = all(result[key] for key in (
+            "stop_within_cap", "rr_passes", "within_entry_bounds", "protection_space_passes", "chase_passes"))
     return result
+
+
+class MarketSnapshotError(RuntimeError):
+    """Fresh evidence is unavailable or the reviewed plan no longer applies."""
+
+
+def quote_from_tick(tick):
+    try:
+        bid, ask = float(tick.bid), float(tick.ask)
+    except (AttributeError, TypeError, ValueError):
+        raise MarketSnapshotError("无法取得当前Bid/Ask，停止本轮，不复用旧报价")
+    if not all(base.math.isfinite(p) and p > 0 for p in (bid, ask)) or ask < bid:
+        raise MarketSnapshotError("当前Bid/Ask无效，停止本轮")
+    return {"bid": bid, "ask": ask, "time": int(getattr(tick, "time", 0) or 0),
+            "time_msc": int(getattr(tick, "time_msc", 0) or 0), "observed_at": time.time()}
+
+
+def closed_context_times(df_m15, df_h1, df_m5):
+    return {name: int(df["time"].iloc[-1]) for name, df in (
+        ("m15_last_closed_bar_time", df_m15), ("h1_last_closed_bar_time", df_h1),
+        ("m5_last_closed_bar_time", df_m5))}
+
+
+def execution_rejection(facts):
+    if not facts.get("available") or "executable" not in facts:
+        return "当前报价或执行风险数据不足"
+    if not facts.get("within_entry_bounds"):
+        return "现价已离开固定SL/TP和既有风险限制允许的执行区间"
+    if not facts.get("protection_space_passes"):
+        return "扣除点差后的止损触发侧保护空间不足"
+    if not facts.get("chase_passes"):
+        return "当前报价偏离M15 EMA21超过追价上限"
+    return "" if facts.get("executable") else "当前止损距离或盈亏比不符合硬限制"
 
 
 def quality_rubric():
@@ -1001,7 +1074,8 @@ def chat_finish_reason(result):
     return choices[0].get("finish_reason") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
 
 
-def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, still_current=None, request_context=None):
+def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, still_current=None,
+              request_context=None, refresh_request=None):
     primary = {"model": model, "effort": effort, "url": str(url or "").strip(),
                "key": str(api_key or "").strip()}
     backup = backup_chat_config(role, model, effort, url, api_key)
@@ -1054,11 +1128,22 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             base.logger.info("%s 任务已过期或已停止，停止重试 (%s %s/%s)",
                              role, label, attempt, AI_HTTP_RETRIES)
             return ""
+        snapshot = refresh_request() if refresh_request is not None else {}
+        if not isinstance(snapshot, dict) or (refresh_request is not None and not snapshot.get("prompt")):
+            raise MarketSnapshotError("无法构造新的请求快照，停止本轮，不发送旧提示词")
+        request_prompt = snapshot.get("prompt", prompt)
+        if not task_alive():
+            return ""
+        if snapshot.get("snapshot_id"):
+            request_quote = snapshot.get("quote") or {}
+            base.logger.info("%s 请求行情 snapshot=%s bid=%s ask=%s tick_time=%s observed_at=%s (%s %s/%s)",
+                             role, snapshot["snapshot_id"], request_quote.get("bid"), request_quote.get("ask"),
+                             request_quote.get("time"), request_quote.get("observed_at"), label, attempt, AI_HTTP_RETRIES)
         data = {
             "model": active["model"],
             "messages": [
                 {"role": "system", "content": instructions},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": request_prompt},
             ],
             "stream": False,
             token_field: AI_MAX_TOKENS.get(role, 4096),
@@ -1095,7 +1180,8 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 "read_timeout_sec": request_timeout,
                 "headers_elapsed_sec": response_progress.get("headers_elapsed_sec"),
                 "body_complete": response is not None,
-                "prompt_chars": len(prompt), "instructions_chars": len(instructions),
+                "prompt_chars": len(request_prompt), "instructions_chars": len(instructions),
+                "snapshot_id": snapshot.get("snapshot_id"), "request_quote": snapshot.get("quote"),
                 "reasoning_effort_sent": data.get("reasoning_effort"),
                 "token_limit": data[token_field], "token_limit_field": token_field,
                 "finish_reason": finish, "usage": normalized_chat_usage(result),
@@ -1583,8 +1669,86 @@ class ThreeAITrader(base.FibVolumePATrader):
     def current_position_count(self):
         return len(self.get_positions())
 
+    def get_live_quote(self):
+        with self._mt5_lock:
+            return quote_from_tick(base.mt5.symbol_info_tick(base.SYMBOL))
+
+    def collect_entry_snapshot(self, decision_id):
+        df_m15, df_h1, df_m5 = self.get_context()
+        local_result = base.build_fib_volume_pa_decision(df_m15, df_h1, df_m5, base.CONFIDENCE_THRESHOLD)
+        pack, fib, atr, price = build_feature_pack(
+            df_m15, df_h1, df_m5, local_result, quote=self.get_live_quote(), decision_id=decision_id)
+        pack["snapshot_id"] = "%s-ai1-%s" % (decision_id, time.time_ns())
+        return df_m15, df_h1, df_m5, local_result, compact_market_pack(pack), fib, atr, price
+
+    def ensure_review_bars_current(self, expected):
+        current = closed_context_times(*self.get_context())
+        if any(current[name] != expected.get(name) for name in current):
+            raise MarketSnapshotError("已有新的已收盘H1/M15/M5，旧提案停止审核/执行，等待下一轮重新分析")
+
+    def prepare_review_request(self, proposal, ai1_pack, parsed, reason, decision_id, trigger):
+        self.ensure_review_bars_current(ai1_pack["bar_closure"])
+        market = copy.deepcopy(ai1_pack)
+        market["live_quote"] = self.get_live_quote()
+        market["snapshot_id"] = "%s-ai2-%s" % (decision_id, time.time_ns())
+        reference = float(proposal.details.get("reference_entry_price") or ai1_pack["reference_price"]["price"])
+        entry = float(proposal.details.get("entry_price") or reference)
+        atr = proposal.details.get("execution_guard", {}).get("atr", market["atr"])
+        facts = plan_feasibility(proposal.action, entry, proposal.stop_loss, proposal.take_profit,
+                                 market["live_quote"], atr, market.get("m15_ema21"))
+        error = execution_rejection(facts)
+        if error:
+            append_decision_snapshot(decision_id, "execution_rejected", {"reason": error, "feasibility": facts})
+            raise MarketSnapshotError(error)
+        local_reference = market.get("local_plan_feasibility", {}).get("reference_entry", market["reference_price"]["price"])
+        market["local_plan_feasibility"] = plan_feasibility(
+            market["local_action"], local_reference, market["local_stop_loss"],
+            market["local_take_profit"], market["live_quote"], atr, market.get("m15_ema21"))
+        review = {
+            "proposal": proposal.to_decision(), "ai1_raw_proposal": parsed,
+            "python_finalization": {"reference_entry_price": reference,
+                                    "final_entry_price": entry, "final_stop_loss": proposal.stop_loss,
+                                    "final_take_profit": proposal.take_profit, "reason": reason},
+            "decision_id": decision_id, "reference_entry_price": reference,
+            "entry_price": entry, "final_plan_feasibility": facts,
+            "ai1_snapshot": {"snapshot_id": ai1_pack.get("snapshot_id"), "quote": ai1_pack["live_quote"],
+                             "bar_closure": ai1_pack["bar_closure"]},
+            "atr": atr, "h1_trend": market["h1_trend"], "m15_trend": market["m15_trend"],
+            "regime": market.get("regime"), "regime_text": market.get("regime_text"),
+            "session": market.get("session"), "setup": market.get("setup"),
+            "max_stop_abs": base.MAX_SL_ABS, "min_rr": base.MIN_REWARD_RISK,
+            "local_action": market["local_action"], "local_reasoning": market["local_reasoning"],
+            "market_evidence": market,
+        }
+        review = compact_review_pack(review)
+        proposal.details["ai2_snapshot_id"] = market["snapshot_id"]
+        append_decision_snapshot(decision_id, "ai2_input", {"review": review, "trigger": trigger})
+        return {"prompt": prompt_json("审核当前可执行的最终订单，只输出契约JSON。", review),
+                "snapshot_id": market["snapshot_id"], "quote": market["live_quote"]}
+
+    def validate_execution_prices(self, result, tick):
+        guard = (result.details or {}).get("execution_guard")
+        if guard is None:
+            return ""
+        try:
+            quote = quote_from_tick(tick)
+            entry = float(result.details.get("entry_price") or quote["ask" if result.action == "buy" else "bid"])
+            facts = plan_feasibility(result.action, entry, result.stop_loss, result.take_profit,
+                                     quote, guard["atr"], guard.get("ema21"))
+            result.details["last_execution_check"] = {"quote": quote, "feasibility": facts}
+            return execution_rejection(facts)
+        except (MarketSnapshotError, KeyError, TypeError, ValueError) as exc:
+            return "执行数据无效: %s" % exc
+
     def place_order(self, result):
         with self._mt5_lock:
+            guard = (result.details or {}).get("execution_guard", {})
+            if guard.get("bar_closure"):
+                try:
+                    self.ensure_review_bars_current(guard["bar_closure"])
+                except (MarketSnapshotError, RuntimeError) as exc:
+                    base.logger.info("执行复核拒绝下单: %s", exc)
+                    return False
             placed = super().place_order(result)
             if not placed:
                 return False
@@ -1732,25 +1896,11 @@ class ThreeAITrader(base.FibVolumePATrader):
         try:
             if self._stop.is_set():
                 return
-            df_m15, df_h1, df_m5 = self.get_context()
-            local_result = base.build_fib_volume_pa_decision(
-                df_m15, df_h1, df_m5, base.CONFIDENCE_THRESHOLD
-            )
             decision_id = "%s-%s" % (bar_time, seq)
-            with self._mt5_lock:
-                tick = base.mt5.symbol_info_tick(base.SYMBOL)
-            quote = {
-                "bid": round(float(tick.bid), 2) if tick else None,
-                "ask": round(float(tick.ask), 2) if tick else None,
-                "time": int(getattr(tick, "time", 0) or 0) if tick else None,
-            }
-            pack, fib, atr, price = build_feature_pack(
-                df_m15, df_h1, df_m5, local_result, quote=quote, decision_id=decision_id
-            )
-            pack = compact_market_pack(pack)
+            df_m15, df_h1, df_m5, local_result, pack, fib, atr, price = self.collect_entry_snapshot(decision_id)
             append_decision_snapshot(
                 decision_id,
-                "ai1_input",
+                "entry_candidate",
                 {
                     "market_evidence": pack,
                     "local_result": local_result.to_decision(),
@@ -1786,6 +1936,16 @@ class ThreeAITrader(base.FibVolumePATrader):
             if not self.entry_is_current(seq, bar_time):
                 base.logger.info("AI-1 任务已过期，取消请求 seq=%s" % seq)
                 return
+
+            def refresh_ai1_request():
+                nonlocal df_m15, df_h1, df_m5, local_result, pack, fib, atr, price
+                df_m15, df_h1, df_m5, local_result, pack, fib, atr, price = self.collect_entry_snapshot(decision_id)
+                append_decision_snapshot(decision_id, "ai1_input", {
+                    "market_evidence": pack, "local_result": local_result.to_decision(), "trigger": trigger,
+                    "cost_control_version": COST_CONTROL_VERSION, "freshness_version": MARKET_FRESHNESS_VERSION})
+                return {"prompt": prompt_json("分析本次已收盘行情及当前报价，只输出契约JSON。", pack),
+                        "snapshot_id": pack["snapshot_id"], "quote": pack["live_quote"]}
+
             raw = call_chat(
                 "AI-1",
                 AI1_MODEL,
@@ -1800,6 +1960,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI1_KEY,
                 still_current=lambda: self.entry_is_current(seq, bar_time) and not self._stop.is_set(),
                 request_context={"decision_id": decision_id, "bar_time": bar_time, "trigger": trigger},
+                refresh_request=refresh_ai1_request,
             )
             if not self.entry_is_current(seq, bar_time) or self._stop.is_set():
                 base.logger.info("AI-1 返回已过期，丢弃 seq=%s" % seq)
@@ -1891,50 +2052,22 @@ class ThreeAITrader(base.FibVolumePATrader):
                 }
             )
             final_entry_price = float(proposal.details.get("entry_price") or entry_price)
-            review_pack = {
-                "proposal": proposal.to_decision(),
-                "ai1_raw_proposal": parsed,
-                "python_finalization": {
-                    "reference_entry_price": entry_price,
-                    "final_entry_price": final_entry_price,
-                    "final_stop_loss": proposal.stop_loss,
-                    "final_take_profit": proposal.take_profit,
-                    "reason": reason,
-                },
-                "decision_id": decision_id,
-                "reference_entry_price": entry_price,
-                "entry_price": final_entry_price,
-                "final_plan_feasibility": plan_feasibility(proposal.action, final_entry_price,
-                                                          proposal.stop_loss, proposal.take_profit, pack["live_quote"]),
-                "atr": pack["atr"],
-                "h1_trend": pack["h1_trend"],
-                "m15_trend": pack["m15_trend"],
-                "regime": pack.get("regime"),
-                "regime_text": pack.get("regime_text"),
-                "session": pack.get("session"),
-                "setup": pack.get("setup"),
-                "max_stop_abs": base.MAX_SL_ABS,
-                "min_rr": base.MIN_REWARD_RISK,
-                "local_action": local_result.action,
-                "local_reasoning": local_result.reasoning,
-                "market_evidence": pack,
+            proposal.details["execution_guard"] = {
+                "atr": atr, "ema21": pack.get("m15_ema21"), "bar_closure": pack["bar_closure"],
+                "ai1_snapshot_id": pack.get("snapshot_id"), "reference_entry_price": final_entry_price,
             }
-            review_pack = compact_review_pack(review_pack)
-            append_decision_snapshot(decision_id, "ai2_input", {"review": review_pack, "trigger": trigger})
             review_raw = call_chat(
                 "AI-2",
                 AI2_MODEL,
                 AI2_EFFORT,
                 AI2_INSTRUCTIONS,
-                prompt_json(
-                    "审核最终订单，只输出契约JSON。",
-                    review_pack,
-                ),
+                "",
                 AI2_TIMEOUT,
                 AI2_URL,
                 AI2_KEY,
                 still_current=lambda: self.entry_is_current(seq, bar_time) and not self._stop.is_set(),
                 request_context={"decision_id": decision_id, "bar_time": bar_time, "trigger": trigger},
+                refresh_request=lambda: self.prepare_review_request(proposal, pack, parsed, reason, decision_id, trigger),
             )
             if not self.entry_is_current(seq, bar_time) or self._stop.is_set():
                 base.logger.info("AI-2 返回已过期，丢弃 seq=%s" % seq)
@@ -1981,6 +2114,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "proposal": proposal.to_decision(),
                 },
             )
+        except MarketSnapshotError as exc:
+            base.logger.info("行情刷新/执行复核停止本轮: %s", exc)
         except AIRequestError as exc:
             self.alert_api_failure(exc.role, exc.detail)
         except Exception as exc:
@@ -1998,128 +2133,143 @@ class ThreeAITrader(base.FibVolumePATrader):
         base.logger.info("AI-3 已派发护盘线程 bar=%s seq=%s" % (bar_time, seq))
         threading.Thread(target=self.ai3_task, args=(bar_time, seq), daemon=True).start()
 
+    def collect_ai3_snapshot(self, expected_tickets=None):
+        positions = self.get_positions()
+        if expected_tickets is not None:
+            positions = [p for p in positions if int(p.ticket) in expected_tickets]
+            if {int(p.ticket) for p in positions} != expected_tickets:
+                raise MarketSnapshotError("原持仓已消失，停止旧AI-3任务，不接管新的持仓")
+        if not positions:
+            return None
+        df_m1 = self.get_rates(base.mt5.TIMEFRAME_M1, 40, shift=1)
+        df_m5 = self.get_rates(base.mt5.TIMEFRAME_M5, 40, shift=1)
+        df_m15 = self.get_rates(base.mt5.TIMEFRAME_M15, 40, shift=1)
+        df_h1 = self.get_rates(base.mt5.TIMEFRAME_H1, 40, shift=1)
+        tick = None
+        with self._mt5_lock:
+            tick = base.mt5.symbol_info_tick(base.SYMBOL)
+        quote = quote_from_tick(tick)
+        payload = {
+            "symbol": base.SYMBOL,
+            "snapshot_id": "ai3-%s" % time.time_ns(),
+            "live_quote": quote,
+            "bid": float(tick.bid) if tick else 0,
+            "ask": float(tick.ask) if tick else 0,
+            "atr_m5": round(base.calculate_atr(df_m5), 2),
+            "m1_bars": bars_for_prompt(df_m1, 12),
+            "m5_bars": bars_for_prompt(df_m5, 8),
+            "m15_bars": bars_for_prompt(df_m15, 16),
+            "h1_bars": bars_for_prompt(df_h1, 8),
+            "bar_closure": {"source_shift": 1, "time_is": "bar_open_time",
+                            "timeframe_seconds": {"M1": 60, "M5": 300, "M15": 900, "H1": 3600}},
+            "positions": [],
+        }
+        state_changed = False
+        for position in positions:
+            ticket = int(position.ticket)
+            state = self.guardian_states.get(ticket)
+            with self._state_lock:
+                saved_context = self.entry_contexts.get(str(ticket))
+                context = dict(saved_context) if isinstance(saved_context, dict) else None
+            is_buy = position.type == base.mt5.POSITION_TYPE_BUY
+            entry = float(position.price_open)
+            now_price = (float(tick.bid) if is_buy else float(tick.ask)) if tick else 0.0
+            saved_risk = context.get("initial_risk") if context else None
+            try:
+                risk = float(saved_risk) if saved_risk is not None else 0.0
+            except (TypeError, ValueError):
+                risk = 0.0
+            if risk <= 0:
+                risk = 0.0
+                if context is not None:
+                    context["status"] = "unknown_after_restart"
+                    context.setdefault("coverage", "since_restart")
+                    with self._state_lock:
+                        self.entry_contexts[str(ticket)] = context
+                    state_changed = True
+            move = (now_price - entry) if is_buy else (entry - now_price)
+            best = adverse = None
+            if state:
+                best = (state.highest_price - entry) if is_buy else (entry - state.lowest_price)
+                adverse = (entry - state.lowest_price) if is_buy else (state.highest_price - entry)
+                best = max(0.0, best)
+                adverse = max(0.0, adverse)
+                if context is not None:
+                    context["last_observed_at"] = time.time()
+                    context["observed_mfe"] = round(best, 2)
+                    context["observed_mae"] = round(adverse, 2)
+                    with self._state_lock:
+                        self.entry_contexts[str(ticket)] = context
+                    state_changed = True
+            # Server time on both sides, so the difference is the real holding time.
+            hold_minutes = (int(tick.time) - int(position.time)) / 60.0 if tick else 0.0
+            if context is None:
+                context = {
+                    "status": "unknown_after_restart",
+                    "ticket": ticket,
+                    "initial_risk": None,
+                    "coverage": "since_current_process_observed",
+                }
+            payload["positions"].append({
+                "ticket": ticket,
+                "direction": "BUY" if is_buy else "SELL",
+                "volume": float(position.volume),
+                "entry": entry,
+                "sl": float(position.sl or 0),
+                "tp": float(position.tp or 0),
+                "profit": round(float(position.profit or 0), 2),
+                "virtual_sl": round(float(state.virtual_sl), 2) if state else 0,
+                "hold_minutes": round(max(0.0, hold_minutes), 1),
+                "initial_risk": round(risk, 2) if risk > 0 else None,
+                "r_now": round(move / risk, 2) if risk > 0 else None,
+                "max_favorable": round(best, 2) if best is not None else None,
+                "max_adverse": round(adverse, 2) if adverse is not None else None,
+                "entry_context": context,
+            })
+        if state_changed:
+            self.save_entry_contexts()
+        for item in payload["positions"]:
+            base.logger.info(
+                "AI-3证据 ticket=%s context=%s risk=%s r_now=%s MFE=%s MAE=%s coverage=%s"
+                % (
+                    item["ticket"],
+                    item["entry_context"].get("status"),
+                    item["initial_risk"],
+                    item["r_now"],
+                    item["max_favorable"],
+                    item["max_adverse"],
+                    item["entry_context"].get("coverage"),
+                )
+            )
+        payload = compact_market_pack(payload)
+        for item in payload["positions"]:
+            # The complete card remains persisted; guardian uses the entry thesis.
+            item["entry_context"].pop("quality_assessment", None)
+        return {"prompt": prompt_json(
+            '请只输出 JSON: {"action":"hold|tighten_sl|close","ticket":0,"new_stop_loss":0,"reasoning":"..."}', payload),
+                "snapshot_id": payload["snapshot_id"], "quote": quote,
+                "tickets": {int(item["ticket"]) for item in payload["positions"]}}
+
     def ai3_task(self, bar_time, seq):
         try:
             if self._stop.is_set():
                 return
-            positions = self.get_positions()
-            if not positions:
+            initial = self.collect_ai3_snapshot()
+            if initial is None:
                 return
-            df_m1 = self.get_rates(base.mt5.TIMEFRAME_M1, 40, shift=1)
-            df_m5 = self.get_rates(base.mt5.TIMEFRAME_M5, 40, shift=1)
-            df_m15 = self.get_rates(base.mt5.TIMEFRAME_M15, 40, shift=1)
-            df_h1 = self.get_rates(base.mt5.TIMEFRAME_H1, 40, shift=1)
-            tick = None
-            with self._mt5_lock:
-                tick = base.mt5.symbol_info_tick(base.SYMBOL)
-            payload = {
-                "symbol": base.SYMBOL,
-                "bid": float(tick.bid) if tick else 0,
-                "ask": float(tick.ask) if tick else 0,
-                "atr_m5": round(base.calculate_atr(df_m5), 2),
-                "m1_bars": bars_for_prompt(df_m1, 12),
-                "m5_bars": bars_for_prompt(df_m5, 8),
-                "m15_bars": bars_for_prompt(df_m15, 16),
-                "h1_bars": bars_for_prompt(df_h1, 8),
-                "bar_closure": {"source_shift": 1, "time_is": "bar_open_time",
-                                "timeframe_seconds": {"M1": 60, "M5": 300, "M15": 900, "H1": 3600}},
-                "positions": [],
-            }
-            state_changed = False
-            for position in positions:
-                ticket = int(position.ticket)
-                state = self.guardian_states.get(ticket)
-                with self._state_lock:
-                    saved_context = self.entry_contexts.get(str(ticket))
-                    context = dict(saved_context) if isinstance(saved_context, dict) else None
-                is_buy = position.type == base.mt5.POSITION_TYPE_BUY
-                entry = float(position.price_open)
-                now_price = (float(tick.bid) if is_buy else float(tick.ask)) if tick else 0.0
-                saved_risk = context.get("initial_risk") if context else None
-                try:
-                    risk = float(saved_risk) if saved_risk is not None else 0.0
-                except (TypeError, ValueError):
-                    risk = 0.0
-                if risk <= 0:
-                    risk = 0.0
-                    if context is not None:
-                        context["status"] = "unknown_after_restart"
-                        context.setdefault("coverage", "since_restart")
-                        with self._state_lock:
-                            self.entry_contexts[str(ticket)] = context
-                        state_changed = True
-                move = (now_price - entry) if is_buy else (entry - now_price)
-                best = adverse = None
-                if state:
-                    best = (state.highest_price - entry) if is_buy else (entry - state.lowest_price)
-                    adverse = (entry - state.lowest_price) if is_buy else (state.highest_price - entry)
-                    best = max(0.0, best)
-                    adverse = max(0.0, adverse)
-                    if context is not None:
-                        context["last_observed_at"] = time.time()
-                        context["observed_mfe"] = round(best, 2)
-                        context["observed_mae"] = round(adverse, 2)
-                        with self._state_lock:
-                            self.entry_contexts[str(ticket)] = context
-                        state_changed = True
-                # Server time on both sides, so the difference is the real holding time.
-                hold_minutes = (int(tick.time) - int(position.time)) / 60.0 if tick else 0.0
-                if context is None:
-                    context = {
-                        "status": "unknown_after_restart",
-                        "ticket": ticket,
-                        "initial_risk": None,
-                        "coverage": "since_current_process_observed",
-                    }
-                payload["positions"].append({
-                    "ticket": ticket,
-                    "direction": "BUY" if is_buy else "SELL",
-                    "volume": float(position.volume),
-                    "entry": entry,
-                    "sl": float(position.sl or 0),
-                    "tp": float(position.tp or 0),
-                    "profit": round(float(position.profit or 0), 2),
-                    "virtual_sl": round(float(state.virtual_sl), 2) if state else 0,
-                    "hold_minutes": round(max(0.0, hold_minutes), 1),
-                    "initial_risk": round(risk, 2) if risk > 0 else None,
-                    "r_now": round(move / risk, 2) if risk > 0 else None,
-                    "max_favorable": round(best, 2) if best is not None else None,
-                    "max_adverse": round(adverse, 2) if adverse is not None else None,
-                    "entry_context": context,
-                })
-            if state_changed:
-                self.save_entry_contexts()
-            for item in payload["positions"]:
-                base.logger.info(
-                    "AI-3证据 ticket=%s context=%s risk=%s r_now=%s MFE=%s MAE=%s coverage=%s"
-                    % (
-                        item["ticket"],
-                        item["entry_context"].get("status"),
-                        item["initial_risk"],
-                        item["r_now"],
-                        item["max_favorable"],
-                        item["max_adverse"],
-                        item["entry_context"].get("coverage"),
-                    )
-                )
-            payload = compact_market_pack(payload)
-            for item in payload["positions"]:
-                # The complete card remains persisted; guardian uses the entry thesis.
-                item["entry_context"].pop("quality_assessment", None)
+            expected_tickets = initial["tickets"]
             raw = call_chat(
                 "AI-3",
                 AI3_MODEL,
                 AI3_EFFORT,
                 AI3_INSTRUCTIONS,
-                prompt_json(
-                    "请只输出 JSON: {\"action\":\"hold|tighten_sl|close\",\"ticket\":0,\"new_stop_loss\":0,\"reasoning\":\"...\"}",
-                    payload,
-                ),
+                initial["prompt"],
                 AI3_TIMEOUT,
                 AI3_URL,
                 AI3_KEY,
                 still_current=lambda: self.ai3_is_current(seq, bar_time) and not self._stop.is_set(),
                 request_context={"decision_id": "ai3-%s-%s" % (bar_time, seq), "bar_time": bar_time, "trigger": "M1"},
+                refresh_request=lambda: self.collect_ai3_snapshot(expected_tickets),
             )
             if not self.ai3_is_current(seq, bar_time) or self._stop.is_set():
                 base.logger.info("AI-3 返回已过期，丢弃 seq=%s" % seq)
@@ -2127,7 +2277,12 @@ class ThreeAITrader(base.FibVolumePATrader):
             if not raw:
                 self.alert_api_failure("AI-3", "没有可见 JSON，本地护盘继续")
                 return
+            if {int(p.ticket) for p in self.get_positions()} != expected_tickets:
+                base.logger.info("AI-3返回时原持仓已改变，丢弃旧回复")
+                return
             self.execute_ai3(extract_json_object(raw))
+        except MarketSnapshotError as exc:
+            base.logger.info("AI-3行情刷新停止本轮: %s", exc)
         except AIRequestError as exc:
             self.alert_api_failure(exc.role, exc.detail)
         except Exception as exc:
@@ -2207,6 +2362,8 @@ class ThreeAITrader(base.FibVolumePATrader):
             % ("entry-evidence-v5", AI_DECISION_SNAPSHOT_DIR)
         )
         base.logger.info("AI质量评分=%s，等级分值=%s，门槛=%s（非胜率）", QUALITY_VERSION, QUALITY_LEVEL_POINTS, AI_CONFIDENCE)
+        base.logger.info("AI行情刷新=%s 每次POST采集新行情，AI-2及下单前复核现价，旧提案不跨收盘K线执行",
+                         MARKET_FRESHNESS_VERSION)
         base.logger.info("AI成本控制=%s token上限=%s 同通道读超时补发=%s 用量目录=%s",
                          COST_CONTROL_VERSION, AI_MAX_TOKENS, AI_READ_TIMEOUT_RETRIES, AI_USAGE_DIR)
         base.logger.info("AI URLs: AI1=%s AI2=%s AI3=%s" % (AI1_URL, AI2_URL, AI3_URL))

@@ -330,14 +330,19 @@ class PromptCompactionTests(unittest.TestCase):
                "target_basis": "given pivot", "unknowns": [], "fact_conflicts": [], "wait_basis": [],
                "quality_assessment": {"direction": "buy", "reservations": [], "dimensions": {
                    key: {"level": "adequate", "reason": "supported", "evidence_refs": ["/h1_trend"], "reservation_ids": []}
-                   for key in ai.QUALITY_DIMENSIONS}}}
+                    for key in ai.QUALITY_DIMENSIONS}}}
+        sent_requests = []
+        def refreshed_chat(*args, **kwargs):
+            sent_requests.append(kwargs["refresh_request"]())
+            return (json.dumps(raw) if args[0] == "AI-1" else
+                    '{"decision":"APPROVE","defects":[],"reasoning":"verified","fact_conflicts":[]}')
         with tempfile.TemporaryDirectory() as folder, patch.object(ai, "AI3_STATE_FILE", str(Path(folder)/"state.json")):
             trader = ai.ThreeAITrader()
             with patch.object(trader, "get_context", return_value=(frame, frame, frame)), \
                  patch.object(ai.base, "build_fib_volume_pa_decision", return_value=local), \
                  patch.object(ai.base.mt5, "symbol_info_tick", return_value=SimpleNamespace(bid=108., ask=108.1, time=1800009000)), \
                  patch.object(trader, "entry_is_current", return_value=True), \
-                 patch.object(ai, "call_chat", side_effect=[json.dumps(raw), '{"decision":"APPROVE","defects":[],"reasoning":"verified","fact_conflicts":[]}']) as chat, \
+                 patch.object(ai, "call_chat", side_effect=refreshed_chat) as chat, \
                  patch.object(ai, "finalize_ai_proposal", return_value=(proposal, "Python final protection")), \
                  patch.object(ai, "append_decision_snapshot") as snapshot, \
                  patch.object(trader, "place_order", return_value=False) as place, \
@@ -347,7 +352,7 @@ class PromptCompactionTests(unittest.TestCase):
             first, second = chat.call_args_list
             self.assertEqual(first.kwargs["request_context"], second.kwargs["request_context"])
             self.assertEqual(second.kwargs["request_context"]["trigger"], "M5")
-            review = json.loads(second.args[4].split('\n', 1)[1])
+            review = json.loads(sent_requests[1]["prompt"].split('\n', 1)[1])
             self.assertEqual(review["proposal"]["stop_loss"], 107.)
             self.assertEqual(review["ai1_raw_proposal"]["stop_loss"], 106.)
             self.assertEqual(review["ai1_raw_proposal"]["invalidation"], raw["invalidation"])
