@@ -148,6 +148,10 @@ class EntryEvidenceTests(unittest.TestCase):
         frame = self.breakout(True)
         with tempfile.TemporaryDirectory() as folder, patch.object(ai, 'AI3_STATE_FILE', str(Path(folder) / 'state.json')):
             trader = ai.ThreeAITrader()
+            trader.entry_contexts["123"] = {"status": "complete", "initial_risk": 2.,
+                                            "invalidation": "M15 closed beyond initial boundary",
+                                            "quality_assessment": {"original_card": "keep persisted"}}
+            trader.save_entry_contexts()
             position = SimpleNamespace(ticket=123, type=base.mt5.POSITION_TYPE_BUY, price_open=100,
                                        time=1800000000, volume=.01, sl=98, tp=104, profit=0)
             tick = SimpleNamespace(bid=100, ask=100.1, time=1800003600)
@@ -172,6 +176,12 @@ class EntryEvidenceTests(unittest.TestCase):
                 self.assertEqual(bool(captured['m15_bars']), not missing)
                 self.assertTrue(captured['h1_bars'])
                 self.assertEqual(captured['bar_closure']['source_shift'], 1)
+                sent_context = captured['positions'][0]['entry_context']
+                self.assertEqual(sent_context['invalidation'], "M15 closed beyond initial boundary")
+                self.assertNotIn('quality_assessment', sent_context)
+                self.assertEqual(trader.entry_contexts['123']['quality_assessment'], {'original_card': 'keep persisted'})
+                saved = json.loads(Path(ai.AI3_STATE_FILE).read_text(encoding='utf-8'))
+                self.assertEqual(saved['positions']['123']['quality_assessment'], {'original_card': 'keep persisted'})
 
 
 if __name__ == '__main__':

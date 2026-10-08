@@ -33,6 +33,12 @@ class AIBackupTests(unittest.TestCase):
         self.sleep = patch.object(ai.time, "sleep")
         self.sleep_mock = self.sleep.start()
         self.addCleanup(self.sleep.stop)
+        self.options = patch.dict(ai._CHAT_OPTIONS, {}, clear=True)
+        self.options.start()
+        self.addCleanup(self.options.stop)
+        self.usage = patch.object(ai, "record_ai_usage")
+        self.usage.start()
+        self.addCleanup(self.usage.stop)
 
     def configure(self, number):
         values = {
@@ -83,7 +89,7 @@ class AIBackupTests(unittest.TestCase):
                 self.assertEqual(second.args[0], configured[f"AI{number}_BACKUP_URL"])
                 self.assertEqual(second.kwargs["headers"]["Authorization"], "Bearer " + configured[f"AI{number}_BACKUP_KEY"])
                 self.assertEqual(second.kwargs["json"]["model"], configured[f"FIB_PA_AI{number}_BACKUP_MODEL"])
-                self.assertEqual(second.kwargs["json"]["reasoning"], {"effort": "low"})
+                self.assertEqual(second.kwargs["json"]["reasoning_effort"], "low")
                 self.assertEqual(second.kwargs["json"]["messages"], first.kwargs["json"]["messages"])
                 self.assertEqual(second.kwargs["timeout"], 40)
 
@@ -103,7 +109,7 @@ class AIBackupTests(unittest.TestCase):
         self.assertEqual(request.args[0], "https://alternate.example.test/chat")
         self.assertEqual(request.kwargs["headers"]["Authorization"], "Bearer primary-key")
         self.assertEqual(request.kwargs["json"]["model"], "primary-model")
-        self.assertEqual(request.kwargs["json"]["reasoning"], {"effort": "medium"})
+        self.assertEqual(request.kwargs["json"]["reasoning_effort"], "medium")
 
     def test_next_analysis_starts_with_primary_again(self):
         self.configure(1)
@@ -121,13 +127,13 @@ class AIBackupTests(unittest.TestCase):
                 self.assertEqual(post.call_count, 2)
                 self.assertIn("backup1", post.call_args.args[0])
 
-    def test_identical_backup_keeps_original_five_transport_attempts(self):
-        with patch.object(ai.requests, "post", side_effect=ai.requests.ReadTimeout("offline")) as post:
+    def test_explicit_read_retry_setting_remains_capped_at_five(self):
+        with patch.object(ai, "AI_READ_TIMEOUT_RETRIES", 10), patch.object(ai.requests, "post", side_effect=ai.requests.ReadTimeout("offline")) as post:
             with self.assertRaises(ai.AIRequestError) as caught:
                 self.call()
         self.assertEqual(post.call_count, 5)
         self.assertEqual(len({item.args[0] for item in post.call_args_list}), 1)
-        self.assertTrue(all(item.kwargs["json"]["reasoning"] == {"effort": "medium"} for item in post.call_args_list))
+        self.assertTrue(all(item.kwargs["json"]["reasoning_effort"] == "medium" for item in post.call_args_list))
         self.assertNotIn("没有可见 JSON", caught.exception.detail)
 
     def test_dead_primary_and_backup_share_five_attempts(self):
@@ -146,8 +152,8 @@ class AIBackupTests(unittest.TestCase):
         with patch.object(ai.requests, "post", side_effect=responses) as post:
             self.call("AI-2")
         self.assertEqual(post.call_count, 3)
-        self.assertIn("reasoning", post.call_args_list[1].kwargs["json"])
-        self.assertNotIn("reasoning", post.call_args_list[2].kwargs["json"])
+        self.assertIn("reasoning_effort", post.call_args_list[1].kwargs["json"])
+        self.assertNotIn("reasoning_effort", post.call_args_list[2].kwargs["json"])
 
     def test_global_budget_caps_transport_parameter_and_output_recovery(self):
         self.configure(2)
@@ -162,7 +168,7 @@ class AIBackupTests(unittest.TestCase):
         ai.os.environ["FIB_PA_AI3_BACKUP_EFFORT"] = "medium"
         with patch.object(ai.requests, "post", side_effect=[Response(status=503), Response(content=""), Response()]) as post:
             self.call("AI-3")
-        self.assertEqual([item.kwargs["json"]["reasoning"]["effort"] for item in post.call_args_list], ["medium", "medium", "low"])
+        self.assertEqual([item.kwargs["json"]["reasoning_effort"] for item in post.call_args_list], ["medium", "medium", "low"])
 
     def test_stale_task_never_requests_primary(self):
         self.configure(1)

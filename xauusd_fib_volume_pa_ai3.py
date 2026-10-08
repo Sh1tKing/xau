@@ -7,10 +7,12 @@ AI-3 may hold, tighten the stop, or close. It cannot widen a stop.
 Python still enforces reward/risk, H1/M15 alignment, the configured stop cap, and the local guardian.
 """
 
+import copy
 import json
 import logging
 import os
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -65,11 +67,23 @@ AI3_TIMEOUT = env_int("FIB_PA_AI3_TIMEOUT", 40)
 ENTRY_TAKEOVER_SEC = env_int("FIB_PA_AI_ENTRY_TAKEOVER_SEC", 360)
 AI3_TAKEOVER_SEC = env_int("FIB_PA_AI3_TAKEOVER_SEC", 220)
 AI_HTTP_RETRIES = max(1, env_int("FIB_PA_AI_HTTP_RETRIES", 5))
+# A read timeout may leave a billable generation running upstream.
+AI_READ_TIMEOUT_RETRIES = max(0, env_int("FIB_PA_AI_READ_TIMEOUT_RETRIES", 0))
+AI_MAX_TOKENS = {
+    "AI-1": max(1024, env_int("FIB_PA_AI1_MAX_TOKENS", 4096)),
+    "AI-2": max(1024, env_int("FIB_PA_AI2_MAX_TOKENS", 4096)),
+    "AI-3": max(512, env_int("FIB_PA_AI3_MAX_TOKENS", 2048)),
+}
 AI_HTTP_RETRY_PAUSE = 2.0
 API_ALERT_COOLDOWN = env_int("FIB_PA_AI_ALERT_COOLDOWN", 900)
 AI3_STATE_FILE = os.path.join(base.LOG_DIR, "ai3_position_state.json")
 AI_DECISION_SNAPSHOT_DIR = os.path.join(base.LOG_DIR, "ai_decisions")
 _SNAPSHOT_LOCK = threading.RLock()
+AI_USAGE_DIR = os.path.join(base.LOG_DIR, "ai_usage")
+_USAGE_LOCK = threading.RLock()
+_CHAT_OPTIONS_LOCK = threading.RLock()
+_CHAT_OPTIONS = {}
+COST_CONTROL_VERSION = "cost-latency-v1"
 QUALITY_LEVEL_POINTS = {"strong": 20, "adequate": 16, "weak": 8, "missing": 0}
 QUALITY_DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_evidence")
 QUALITY_CAUSES = {"volume", "shallow_retrace", "trigger_weakness", "opposing_structure", "stop_vulnerability", "target_uncertainty", "execution_drift", "missing_data", "hard_limit"}
@@ -80,67 +94,61 @@ base.ENABLE_TRADING = AI_ENABLE_TRADING
 SL_CAP = "%g" % base.MAX_SL_ABS
 
 AI1_INSTRUCTIONS = (
-    "你是 XAUUSD 分析师 AI-1。保留自主提出交易的能力，只根据给定结构化数据判断，不看账户，不决定手数，不执行下单。"
-    "先看 session 和 setup。setup 是本地按时段选出的进场方式：pullback 是趋势回撤，range_edge 是区间边缘反转，breakout 是突破后回踩。"
-    "pullback：tight_range 时 action 必须是 no；wide_range 只做边缘且要有拒绝K线。"
-    "range_edge：只在 24 根 M15 区间的边缘、有拒绝K线时做，中轴必须是 no，目标看区间另一侧。"
-    "breakout：必须收盘突破后回踩箱体边缘并守住；没有回踩的追突破必须是 no。量能仅加减分，普通量或弱量不能单独否决，引用Python给定的量能基线和比值。breakout 不受 tight_range 限制。"
-    f"方向只看 H1。M15 负责斐波那契、成交量和价格行为。M5 不单独决定方向，但在H1方向已经允许时，结构附近已收盘的M5拒绝/吞没可以完成入场时机确认；最近3根M5的拒绝极值加缓冲后仍不超过{SL_CAP}美元时，可以用该极值保护止损。H4 不是否决条件。"
-    "M15 与 H1 暂时反向是回撤，不是冲突，不能因此 no。"
-    "H1 同向只表示允许的交易方向，不代表当前存在入场信号。分别检查方向、setup结构有效性、已收盘K线确认、目标前的障碍。"
-    "输入中的computed_evidence和bar_time/price是Python从同一批已收盘K线计算的事实，优先引用它们；不要重算出另一套Fib、箱体、量能或影线数值。先核实事实，再依次说明在哪里、哪根已收盘K线证明触发、什么价位和周期使理由失效、目标前有什么障碍、最强反证是什么。"
-    "如果事实字段互相矛盾，返回no并在fact_conflicts写明冲突；如果关键字段缺失，返回no并在unknowns写明未知，不得猜测。"
-    "pullback 的旧波段已被收盘破坏时，不能只凭H1同向把破坏解释为普通回撤；只有给定数据支持新结构及新的确认才可提出交易，否则 no。单根影线刺穿后收回不等于收盘破坏。Fib核心区必须按computed_evidence给出的容差和最近3根探入确认解释，不要把收盘略低于38.2或略高于61.8自动当成结构失效。"
-    "breakout 必须引用突破K和后续回踩K的bar_time。突破K自己的影线不是后续回踩；回踩已经守住后，不要因为同一次推动在M15和M5留下多个相近极值就把确认清零。原箱体边缘收盘失守、出现独立的反向结构并收盘确认，或事实明确显示形态失效时，才重新判定。"
-    "障碍优先引用computed_evidence.obstacles中的price、timeframe、bar_time、source和event_group。已核实的跨周期同一极值只算同一事件；单根过程极值不能自动升级为独立重要障碍。仍需在未克服的重要障碍前有1.5RR空间，不能为了开单删除真正的障碍。"
-    "止盈必须说明给定数据中的目标依据和中间阻力/支撑，不能只为凑够RR把目标延远。确认量偏弱是质量扣分，不可编造放量确认。确认尚未完成、或第一个重要障碍前没有1.5RR空间时，返回no并写明等待条件。"
-    "交易质量按输入quality_rubric的五项评分，不猜胜率、不复制本地分、不为了通过门槛抬分。reasoning依次说明setup证据、失效位置、目标依据和主要反证；证据缺失明确写未知。"
-    f"M5保护止损是否可用不取决于M15影线是否超过{SL_CAP}美元：只要它保护当前触发结构、覆盖最近3根M5极值和缓冲、并且距离参考入场不超过{SL_CAP}美元，就可以使用。更远的结构止损超过上限时必须no，禁止把止损改进影线里面。"
-    f"H1 不支持该方向、止损超过 {SL_CAP} 美元、价格偏离 M15 EMA21 超过 1.5 ATR、止损止盈方向错误或盈亏比低于 1.5 时，action 必须是 no。"
-    "stop_loss 和 take_profit 用绝对价格。最终回复只能是一个 JSON 对象，不要 Markdown；字段为action、stop_loss、take_profit、reasoning、trigger_evidence、invalidation、target_basis、fact_conflicts数组、unknowns数组、quality_assessment、wait_basis。"
+    "你是XAUUSD分析师AI-1，自主提出buy/sell/no；不看账户、不定手数、不下单。"
+    "按session/setup分析：pullback在tight_range必须no，wide_range只做边缘且需拒绝K；"
+    "range_edge需24根M15区间边缘拒绝，中轴no，目标看另一侧；"
+    "breakout需收盘突破及后续回踩守住，不追无回踩突破，不受tight_range限制。"
+    "方向仅H1，M15管Fib/量能/价格行为，M5只管时机；H4不否决，M15暂反向是回撤而非方向冲突。"
+    "H1同向只是方向许可，还须setup有效、收盘确认及目标空间。引用computed_evidence的事实、bar_time/price，禁止另算Fib/箱体/量能。"
+    "事实冲突写fact_conflicts并no，关键缺失写unknowns并no，不猜测。"
+    "pullback旧波段被收盘破坏，须有新结构及确认才可提案；影线收回不算收盘破坏。"
+    "Fib按给定容差/recent_probe/confirmation_extension，不因略越38.2/61.8否决。"
+    "breakout引用突破K和后续回踩K时间，突破K影线不是后续回踩；同次推动多周期极值不清零确认。"
+    "边缘收盘失守、独立反向结构收盘确认或明确形态失效才重判。"
+    "目标须有数据依据及中间障碍，不为凑RR延远；首个未克服的重要障碍前不足1.5RR或无收盘触发则no并写等待条件。"
+    "量能只加减分，普通/弱量不单独否决，不编造放量，使用给定基线/比值。"
+    f"M5拒绝/吞没可确认时机；止损须保护命名结构、覆盖最近3根M5极值+缓冲，距参考价≤{SL_CAP}美元，不能放进影线。"
+    "M15远影线不自动否定合格M5保护；结构止损放不下则no。"
+    f"H1不许可、止损>{SL_CAP}美元、偏离M15 EMA21>1.5ATR、价格方向错或RR<1.5均no。"
+    "输出一个紧凑JSON，字段action、stop_loss、take_profit、reasoning、trigger_evidence、invalidation、target_basis、fact_conflicts、unknowns、quality_assessment、wait_basis。"
+    "SL/TP为绝对价格。reasoning用≤140汉字概括setup/失效/目标/最强反证；证据字段各≤60汉字，含必要周期/时间/价位，未知明示。"
 )
 AI2_INSTRUCTIONS = (
-    "你是独立风控审核官 AI-2。不能提出新交易，只能 APPROVE 或 REJECT。"
-    f"只有明确缺陷才能 REJECT：setup 为 pullback 却处在 tight_range、range_edge 却在区间中轴、breakout 没有回踩箱体就追单、止损方向错误、盈亏比低于 1.5、H1 不支持该方向、止损超过 {SL_CAP} 美元、追价超过 1.5 ATR、止损或止盈缺失、关键数据缺失、订单自相矛盾。"
-    "M15 与 H1 暂时反向、轻微背离、逆 H4、波动大或感觉不确定，都不能单独 REJECT。"
-    "根据market_evidence及computed_evidence独立核实，不要把AI-1的reasoning当作已核实事实。明确的setup结构失效且没有新结构确认、声称回踩/放量但K线数据反驳，也属于订单自相矛盾，应REJECT并指出对应bar_time、price和source。单根影线收回不能当作收盘破坏。"
-    "核对Fib时使用Python给出的容差、recent_probe和confirmation_extension；核对M5时机时，M5可以在H1方向已经确定后提供入场确认，但不能改变方向。核对障碍时按event_group去重：同一次突破在M15/M5的过程极值不能重复算成多个独立硬障碍，真正独立的反向结构仍必须保留。"
-    "仅仅本地action=no、量能普通、ADX偏弱或RR接近合格下限不能单独否决；必须区分质量保留意见与可核实的硬伤。数据不足以核实必要条件时指出缺失字段，不得补造事实。"
-    "审核Python调整后的最终方案，不审核已经被替换的AI-1原始止损或止盈；如果最终目标与AI理由不一致，要求给出可核实的调整依据，否则REJECT。"
-    "最终回复只能是一个 JSON 对象，不要 Markdown；字段为decision、defects数组、reasoning、fact_conflicts数组。APPROVE时defects和fact_conflicts必须为空。"
+    "你是独立审核官AI-2，只APPROVE/REJECT，不提新交易、不重新评分。审核proposal及python_finalization最终价格，不审核已替换的AI1价格。"
+    f"仅明确硬伤REJECT：pullback处于tight_range或wide_range中轴、range_edge在中轴/无拒绝、breakout无后续回踩，"
+    f"H1不许可、SL/TP缺失或方向错、止损>{SL_CAP}美元、追价>1.5ATR、RR<1.5、必要数据缺失或订单自相矛盾。"
+    "根据完整market_evidence原始K线和computed_evidence独立核实，不信任AI1解释。"
+    "setup明确失效且无新结构确认、回踩/放量被数据反驳须指出bar_time/price/source；影线收回不算收盘破坏。"
+    "Fib用给定容差/recent_probe/confirmation_extension；M5可确认时机不能改方向；合格M5保护不因远处M15影线而否决。"
+    "M15暂反向、轻微背离、逆H4、普通量、低ADX、本地no、RR刚过线或感觉不确定不能单独否决。"
+    "最终目标与AI理由不同须有可核实调整依据，否则REJECT；数据不足指出字段，不猜事实。"
+    "输出紧凑JSON：decision、defects数组、reasoning、fact_conflicts数组；APPROVE两数组为空。"
+    "reasoning≤120汉字，缺陷只列独立硬伤及必要时间/价格/来源，不复述行情和评分卡。"
 )
 OBSTACLE_EVIDENCE_INSTRUCTIONS = (
-    "障碍列表是候选集合，不是自动否决清单，也不穷尽所有结构。Fib端点不天然是独立强障碍；"
-    "classification=unknown和strength=unassessed必须结合origin_bar及observed中的反向价格行为、收盘突破证据判断，不能直接升级成硬障碍。"
-    "event_group仅标识已核实的同一根来源K线极值；相同价格但不同时间的触碰必须分别保留。"
-    "event_group为空表示归属未知，不能将所有未知项合并。同组内仍需阅读每次观察的反向证据。候选障碍归属未知本身不等同于入场关键条件缺失，不能单独否决。"
-    "closed_breakthrough的not_observed_in_window仅表示所给窗口未发现，不代表历史从未突破；"
-    "opposing_price_action为现有本地分类器输出，不自动等同于有效反转。"
-    "若引用列表外的独立结构，必须指出输入中真实存在的timeframe、bar_time、price和来源，归属不明写未知。"
+    "obstacles是候选且不穷尽结构，Fib端点不天然为独立强障碍。unknown/unassessed结合origin_bar/observed评估，不自动硬否决。"
+    "event_group仅合并已核实同源极值，同价不同时间分别保留，空组不合并，同组各次反向证据仍需看。归属未知不等于关键证据缺失。"
+    "not_observed_in_window不代表历史从未突破；opposing_price_action不自动等于有效反转。"
+    "不得删除真障碍，列表外结构须引用真实timeframe/bar_time/price/source，未知明示。"
 )
 AI1_INSTRUCTIONS += OBSTACLE_EVIDENCE_INSTRUCTIONS
 AI2_INSTRUCTIONS += OBSTACLE_EVIDENCE_INSTRUCTIONS
 PRICE_ACTION_INSTRUCTIONS = (
-    "价格行为必须按computed_evidence.price_action中的M15/M5、方向及bar_time分别核对。"
-    "本地details.price_action是M15评分及可选M5加分的汇总，不是仅指M5。M15触发而M5无触发可以同时成立，不得写入fact_conflicts。"
-    "false_break使用本周期最新已收盘K与前6根极值比较：sell为high>prior_extreme且close<prior_extreme，buy镜像；"
-    "这条本地规则不要求sell收阴或长上影，也不要求buy收阳或长下影。不能因K线颜色或M5零分宣称M15假突破不存在。"
-    "M15或M5已确认的触发均须纳入评估，不额外要求两周期同时触发；H1方向、setup位置和风险限制仍须满足。"
-    "可结合相反证据降低质量评价，但必须区分已成立的触发事实与质量意见，不得把质量疑虑写成事实冲突。"
+    "按computed_evidence.price_action分周期/方向/时间核实。details.price_action是M15及可选M5汇总。"
+    "M15或M5触发即可，不要求双周期；M5零分不否定M15触发。false_break对本周期前6根极值：sell高破后收回，buy镜像，不要求颜色/长影线。"
+    "触发事实与质量意见分开，不能编造冲突；方向、setup、风险限制仍有效。原始K线省略的candle_parts可由OHLC还原。"
 )
 AI1_INSTRUCTIONS += PRICE_ACTION_INSTRUCTIONS
 AI2_INSTRUCTIONS += PRICE_ACTION_INSTRUCTIONS
 AI1_INSTRUCTIONS += (
-    "quality_assessment按输入quality_rubric返回direction、dimensions和reservations。每个dimension含level、reason、evidence_refs、reservation_ids。"
-    "evidence_refs是相对本次输入的JSON Pointer，例如/computed_evidence/price_action/M15/sell/checks/false_break。"
-    "reservations每项含id、cause、event_group、dimension、severity(minor/material/blocking)、reason、evidence_refs。"
-    "同一原因和事件仅由一个dimension承担，其他维度可说明但不能重复扣分；只有minor保留意见时最低为adequate，不能选weak或missing。"
-    "weak必须有对应material证据，missing必须有blocking的缺失或失效证据。Python按固定等级加总，忽略自行给出的自由confidence。"
-    "action=no时仍评价允许方向的交易质量，并在wait_basis列出code、reason、evidence_refs；"
-    "code为hard_limit、missing_structure、missing_trigger、missing_data、target_space或material_counter_evidence。"
-    "某周期规则已命中不得以missing_trigger声称触发不存在；可以解释触发质量偏弱或不在setup位置。"
-    "结构位置、已有确认、止损保护、目标空间已成立且仅有minor保留意见时，应在允许方向上形成提案交后续审核，不能无限等待更漂亮形态。"
-    "方向、行情质量、未克服的重要障碍及有效的新反向结构仍由你判断，不能为了有订单删除它们。"
+    "按quality_rubric评五项，不猜胜率、不复制本地分、不抬分。quality_assessment={direction,dimensions,reservations}；"
+    "dimension={level,reason,evidence_refs,reservation_ids}；reservation={id,cause,event_group,dimension,severity,reason,evidence_refs}。"
+    "direction为buy/sell，dimensions是rubric五项为键的对象；reservations、wait_basis、fact_conflicts、unknowns、evidence_refs、reservation_ids均为数组。"
+    "refs为本次输入真实JSON Pointer。每项reason≤35汉字，refs只列必要证据；同cause/event只扣一项。"
+    "minor最低adequate，weak需material，missing需blocking；Python加总，不输出自由confidence。"
+    "no仍评允许方向，wait_basis列{code,reason,evidence_refs}，code为hard_limit/missing_structure/missing_trigger/missing_data/target_space/material_counter_evidence。"
+    "已有周期触发不写missing_trigger；仅minor且位置/确认/保护/目标成立应提案交审核，不无限等待更漂亮形态。"
+    "独立重大反证仍自主判断，不为出单删真障碍；只省重复说明，不能漏独立硬伤或关键证据。"
 )
 AI3_INSTRUCTIONS = (
     "你是持仓监控 AI-3。只能选择 hold、tighten_sl 或 close。"
@@ -153,9 +161,9 @@ AI3_INSTRUCTIONS = (
     "单根影线刺穿但收盘收回不算结构失效。浮盈单可以把止损收紧到入场价以上（BUY）或以下（SELL）来锁定利润。"
     "输入的r_now和profit只是当前快照，hold_minutes只是持仓时长，均不能证明持续浮亏；没有历史序列不得声称一直亏损。用已给M1/M5收盘序列说明推进或拒绝的具体证据。"
     "未提供原始入场结构时，不得断言原始入场结构已失效；可以依据明确的近期M1/M5结构恶化提前减亏。仅持仓时间长、单次浮亏或一根反向K线不足以close。"
-    "先对照保存的entry_context说明新行情是否使原入场理由失效。至少两根相邻已收盘M1朝不利方向推进且近期M5结构同步恶化，才可作为提前close的证据；指定失效边界被已收盘K线越过时可close。"
+    "先对照entry_context核实原入场理由，不重新评分。"
     "max_adverse为null或覆盖范围有限时，不得写成从未回撤；只用可见区间的MFE/MAE，并明确coverage。"
-    "最终回复只能是一个 JSON 对象，不要 Markdown。"
+    "原始K线省略的candle_parts可由OHLC还原。输出紧凑JSON，reasoning≤100汉字，保留判断所需周期/时间/价位，不复述全部行情。"
 )
 
 
@@ -619,6 +627,64 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
     return pack, fib, atr, price
 
 
+def compact_market_pack(pack):
+    """Drop only reconstructible candle math and exact duplicate metadata."""
+    result = copy.deepcopy(pack)
+
+    def compact_bar(bar):
+        compact = dict(bar)
+        parts = bar.get("candle_parts")
+        if isinstance(parts, dict) and set(parts) == {"body", "range", "upper", "lower"}:
+            try:
+                derived = base.candle_parts(bar)
+                if all(parts[key] == round(derived[key], 6) for key in parts):
+                    compact.pop("candle_parts")
+            except (KeyError, TypeError, ValueError):
+                pass  # Incomplete OHLC or finer source precision must stay explicit.
+        return compact
+
+    for key in ("m1_bars", "m5_bars", "m15_bars", "h1_bars"):
+        if key in result:
+            result[key] = [compact_bar(bar) for bar in result[key]]
+    details = result.get("details", {})
+    for key in ("session", "setup", "regime", "regime_text", "momentum"):
+        if key in result and details.get(key) == result[key]:
+            details.pop(key, None)
+    windows = result.get("evidence_windows", {})
+    for key, bars_key, count in (
+        ("m15_structure_bar_times", "m15_bars", 24),
+        ("breakout_bar_times", "m15_bars", 20),
+        ("m5_rejection_bar_times", "m5_bars", 3),
+    ):
+        times = [bar.get("time") for bar in result.get(bars_key, [])[-count:]]
+        if key in windows and windows[key] == times:
+            windows.pop(key)
+    # Stable rules/rubric precede changing quotes and bars for prefix caching.
+    stable = ("symbol", "timeframe", "direction_timeframe", "bars_are_closed",
+              "rules", "quality_rubric", "evidence_windows", "bar_closure")
+    return {**{key: result[key] for key in stable if key in result},
+            **{key: value for key, value in result.items() if key not in stable}}
+
+
+def compact_review_pack(review):
+    """AI-2 needs final prices and original thesis, not another quality scoring pass."""
+    result = copy.deepcopy(review)
+    result["market_evidence"] = compact_market_pack(result["market_evidence"])
+    result["proposal"] = {key: value for key, value in result["proposal"].items()
+                          if key not in ("details", "reasoning")}
+    for key in ("quality_assessment", "quality_score", "quality_version", "model_reported_confidence"):
+        result["ai1_raw_proposal"].pop(key, None)
+    market = result["market_evidence"]
+    for key in ("atr", "h1_trend", "m15_trend", "regime", "regime_text", "session", "setup",
+                "local_action", "local_reasoning"):
+        if key in market and result.get(key) == market[key]:
+            result.pop(key, None)
+    for key, rule in (("max_stop_abs", "max_stop_abs"), ("min_rr", "min_rr")):
+        if key in result and result[key] == market.get("rules", {}).get(rule):
+            result.pop(key)
+    return {"market_evidence": result.pop("market_evidence"), **result}
+
+
 def plan_feasibility(action, reference_entry, stop_loss, take_profit, quote):
     """Snapshot arithmetic for one plan, never a substitute for order-time checks."""
     result = {"action": action, "reference_entry": reference_entry, "stop_loss": stop_loss,
@@ -866,7 +932,63 @@ def backup_chat_config(role, model, effort, url, api_key):
             for field, name in names.items()}
 
 
-def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, still_current=None):
+def record_ai_usage(event):
+    """One record per actual POST; a timeout has unknown usage, never zero cost."""
+    try:
+        now = datetime.now()
+        row = {"timestamp": now.isoformat(timespec="milliseconds"), **event}
+        with _USAGE_LOCK:
+            os.makedirs(AI_USAGE_DIR, exist_ok=True)
+            path = os.path.join(AI_USAGE_DIR, now.strftime("%Y-%m-%d") + ".jsonl")
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        usage = row.get("usage") or {}
+        base.logger.info(
+            "%s 请求统计 call=%s decision=%s trigger=%s %s/%s %s outcome=%s elapsed=%.2fs input=%s output=%s reasoning=%s cache_read=%s cache_write=%s",
+            row["role"], row["call_id"], row.get("decision_id"), row.get("trigger"), row["attempt"],
+            row["request_budget"], row["channel"], row["outcome"], row["elapsed_sec"],
+            usage.get("input_tokens"), usage.get("output_tokens"), usage.get("reasoning_tokens"),
+            usage.get("cache_read_tokens"), usage.get("cache_write_tokens"),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        base.logger.warning("AI用量记录失败: %s", type(exc).__name__)
+
+
+def normalized_chat_usage(result):
+    raw = result.get("usage") if isinstance(result, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    input_details = raw.get("prompt_tokens_details") or raw.get("input_tokens_details") or {}
+    output_details = raw.get("completion_tokens_details") or raw.get("output_tokens_details") or {}
+    if not isinstance(input_details, dict):
+        input_details = {}
+    if not isinstance(output_details, dict):
+        output_details = {}
+
+    def number(*values):
+        return next((value for value in values if isinstance(value, (int, float)) and not isinstance(value, bool)), None)
+
+    # Providers differ on whether cached input is included; do not add it again.
+    return {
+        "input_tokens": number(raw.get("prompt_tokens"), raw.get("input_tokens")),
+        "output_tokens": number(raw.get("completion_tokens"), raw.get("output_tokens")),
+        "total_tokens": number(raw.get("total_tokens")),
+        "reasoning_tokens": number(output_details.get("reasoning_tokens"), output_details.get("thinking_tokens"), raw.get("reasoning_tokens")),
+        "cache_read_tokens": number(input_details.get("cached_tokens"), raw.get("cache_read_input_tokens"), raw.get("prompt_cache_hit_tokens")),
+        "cache_write_tokens": number(input_details.get("cache_write_tokens"), raw.get("cache_creation_input_tokens")),
+        "uncached_input_tokens": number(raw.get("prompt_cache_miss_tokens")),
+        "input_semantics": "provider_reported",
+    }
+
+
+def chat_finish_reason(result):
+    choices = result.get("choices") if isinstance(result, dict) else None
+    return choices[0].get("finish_reason") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+
+
+def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, still_current=None, request_context=None):
     primary = {"model": model, "effort": effort, "url": str(url or "").strip(),
                "key": str(api_key or "").strip()}
     backup = backup_chat_config(role, model, effort, url, api_key)
@@ -875,16 +997,21 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
     using_backup = False
     low_retry = False
     omit_reasoning = False
+    token_fallback_used = False
+    read_failures = {"primary": 0, "backup": 0}
+    context = request_context or {}
+    call_id = "%s-%s" % (role, time.time_ns())
 
     def task_alive():
         return still_current is None or still_current()
 
     def switch_to_backup():
-        nonlocal active, using_backup, low_retry, omit_reasoning
+        nonlocal active, using_backup, low_retry, omit_reasoning, token_fallback_used
         if not has_backup or using_backup:
             return False
         active, using_backup = backup, True
         low_retry, omit_reasoning = False, False
+        token_fallback_used = False
         base.logger.warning("%s 主接口失败，切换备用 host=%s model=%s（共用%s次请求预算）",
                             role, urlsplit(active["url"]).hostname, active["model"], AI_HTTP_RETRIES)
         return True
@@ -897,7 +1024,14 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
     transport_failures = 0
     attempted = 0
     for attempt in range(1, AI_HTTP_RETRIES + 1):
-        label = "backup" if using_backup else "primary"
+        channel = "backup" if using_backup else "primary"
+        label = channel
+        option_key = (active["url"], active["model"])
+        default_token_field = "max_completion_tokens" if active["model"].lower().startswith(("gpt-", "o1", "o3", "o4")) else "max_tokens"
+        with _CHAT_OPTIONS_LOCK:
+            options = dict(_CHAT_OPTIONS.get(option_key, {}))
+        token_field = options.get("token_field", default_token_field)
+        omit_reasoning = omit_reasoning or options.get("omit_reasoning", False)
         if low_retry:
             label += "/low_retry"
         if omit_reasoning:
@@ -913,12 +1047,35 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
+            token_field: AI_MAX_TOKENS.get(role, 4096),
         }
         this_effort = "low" if low_retry else active["effort"]
         if this_effort and not omit_reasoning:
-            data["reasoning"] = {"effort": this_effort}
+            data["reasoning_effort"] = this_effort
         headers = {"Content-Type": "application/json", "Authorization": "Bearer " + active["key"]}
         attempted = attempt
+        started = time.monotonic()
+
+        def record_attempt(outcome, result=None, response=None):
+            finish = chat_finish_reason(result)
+            response_headers = getattr(response, "headers", {}) or {}
+            response_id = result.get("id") if isinstance(result, dict) else None
+            record_ai_usage({
+                "role": role, "call_id": call_id, "decision_id": context.get("decision_id"),
+                "trigger": context.get("trigger", "unspecified"), "bar_time": context.get("bar_time"),
+                "attempt": attempt, "request_budget": AI_HTTP_RETRIES, "channel": channel,
+                "host": urlsplit(active["url"]).hostname, "model": active["model"],
+                "response_model": result.get("model") if isinstance(result, dict) else None,
+                "request_id": response_headers.get("x-request-id") or response_headers.get("request-id"),
+                "response_id": response_id, "http_status": getattr(response, "status_code", None),
+                "outcome": outcome, "elapsed_sec": round(time.monotonic() - started, 3),
+                "prompt_chars": len(prompt), "instructions_chars": len(instructions),
+                "reasoning_effort_sent": data.get("reasoning_effort"),
+                "token_limit": data[token_field], "token_limit_field": token_field,
+                "finish_reason": finish, "usage": normalized_chat_usage(result),
+                "cost": None,  # Rates and timeout billing belong to the provider, not guesses.
+            })
+
         try:
             response = requests.post(active["url"], headers=headers, json=data, timeout=timeout)
         except (requests.Timeout, requests.ConnectionError) as exc:
@@ -926,36 +1083,69 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             last_problem = "%s: %s" % (type(exc).__name__, exc)
             base.logger.warning("%s 请求超时或连接失败 (%s/%s, %s): %s",
                                 role, attempt, AI_HTTP_RETRIES, label, last_problem)
+            is_read_timeout = (isinstance(exc, requests.Timeout) and not isinstance(exc, requests.ConnectTimeout)
+                               or "read timed out" in str(exc).lower())
+            record_attempt("read_timeout" if is_read_timeout else "connection_failure")
             if not task_alive():
                 return ""
             if attempt >= AI_HTTP_RETRIES:
                 break
-            switch_to_backup()
+            if is_read_timeout:
+                read_failures[channel] += 1
+            switched = switch_to_backup()
+            if is_read_timeout and not switched and read_failures[channel] > AI_READ_TIMEOUT_RETRIES:
+                last_problem += "；读超时后上游可能继续生成，停止本通道重复补发（用量/费用未知）"
+                break
             time.sleep(AI_HTTP_RETRY_PAUSE)
             continue
+        response.encoding = "utf-8"
+        try:
+            result = response.json()
+        except ValueError:
+            result = None
+        finish_reason = chat_finish_reason(result)
         if not task_alive():
+            record_attempt("stale_response", result, response)
             base.logger.info("%s 请求返回时任务已过期，丢弃 (%s)", role, label)
             return ""
-        if response.status_code == 400 and "reasoning" in response.text.lower() and "reasoning" in data:
+        if finish_reason in ("length", "max_tokens"):
+            record_attempt("truncated", result, response)
+            raise AIRequestError(role, "输出达到token上限，拒绝不完整决策且不重复付费请求；查看ai_usage调整本角色MAX_TOKENS")
+        unsupported_parameter = any(word in response.text.lower() for word in (
+            "unsupported", "unknown", "unrecognized", "not supported", "unexpected", "not allowed"))
+        if response.status_code == 400 and unsupported_parameter and "reasoning" in response.text.lower() and "reasoning_effort" in data:
+            record_attempt("unsupported_reasoning", result, response)
             omit_reasoning = True
+            with _CHAT_OPTIONS_LOCK:
+                _CHAT_OPTIONS.setdefault(option_key, {})["omit_reasoning"] = True
             last_problem = "接口拒绝reasoning参数"
             base.logger.warning("%s 拒绝 reasoning 参数，去掉后重试 (%s)", role, label)
             continue
+        if response.status_code == 400 and unsupported_parameter and token_field in response.text.lower():
+            record_attempt("unsupported_token_limit", result, response)
+            if token_fallback_used:
+                raise AIRequestError(role, "接口拒绝两种token上限参数，停止请求，不能移除费用上限后无限生成")
+            token_fallback_used = True
+            alternate = "max_tokens" if token_field == "max_completion_tokens" else "max_completion_tokens"
+            with _CHAT_OPTIONS_LOCK:
+                _CHAT_OPTIONS.setdefault(option_key, {})["token_field"] = alternate
+            last_problem = "接口拒绝%s，改用%s保留生成上限" % (token_field, alternate)
+            base.logger.warning("%s %s (%s)", role, last_problem, label)
+            continue
         if response.status_code != 200:
             last_problem = "HTTP %s" % response.status_code
+            record_attempt("http_error", result, response)
+        elif result is None:
+            last_problem = "接口返回非JSON响应"
+            record_attempt("non_json", result, response)
         else:
-            try:
-                response.encoding = "utf-8"
-                result = response.json()
-            except ValueError:
-                last_problem = "接口返回非JSON响应"
-            else:
-                text = extract_chat_text(result)
-                if text:
-                    if attempt > 1:
-                        base.logger.info("%s 第 %s/%s 次请求成功 (%s)", role, attempt, AI_HTTP_RETRIES, label)
-                    return text
-                last_problem = "接口可见输出为空"
+            text = extract_chat_text(result)
+            record_attempt("success" if text else "empty_output", result, response)
+            if text:
+                if attempt > 1:
+                    base.logger.info("%s 第 %s/%s 次请求成功 (%s)", role, attempt, AI_HTTP_RETRIES, label)
+                return text
+            last_problem = "接口可见输出为空"
         base.logger.warning("%s 调用失败 (%s/%s, %s): %s", role, attempt, AI_HTTP_RETRIES, label, last_problem)
         if attempt >= AI_HTTP_RETRIES:
             break
@@ -1497,17 +1687,17 @@ class ThreeAITrader(base.FibVolumePATrader):
             "M5拒绝仍在%g美元内，派发开仓 action=%s score=%s SL=%s"
             % (base.MAX_SL_ABS, local_result.action, local_result.confidence, local_result.stop_loss)
         )
-        self.dispatch_entry(bar_time)
+        self.dispatch_entry(bar_time, trigger="M5")
 
-    def dispatch_entry(self, bar_time):
+    def dispatch_entry(self, bar_time, trigger="M15"):
         seq = self.claim_task("entry", bar_time, ENTRY_TAKEOVER_SEC)
         if seq is None:
             base.logger.info("AI-1/2 仍在进行，跳过本根K线")
             return
-        base.logger.info("AI-1 已派发分析线程 bar=%s seq=%s" % (bar_time, seq))
-        threading.Thread(target=self.entry_task, args=(bar_time, seq), daemon=True).start()
+        base.logger.info("AI-1 已派发分析线程 bar=%s seq=%s trigger=%s", bar_time, seq, trigger)
+        threading.Thread(target=self.entry_task, args=(bar_time, seq, trigger), daemon=True).start()
 
-    def entry_task(self, bar_time, seq):
+    def entry_task(self, bar_time, seq, trigger="M15"):
         try:
             if self._stop.is_set():
                 return
@@ -1526,12 +1716,15 @@ class ThreeAITrader(base.FibVolumePATrader):
             pack, fib, atr, price = build_feature_pack(
                 df_m15, df_h1, df_m5, local_result, quote=quote, decision_id=decision_id
             )
+            pack = compact_market_pack(pack)
             append_decision_snapshot(
                 decision_id,
                 "ai1_input",
                 {
                     "market_evidence": pack,
                     "local_result": local_result.to_decision(),
+                    "trigger": trigger,
+                    "cost_control_version": COST_CONTROL_VERSION,
                 },
             )
             reject = ""
@@ -1568,13 +1761,14 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI1_EFFORT,
                 AI1_INSTRUCTIONS,
                 prompt_json(
-                    "请只输出JSON，含action、stop_loss、take_profit、reasoning、trigger_evidence、invalidation、target_basis、fact_conflicts、unknowns；quality_assessment={direction,dimensions:{structure,trigger,protection,target,counter_evidence},reservations:[]}，各维度={level,reason,evidence_refs:[],reservation_ids:[]}；wait_basis=[]（no必须列明等待依据）。由Python汇总质量分，不输出自由confidence。",
+                    "分析本轮已收盘行情，只输出契约JSON。",
                     pack,
                 ),
                 AI1_TIMEOUT,
                 AI1_URL,
                 AI1_KEY,
                 still_current=lambda: self.entry_is_current(seq, bar_time) and not self._stop.is_set(),
+                request_context={"decision_id": decision_id, "bar_time": bar_time, "trigger": trigger},
             )
             if not self.entry_is_current(seq, bar_time) or self._stop.is_set():
                 base.logger.info("AI-1 返回已过期，丢弃 seq=%s" % seq)
@@ -1694,19 +1888,22 @@ class ThreeAITrader(base.FibVolumePATrader):
                 "local_reasoning": local_result.reasoning,
                 "market_evidence": pack,
             }
+            review_pack = compact_review_pack(review_pack)
+            append_decision_snapshot(decision_id, "ai2_input", {"review": review_pack, "trigger": trigger})
             review_raw = call_chat(
                 "AI-2",
                 AI2_MODEL,
                 AI2_EFFORT,
                 AI2_INSTRUCTIONS,
                 prompt_json(
-                    "请只输出 JSON: {\"decision\":\"APPROVE|REJECT\",\"defects\":[],\"reasoning\":\"...\",\"fact_conflicts\":[]}",
+                    "审核最终订单，只输出契约JSON。",
                     review_pack,
                 ),
                 AI2_TIMEOUT,
                 AI2_URL,
                 AI2_KEY,
                 still_current=lambda: self.entry_is_current(seq, bar_time) and not self._stop.is_set(),
+                request_context={"decision_id": decision_id, "bar_time": bar_time, "trigger": trigger},
             )
             if not self.entry_is_current(seq, bar_time) or self._stop.is_set():
                 base.logger.info("AI-2 返回已过期，丢弃 seq=%s" % seq)
@@ -1874,6 +2071,10 @@ class ThreeAITrader(base.FibVolumePATrader):
                         item["entry_context"].get("coverage"),
                     )
                 )
+            payload = compact_market_pack(payload)
+            for item in payload["positions"]:
+                # The complete card remains persisted; guardian uses the entry thesis.
+                item["entry_context"].pop("quality_assessment", None)
             raw = call_chat(
                 "AI-3",
                 AI3_MODEL,
@@ -1887,6 +2088,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI3_URL,
                 AI3_KEY,
                 still_current=lambda: self.ai3_is_current(seq, bar_time) and not self._stop.is_set(),
+                request_context={"decision_id": "ai3-%s-%s" % (bar_time, seq), "bar_time": bar_time, "trigger": "M1"},
             )
             if not self.ai3_is_current(seq, bar_time) or self._stop.is_set():
                 base.logger.info("AI-3 返回已过期，丢弃 seq=%s" % seq)
@@ -1974,6 +2176,8 @@ class ThreeAITrader(base.FibVolumePATrader):
             % ("entry-evidence-v5", AI_DECISION_SNAPSHOT_DIR)
         )
         base.logger.info("AI质量评分=%s，等级分值=%s，门槛=%s（非胜率）", QUALITY_VERSION, QUALITY_LEVEL_POINTS, AI_CONFIDENCE)
+        base.logger.info("AI成本控制=%s token上限=%s 同通道读超时补发=%s 用量目录=%s",
+                         COST_CONTROL_VERSION, AI_MAX_TOKENS, AI_READ_TIMEOUT_RETRIES, AI_USAGE_DIR)
         base.logger.info("AI URLs: AI1=%s AI2=%s AI3=%s" % (AI1_URL, AI2_URL, AI3_URL))
         base.logger.info(
             "AI keys: AI1=%s AI2=%s AI3=%s"
@@ -2024,13 +2228,14 @@ class ThreeAITrader(base.FibVolumePATrader):
                 m5_time = self.latest_bar_time(base.mt5.TIMEFRAME_M5)
                 m1_time = self.latest_bar_time(base.mt5.TIMEFRAME_M1)
                 if m15_time and m15_time != last_m15:
+                    trigger = "startup" if not last_m15 else "M15"
                     last_m15 = m15_time
                     if once:
                         seq = self.claim_task("entry", m15_time, ENTRY_TAKEOVER_SEC)
                         if seq is not None:
-                            self.entry_task(m15_time, seq)
+                            self.entry_task(m15_time, seq, trigger)
                         return 0
-                    self.dispatch_entry(m15_time)
+                    self.dispatch_entry(m15_time, trigger)
                 if m5_time and m5_time != last_m5 and m5_time != m15_time and not once:
                     last_m5 = m5_time
                     self.dispatch_m5_entry(m5_time)
@@ -2050,11 +2255,15 @@ class ThreeAITrader(base.FibVolumePATrader):
 
 
 def run_http_retry_self_test():
-    global AI_HTTP_RETRIES, AI_HTTP_RETRY_PAUSE
+    global AI_HTTP_RETRIES, AI_HTTP_RETRY_PAUSE, AI_READ_TIMEOUT_RETRIES, AI_USAGE_DIR
     old_post = requests.post
     old_logger = base.logger
     old_retries = AI_HTTP_RETRIES
     old_pause = AI_HTTP_RETRY_PAUSE
+    old_read_retries, old_usage_dir = AI_READ_TIMEOUT_RETRIES, AI_USAGE_DIR
+    usage_temp = tempfile.TemporaryDirectory(prefix="myq-ai-self-test-")
+    AI_USAGE_DIR = usage_temp.name
+    AI_READ_TIMEOUT_RETRIES = 2  # Exercise the explicitly configurable retry path.
     AI_HTTP_RETRIES = 5
     AI_HTTP_RETRY_PAUSE = 0
 
@@ -2113,6 +2322,8 @@ def run_http_retry_self_test():
         base.logger = old_logger
         AI_HTTP_RETRIES = old_retries
         AI_HTTP_RETRY_PAUSE = old_pause
+        AI_READ_TIMEOUT_RETRIES, AI_USAGE_DIR = old_read_retries, old_usage_dir
+        usage_temp.cleanup()
 
 
 def run_self_test():

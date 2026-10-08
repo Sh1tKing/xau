@@ -39,7 +39,7 @@
 - H4 只作为背景，不是否决条件。
 - 新的已收盘 M15 先评估开仓，AI-1 和 AI-2 会收到 `session` 和 `setup`，之后每根已收盘 M5 再检查一次时机。本地先评分，AI-1 再给方向，AI-2 只审核硬伤，AI-3 只持有、收紧或平仓。
 - Python 是最后一道门。AI 不能放宽止损，不能突破下面的硬限制。
-- `call_chat()` 所有HTTP请求合计最多5次，配置是 `FIB_PA_AI_HTTP_RETRIES`，主接口/备用接口/low重试/去reasoning参数均共用这一预算。同配置网络重试只针对Timeout/ConnectionError；主接口出现网络故障、HTTP错误、非JSON响应或空输出时，若配置独立备用就切换；没有独立备用时保留一次low恢复，400拒绝reasoning时先去参数补发。正常no/REJECT不换模型重审。任务过期或停止就不再发请求，不要把超时说成“没有可见JSON”。开仓接管默认360秒，AI-3接管默认220秒。
+- `call_chat()` 所有HTTP请求合计最多5次，配置 `FIB_PA_AI_HTTP_RETRIES`，主备/low恢复/参数兼容共用预算。2026-10-08成本优化后，同通道读超时额外补发默认0（`FIB_PA_AI_READ_TIMEOUT_RETRIES`），因为上游可能仍在计费生成；独立备用可接手，两边都读超时就结束本轮。连接失败/连接超时仍可在总预算内重试。HTTP错误、非JSON或空输出可切备用；无备用时保留一次low恢复。Chat Completions用reasoning_effort，400拒绝可去掉并记住兼容性，token上限字段不兼容时只换字段不取消上限。正常no/REJECT及截断回复不换模型重审，截断明确失败。任务过期/停止不再请求，不把超时说成“没有可见JSON”。开仓接管360秒、AI-3接管220秒保留。
 
 按北京时间分时段，每段都能开仓，但用不同的进场方式（`trading_session()` 和 `SESSION_SETUPS`）：
 
@@ -70,6 +70,8 @@
 - 不把仓位改成账户的 1.5%，不把方向过滤抬回 D1/H4。
 
 ## 已知问题
+
+- 2026-10-08 成本/延迟优化 `cost-latency-v1`：客户端每轮只有system/user两条消息，不累积聊天历史。用户截图当前输出约3.3k–6k token，早期几百；不要都归因中转或缓存。`xauusd_fib_volume_pa_ai3.py`精简角色重复规则并要求短JSON，保留quality_rubric/归一化和全部交易硬限制；`compact_market_pack()`只去原始K线可由OHLC还原的candle_parts、相等元数据及完全重复时间列表，完整K线窗口、computed_evidence、本地拒绝理由不删。规则/rubric提前利于缓存，不声称必命中。AI2保留最终计划/原始提案理由/完整市场，去重复details和评分卡；AI3仅发送副本去评分卡，持久化证据不删。`reasoning_effort`为标准Chat参数；默认AI1/AI2/AI3生成上限4096/4096/2048（`FIB_PA_AI{n}_MAX_TOKENS`），拒绝上限参数只转换字段，不无界重发；length/max_tokens截断不能执行。每实际POST写 `xau_fib_pa_logs/ai_usage/YYYY-MM-DD.jsonl`，含call_id/decision_id/trigger(startup/M15/M5/M1)/attempt/主备/ID/耗时/参数/usage，未知为null不当免费、不猜费率、不把缓存miss当写入，晚到回复仍记用量。默认读超时停止同通道补发，有备用可切换；这会牺牲无备用慢线路靠重复请求碰成功的机会，不要未经授权改回5份长生成。回归 `tests/test_ai_cost_control.py`，设计 `docs/superpowers/specs/2026-10-08-ai-cost-latency-optimization.md`。离线验证不能证明收益/实际账单减少，代理不启动或重启交易进程。
 
 - 2026-10-08 主备AI接口：用户要求AI-1/2/3各有备用，未填项沿用本角色主配置。`.env`及`.env.example`新增 `AI{1,2,3}_BACKUP_URL` / `_BACKUP_KEY`、`FIB_PA_AI{1,2,3}_BACKUP_MODEL` / `_BACKUP_EFFORT`，逐项空白继承，超时沿用原角色值；完全相同的主备不视为独立通道。`backup_chat_config()`按角色解析，`call_chat()`每轮从主接口开始，首次接口故障后在剩余最多5次总预算内使用备用；不等主接口耗完5次才再发5次。正常观望/审核REJECT及策略协议验证失败不因交易未放行而重新找模型；备用仍使用同角色提示词和Python硬限制。日志标明primary/backup、总尝试序号、备用host/model，只显示key是否配置。API错误耗尽以AIRequestError报真实原因，任务过期/停止不再请求。配置留空时没有新服务可用，用户需填真实备用URL/密钥；代理不猜测服务或密钥，不启动交易进程。
 
