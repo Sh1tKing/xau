@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from urllib.parse import urlsplit
 
 import requests
 
@@ -852,97 +853,125 @@ class AIRequestError(RuntimeError):
         super().__init__("%s: %s" % (role, detail))
 
 
+def backup_chat_config(role, model, effort, url, api_key):
+    primary = {"model": model, "effort": effort, "url": str(url or "").strip(),
+               "key": str(api_key or "").strip()}
+    role_id = {"AI-1": "1", "AI-2": "2", "AI-3": "3"}.get(role)
+    if role_id is None:
+        return primary
+    names = {"url": "AI%s_BACKUP_URL" % role_id, "key": "AI%s_BACKUP_KEY" % role_id,
+             "model": "FIB_PA_AI%s_BACKUP_MODEL" % role_id,
+             "effort": "FIB_PA_AI%s_BACKUP_EFFORT" % role_id}
+    return {field: os.getenv(name, "").strip().strip('"').strip("'").strip() or primary[field]
+            for field, name in names.items()}
+
+
 def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, still_current=None):
-    key = str(api_key or "").strip()
-    if not key:
-        raise RuntimeError("%s 缺少 API key" % role)
-    url = str(url or "").strip()
-    if not url:
-        raise RuntimeError("%s 缺少请求 URL" % role)
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + key,
-    }
+    primary = {"model": model, "effort": effort, "url": str(url or "").strip(),
+               "key": str(api_key or "").strip()}
+    backup = backup_chat_config(role, model, effort, url, api_key)
+    has_backup = backup != primary and bool(backup["url"] and backup["key"])
+    active = primary
+    using_backup = False
+    low_retry = False
+    omit_reasoning = False
 
     def task_alive():
         return still_current is None or still_current()
 
-    def post_with_retry(data, label):
-        last_exc = None
-        for attempt in range(1, AI_HTTP_RETRIES + 1):
-            if not task_alive():
-                base.logger.info(
-                    "%s 任务已过期或已停止，停止重试 (%s %s/%s)"
-                    % (role, label, attempt, AI_HTTP_RETRIES)
-                )
-                return None
-            try:
-                response = requests.post(url, headers=headers, json=data, timeout=timeout)
-            except (requests.Timeout, requests.ConnectionError) as exc:
-                last_exc = exc
-                base.logger.warning(
-                    "%s 请求超时或连接失败 (%s/%s, %s): %s: %s"
-                    % (role, attempt, AI_HTTP_RETRIES, label, type(exc).__name__, exc)
-                )
-                if attempt >= AI_HTTP_RETRIES:
-                    break
-                time.sleep(AI_HTTP_RETRY_PAUSE)
-                continue
-            if not task_alive():
-                base.logger.info("%s 请求返回时任务已过期，丢弃 (%s)" % (role, label))
-                return None
-            if attempt > 1:
-                base.logger.info("%s 第 %s/%s 次请求成功 (%s)" % (role, attempt, AI_HTTP_RETRIES, label))
-            return response
-        detail = "连续 %s 次超时或连接失败 (%s): %s: %s" % (
-            AI_HTTP_RETRIES,
-            label,
-            type(last_exc).__name__,
-            last_exc,
-        )
-        base.logger.error("%s %s" % (role, detail[:300]))
-        raise AIRequestError(role, detail[:300])
+    def switch_to_backup():
+        nonlocal active, using_backup, low_retry, omit_reasoning
+        if not has_backup or using_backup:
+            return False
+        active, using_backup = backup, True
+        low_retry, omit_reasoning = False, False
+        base.logger.warning("%s 主接口失败，切换备用 host=%s model=%s（共用%s次请求预算）",
+                            role, urlsplit(active["url"]).hostname, active["model"], AI_HTTP_RETRIES)
+        return True
 
-    attempts = (("primary", effort), ("low_retry", "low"))
-    for index, (label, this_effort) in enumerate(attempts, start=1):
+    if not primary["key"] or not primary["url"]:
+        if not switch_to_backup():
+            raise RuntimeError("%s 缺少 %s" % (role, "API key" if not primary["key"] else "请求 URL"))
+
+    last_problem = "接口未返回有效响应"
+    transport_failures = 0
+    attempted = 0
+    for attempt in range(1, AI_HTTP_RETRIES + 1):
+        label = "backup" if using_backup else "primary"
+        if low_retry:
+            label += "/low_retry"
+        if omit_reasoning:
+            label += "/no_reasoning"
+        if not task_alive():
+            base.logger.info("%s 任务已过期或已停止，停止重试 (%s %s/%s)",
+                             role, label, attempt, AI_HTTP_RETRIES)
+            return ""
         data = {
-            "model": model,
+            "model": active["model"],
             "messages": [
                 {"role": "system", "content": instructions},
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
         }
-        if this_effort:
+        this_effort = "low" if low_retry else active["effort"]
+        if this_effort and not omit_reasoning:
             data["reasoning"] = {"effort": this_effort}
-        response = post_with_retry(data, label)
-        if response is None:
-            return ""
-        if response.status_code == 400 and "reasoning" in response.text.lower():
-            data.pop("reasoning", None)
-            base.logger.warning("%s 拒绝 reasoning 参数，去掉后重试 (%s)" % (role, label))
-            response = post_with_retry(data, label + "/no_reasoning")
-            if response is None:
-                return ""
-        if response.status_code != 200:
-            base.logger.error(
-                "%s 调用失败 (%s/%s, %s): %s - %s"
-                % (role, index, len(attempts), label, response.status_code, response.text[:400])
-            )
-            continue
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + active["key"]}
+        attempted = attempt
         try:
-            response.encoding = "utf-8"
-            result = response.json()
-        except ValueError:
-            base.logger.error("%s 返回非 JSON (%s): %s" % (role, label, response.text[:300]))
+            response = requests.post(active["url"], headers=headers, json=data, timeout=timeout)
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            transport_failures += 1
+            last_problem = "%s: %s" % (type(exc).__name__, exc)
+            base.logger.warning("%s 请求超时或连接失败 (%s/%s, %s): %s",
+                                role, attempt, AI_HTTP_RETRIES, label, last_problem)
+            if not task_alive():
+                return ""
+            if attempt >= AI_HTTP_RETRIES:
+                break
+            switch_to_backup()
+            time.sleep(AI_HTTP_RETRY_PAUSE)
             continue
-        text = extract_chat_text(result)
-        if text:
-            if index > 1:
-                base.logger.info("%s 重试后得到可见输出 (%s)" % (role, label))
-            return text
-        base.logger.warning("%s 可见输出为空 (%s): %s" % (role, label, summarize_chat_result(result)))
-    return ""
+        if not task_alive():
+            base.logger.info("%s 请求返回时任务已过期，丢弃 (%s)", role, label)
+            return ""
+        if response.status_code == 400 and "reasoning" in response.text.lower() and "reasoning" in data:
+            omit_reasoning = True
+            last_problem = "接口拒绝reasoning参数"
+            base.logger.warning("%s 拒绝 reasoning 参数，去掉后重试 (%s)", role, label)
+            continue
+        if response.status_code != 200:
+            last_problem = "HTTP %s" % response.status_code
+        else:
+            try:
+                response.encoding = "utf-8"
+                result = response.json()
+            except ValueError:
+                last_problem = "接口返回非JSON响应"
+            else:
+                text = extract_chat_text(result)
+                if text:
+                    if attempt > 1:
+                        base.logger.info("%s 第 %s/%s 次请求成功 (%s)", role, attempt, AI_HTTP_RETRIES, label)
+                    return text
+                last_problem = "接口可见输出为空"
+        base.logger.warning("%s 调用失败 (%s/%s, %s): %s", role, attempt, AI_HTTP_RETRIES, label, last_problem)
+        if attempt >= AI_HTTP_RETRIES:
+            break
+        if switch_to_backup():
+            continue
+        if not low_retry:
+            low_retry = True
+            continue
+        break
+
+    if transport_failures == attempted:
+        detail = "连续 %s 次超时或连接失败 (%s): %s" % (attempted, label, last_problem)
+    else:
+        detail = "%s次请求后失败 (%s): %s" % (attempted, label, last_problem)
+    base.logger.error("%s %s", role, detail[:300])
+    raise AIRequestError(role, detail[:300])
 
 
 def prices_are_valid(action, entry, stop_loss, take_profit):
@@ -1950,6 +1979,17 @@ class ThreeAITrader(base.FibVolumePATrader):
             "AI keys: AI1=%s AI2=%s AI3=%s"
             % ("set" if AI1_KEY else "missing", "set" if AI2_KEY else "missing", "set" if AI3_KEY else "missing")
         )
+        for role, model, effort, url, key in (
+            ("AI-1", AI1_MODEL, AI1_EFFORT, AI1_URL, AI1_KEY),
+            ("AI-2", AI2_MODEL, AI2_EFFORT, AI2_URL, AI2_KEY),
+            ("AI-3", AI3_MODEL, AI3_EFFORT, AI3_URL, AI3_KEY),
+        ):
+            backup = backup_chat_config(role, model, effort, url, key)
+            primary = {"model": model, "effort": effort, "url": url, "key": key}
+            base.logger.info("%s 备用配置: %s host=%s model=%s effort=%s key=%s", role,
+                             "独立备用" if backup != primary else "沿用主配置",
+                             urlsplit(backup["url"]).hostname, backup["model"], backup["effort"],
+                             "set" if backup["key"] else "missing")
         self.notify_lines(
             "🚀 %s 三AI交易启动" % base.SYMBOL,
             [
