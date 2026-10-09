@@ -272,9 +272,14 @@ class FrameworkTests(unittest.TestCase):
         before=copy.deepcopy(pack)
         compact=ai.compact_market_pack(pack)
         self.assertEqual(pack,before)
-        self.assertNotIn("strategy_contract",compact["details"])
-        self.assertNotIn("strategy_assessments",compact["details"])
-        self.assertEqual(compact["strategy_evidence"],pack["strategy_evidence"])
+        self.assertNotIn("details",compact)
+        self.assertNotIn("strategy_evidence",compact)
+        for candidate in compact["opportunities"]:
+            original=next(item for item in pack["opportunities"] if item["opportunity_id"]==candidate["opportunity_id"])
+            self.assertEqual(candidate["strategy_contract"],original["strategy_contract"])
+            self.assertNotIn("strategy_contract",candidate["local_plan"]["details"])
+            self.assertNotIn("strategy_assessments",candidate["local_plan"]["details"])
+            self.assertEqual(candidate["strategy_evidence"],{candidate["action"]:original["strategy_evidence"][candidate["action"]]})
 
     def test_builtin_priority_and_disabled_example(self):
         snapshot=DEFAULT_REGISTRY.snapshot()

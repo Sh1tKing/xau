@@ -135,6 +135,9 @@ AI2_INSTRUCTIONS = (
     "reasoning≤120汉字，缺陷只列独立硬伤及必要时间/价格/来源，不复述行情和评分卡。"
 )
 AI1_INSTRUCTIONS += (
+    "输入存在opportunities时一次自主选择一个opportunity_id，包括no也必须指明评估候选。动作及质量方向绑定该候选，"
+    "只引用自身/opportunities/原索引/下证据或共享OHLC/price_action/patterns，不能借用其他候选或本地赢家别名。"
+    "本地分低或参考方案失败不剥夺自主提出安全方案的权限；patterns仅几何与位置事实，不是吞没硬门或首轮趋势判断。"
     "live_quote是本次请求重新采集的报价，不是参考K线收盘价；按当前报价核实方案可执行性，不能把止损贴近现价形成的高RR当作质量提升。"
     "local_plan_feasibility只评价原本地SL/TP，不是否决其他自主方案的全局开关；本地no或该方案不可执行时，仍可提出有证据的其他合法方案。"
     "Python按rules.price_finalization定稿；先考虑M15参考价下最小止损宽度及target_max_reference_r目标上限，再核实实时报价RR，不能按随后会被截短的远目标宣称通过。"
@@ -456,6 +459,82 @@ def build_computed_entry_evidence(df_m15, df_h1, df_m5, local_result, fib, atr, 
     }
 
 
+def opportunity_selection(payload, pack):
+    """Resolve only the successful request's pool; legacy packs have no pool key."""
+    if "opportunities" not in pack:
+        return None, ""
+    identifier = payload.get("opportunity_id") if isinstance(payload, dict) else None
+    matches = [(i, item) for i, item in enumerate(pack["opportunities"])
+               if item.get("opportunity_id") == identifier]
+    if not isinstance(identifier, str) or not identifier or len(matches) != 1:
+        return None, "AI-1 /opportunity_id缺失、未知或重复"
+    index, candidate = matches[0]
+    card = payload.get("quality_assessment")
+    direction = card.get("direction") if isinstance(card, dict) else None
+    if direction != candidate["action"] or payload.get("action") not in ("no", candidate["action"]):
+        return None, "AI-1 /opportunity_id动作或quality_assessment/direction不一致"
+    def check_refs(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "evidence_refs" and isinstance(child, list):
+                    for pointer in child:
+                        if not isinstance(pointer, str):
+                            return "AI-1证据路径无效"
+                        parts = [part.replace("~1", "/").replace("~0", "~") for part in pointer.split("/")[1:]]
+                        own = len(parts) >= 3 and parts[:2] == ["opportunities", str(index)]
+                        if own and "strategy_evidence" in parts:
+                            evidence_at = parts.index("strategy_evidence")
+                            own = len(parts) > evidence_at + 1 and parts[evidence_at + 1] == candidate["action"]
+                        shared = parts and parts[0] in ("m15_bars", "m5_bars", "h1_bars", "patterns", "live_quote", "atr", "h1_trend", "m15_trend", "m15_ema21", "bar_closure")
+                        shared = shared or parts[:2] == ["computed_evidence", "price_action"]
+                        if not (own or shared) or any(p in ("host_verified_region", "host_verified_entry_event", "candidates") for p in parts):
+                            return "AI-1证据隔离拒绝: " + pointer
+                error = check_refs(child)
+                if error:
+                    return error
+        elif isinstance(value, list):
+            for child in value:
+                error = check_refs(child)
+                if error:
+                    return error
+        return ""
+    error = check_refs(payload)
+    return (index, candidate), error
+
+
+def selected_opportunity_pack(pack, selection):
+    """Separate execution aliases; never alter what AI1's pointers meant."""
+    if selection is None:
+        return copy.deepcopy(pack)
+    index, candidate = selection
+    result = copy.deepcopy(pack)
+    result["opportunities"] = [{} for _ in pack["opportunities"]]
+    result["opportunities"][index] = copy.deepcopy(candidate)
+    result["opportunity_id"] = candidate["opportunity_id"]
+    result["opportunity_blockers"] = [item for item in result.get("opportunity_blockers", [])
+                                       if item.get("opportunity_id") == candidate["opportunity_id"]]
+    result["strategy_contract"] = copy.deepcopy(candidate["strategy_contract"])
+    result["strategy_fingerprint"] = candidate["strategy_fingerprint"]
+    result["strategy_evidence"] = copy.deepcopy(candidate["strategy_evidence"])
+    result["reference_price"] = copy.deepcopy(candidate["reference_price"])
+    result["price"] = candidate["reference_price"]["price"]
+    result["details"] = copy.deepcopy(candidate["local_plan"].get("details", {}))
+    result["setup"] = result["details"].get("setup", candidate["strategy_contract"].get("setup", candidate["strategy_contract"].get("id")))
+    result["local_action"] = candidate["action"]
+    result["local_confidence"] = candidate["local_score"]
+    result["local_reasoning"] = candidate["local_plan"].get("reasoning", "")
+    result["local_stop_loss"] = candidate["local_plan"].get("stop_loss", 0)
+    result["local_take_profit"] = candidate["local_plan"].get("take_profit", 0)
+    result["computed_evidence"] = {"price_action": result.get("computed_evidence", {}).get("price_action", {})}
+    result["fib"] = None
+    result["timeframe"] = "M5" if "m5" in candidate["reference_price"].get("source", "").lower() else "M15"
+    finalization = result.get("rules", {}).get("price_finalization", {})
+    finalization["reference"] = candidate["reference_price"].get("source")
+    finalization["target_max_reference_r"] = candidate["strategy_contract"].get("target_max_reference_r", 1.8)
+    result["local_plan_feasibility"] = plan_feasibility(candidate["action"], result["price"], result["local_stop_loss"], result["local_take_profit"], result["live_quote"], result["atr"], result.get("m15_ema21"))
+    return result
+
+
 def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_id=None):
     atr = base.calculate_atr(df_m15)
     price = float(df_m15["close"].iloc[-1])
@@ -552,12 +631,64 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
     pack["local_plan_feasibility"] = plan_feasibility(local_result.action, plan_entry, local_result.stop_loss,
                                                      local_result.take_profit, pack["live_quote"], atr,
                                                      pack["m15_ema21"])
+    if "opportunities" in (local_result.details or {}):
+        pack["opportunities"] = copy.deepcopy(local_result.details["opportunities"])
+        pack["opportunity_blockers"] = [{"opportunity_id": item["opportunity_id"],
+                                          "blockers": item["structural_blockers"],
+                                          "local_plan_status": item["local_plan_status"]}
+                                         for item in pack["opportunities"]]
+        pack["opportunities"] = [item for item in pack["opportunities"] if base.opportunity_eligible(item)]
+        # Full shared source frames once, including region reconstruction/ATR warmup.
+        source_count = max([32] + [int(item["strategy_contract"].get("parameters", {}).get("pivot_lookback", 0))
+                                  + int(item["strategy_contract"].get("parameters", {}).get("atr_period", 14))
+                                  for item in pack["opportunities"]])
+        pack["m15_bars"] = bars_for_prompt(df_m15, source_count)
+        pack["m5_bars"] = bars_for_prompt(df_m5, len(df_m5))
+        from strategies.patterns import patterns_facts
+        pack["patterns"] = {"M15": patterns_facts(df_m15, "M15"), "M5": patterns_facts(df_m5, "M5")}
     return pack, fib, atr, price
 
 
 def compact_market_pack(pack):
     """Drop only reconstructible candle math and exact duplicate metadata."""
     result = copy.deepcopy(pack)
+    if "opportunities" in result:
+        # Execution keeps the full host snapshot. Requests expose one selected event,
+        # not nested alternative event payloads or duplicate full host windows.
+        def compact_source(value):
+            if isinstance(value, dict):
+                value.pop("host_verified_region", None)
+                value.pop("host_verified_entry_event", None)
+                for diagnostic in value.get("candidates", []) if isinstance(value.get("candidates"), list) else []:
+                    if isinstance(diagnostic, dict):
+                        diagnostic.pop("candidate", None)
+                for child in value.values():
+                    compact_source(child)
+            elif isinstance(value, list):
+                for child in value:
+                    compact_source(child)
+        for candidate in result["opportunities"]:
+            if candidate:
+                candidate["strategy_evidence"] = {candidate["action"]: candidate.get("strategy_evidence", {}).get(candidate["action"], {})}
+            plan = candidate.get("local_plan", {})
+            details = plan.get("details", {})
+            plan["details"] = {key: value for key, value in details.items()
+                               if key in ("setup", "entry_price", "entry_price_source", "location", "pa_score", "fib")}
+            compact_source(candidate)
+        result.get("details", {}).pop("opportunities", None)
+        # No winner-specific aliases are valid AI1 evidence in pool mode.
+        # Keep selected execution aliases only for AI2; pool already has all facts.
+        if not result.get("opportunity_id"):
+            for key in ("details", "strategy_evidence", "strategy_contract", "reference_price", "fib", "local_plan_feasibility",
+                        "local_stop_loss", "local_take_profit", "local_reasoning", "setup"):
+                result.pop(key, None)
+            computed = result.get("computed_evidence", {})
+            result["computed_evidence"] = {"price_action": computed.get("price_action", {})}
+        else:
+            chosen = next(item for item in result["opportunities"] if item.get("opportunity_id") == result["opportunity_id"])
+            result["strategy_evidence"] = copy.deepcopy(chosen["strategy_evidence"])
+            result["details"] = copy.deepcopy(chosen.get("local_plan", {}).get("details", {}))
+        compact_source(result)
 
     def compact_bar(bar):
         compact = dict(bar)
@@ -763,6 +894,9 @@ def _evidence_pointer_exists(pack, pointer):
 
 def normalize_ai1_quality(payload, pack):
     """Decode the declared contract; never repair legacy cards into trades."""
+    selection, error = opportunity_selection(payload, pack)
+    if error:
+        return payload, error
     if not isinstance(payload, dict) or not isinstance(payload.get("quality_assessment"), dict):
         return _normalize_ai1_quality_v1(payload, pack)
     card = payload["quality_assessment"]
@@ -824,6 +958,11 @@ def normalize_ai1_quality(payload, pack):
 
 
 def has_confirmed_trigger(pack, direction):
+    if "opportunities" in pack:
+        identifier = pack.get("_quality_opportunity_id")
+        candidate = next((item for item in pack["opportunities"] if item.get("opportunity_id") == identifier), None)
+        trigger = (candidate or {}).get("strategy_evidence", {}).get(direction, {}).get("evidence", {}).get("closed_trigger", {})
+        return trigger.get("confirmed") is True
     facts = pack.get("computed_evidence", {}).get("price_action", {})
     if any(facts.get(tf, {}).get(direction, {}).get("score", 0) > 0 for tf in ("M15", "M5")):
         return True
@@ -833,6 +972,11 @@ def has_confirmed_trigger(pack, direction):
 
 def _normalize_ai1_quality_v1(payload, pack):
     """Validate the AI scorecard without promoting its action or inventing facts."""
+    selection, error = opportunity_selection(payload, pack)
+    if error:
+        return payload, error
+    if selection is not None:
+        pack = {**pack, "_quality_opportunity_id": selection[1]["opportunity_id"]}
     if not isinstance(payload, dict):
         return payload, "AI-1质量评估缺失: 无有效JSON"
     card = payload.get("quality_assessment")
@@ -1018,6 +1162,7 @@ def response_json_schema(role):
                                "missing_data", "target_space", "material_counter_evidence"]},
                                "reason": text, "evidence_refs": texts})
         return _object_schema({
+            "opportunity_id": text,
             "action": {"type": "string", "enum": ["buy", "sell", "no"]}, "stop_loss": price, "take_profit": price,
             "reasoning": text, "trigger_evidence": text, "invalidation": text, "target_basis": text,
             "fact_conflicts": texts, "unknowns": texts,
@@ -1035,7 +1180,7 @@ def response_json_schema(role):
 
 
 def ai1_json_template():
-    return {"action": "no", "stop_loss": None, "take_profit": None,
+    return {"opportunity_id": "<本次候选ID；仅无opportunities的legacy输入可空字符串>", "action": "no", "stop_loss": None, "take_profit": None,
             "reasoning": "<本次结论>", "trigger_evidence": "<实际触发或缺失>",
             "invalidation": "<失效条件>", "target_basis": "<目标依据>", "fact_conflicts": [], "unknowns": [],
             "quality_assessment": {"version": QUALITY_VERSION, "direction": "buy", "dimensions": {
@@ -1582,8 +1727,33 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
         stop_loss, take_profit = 0.0, 0.0
 
     requested_take_profit = take_profit
+    region_evidence = (strategy_evidence or {}).get(action, {}).get("evidence", {})
+    is_region = (strategy_contract or {}).get("stop_reference") == "region"
+    if is_region:
+        try:
+            required_sl = base.required_region_stop(action, entry, atr, df_m5, region_evidence,
+                                                     (strategy_contract or {}).get("parameters"))
+            if not math.isfinite(stop_loss) or stop_loss <= 0 or (action == "buy" and stop_loss > required_sl) or (action == "sell" and stop_loss < required_sl):
+                stop_loss = required_sl
+            stop_loss = base.round_protective_stop(action, stop_loss)
+            risk = abs(entry - stop_loss)
+            limit = base.region_target_limit(action, entry, atr, region_evidence)
+            cap = entry + risk * target_r if action == "buy" else entry - risk * target_r
+            if limit is not None:
+                cap = min(cap, limit) if action == "buy" else max(cap, limit)
+            if not math.isfinite(take_profit) or take_profit <= 0:
+                take_profit = cap
+            take_profit = min(take_profit, cap) if action == "buy" else max(take_profit, cap)
+            take_profit = math.floor(take_profit * 100) / 100 if action == "buy" else math.ceil(take_profit * 100) / 100
+            error = base.region_plan_error(action, entry, stop_loss, take_profit, atr, region_evidence)
+            if error:
+                return None, "Python拒绝: " + error
+        except (base.StrategyError, TypeError, ValueError) as exc:
+            return None, "Python拒绝区域保护: " + str(exc)
     risk = (entry - stop_loss) if action == "buy" else (stop_loss - entry)
-    if prices_are_valid(action, entry, stop_loss, take_profit) and 0 < risk <= base.MAX_SL_ABS:
+    if is_region:
+        pass  # Region math above is authoritative; no Fib or fallback reconstruction.
+    elif prices_are_valid(action, entry, stop_loss, take_profit) and 0 < risk <= base.MAX_SL_ABS:
         stop_loss, take_profit = clamp_proposal(action, entry, stop_loss, take_profit, atr, target_r)
     else:
         stop_loss, take_profit = 0.0, 0.0
@@ -1621,7 +1791,7 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
 
     if not prices_are_valid(action, entry, stop_loss, take_profit):
         return None, "Python拒绝: 止损止盈方向非法或超过 %.2f 美元上限" % base.MAX_SL_ABS
-    guarded_sl, guarded_tp, guard_note = base.reject_inside_m5_wick(
+    guarded_sl, guarded_tp, guard_note = (stop_loss, take_profit, "") if is_region else base.reject_inside_m5_wick(
         action, entry, stop_loss, take_profit, atr, fib, df_m5, target_r=target_r
     )
     if guarded_sl <= 0 and guard_note:
@@ -1846,6 +2016,8 @@ class ThreeAITrader(base.FibVolumePATrader):
             "initial_risk": risk,
             "source": details.get("source", "ai1"),
             "decision_id": details.get("decision_id"),
+            "opportunity_id": details.get("opportunity_id"),
+            "event_id": details.get("event_id"),
             "setup": details.get("setup"),
             "session": details.get("session"),
             "strategy_contract": copy.deepcopy(details.get("strategy_contract")),
@@ -1906,13 +2078,13 @@ class ThreeAITrader(base.FibVolumePATrader):
             if account is None or getattr(account, "trade_mode", None) != base.mt5.ACCOUNT_TRADE_MODE_DEMO:
                 raise MarketSnapshotError("研究策略仅允许模拟账户，不请求AI或下单")
         assessments = (local_result.details or {}).get("strategy_assessments", {})
-        if ((local_result.details or {}).get("strategy_contract", {}).get("one_entry_per_event")
+        if ("opportunities" not in (local_result.details or {}) and (local_result.details or {}).get("strategy_contract", {}).get("one_entry_per_event")
                 and assessments and all(item.get("blockers") for item in assessments.values())):
             raise MarketSnapshotError("研究策略本轮无合法首次事件，不请求AI: " + local_result.reasoning)
         pack, fib, atr, price = build_feature_pack(
             df_m15, df_h1, df_m5, local_result, quote=self.get_live_quote(), decision_id=decision_id)
         pack["snapshot_id"] = request_trace_id("%s-ai1" % decision_id)
-        return df_m15, df_h1, df_m5, local_result, compact_market_pack(pack), fib, atr, price
+        return df_m15, df_h1, df_m5, local_result, pack, fib, atr, price
 
     def ensure_strategy_current(self, pack):
         fingerprint = pack.get("strategy_fingerprint")
@@ -2006,8 +2178,22 @@ class ThreeAITrader(base.FibVolumePATrader):
                 (item for item in positions if int(getattr(item, "ticket", 0) or 0) == ticket),
                 None,
             )
-            if position is None and positions:
-                position = max(positions, key=lambda item: int(getattr(item, "time", 0) or 0))
+            evidence = (result.details or {}).get("strategy_evidence", {}).get(result.action, {}).get("evidence", {})
+            event_id = evidence.get("event_id")
+            if event_id:
+                token = base.execution_token(event_id, base.SYMBOL, base.MAGIC, result.action)
+                def exact_identity(item):
+                    return (getattr(item, "comment", "") in (token, "_SR_" + token)
+                            and getattr(item, "symbol", None) == base.SYMBOL
+                            and getattr(item, "magic", None) == base.MAGIC
+                            and getattr(item, "type", None) == (base.mt5.POSITION_TYPE_BUY if result.action == "buy" else base.mt5.POSITION_TYPE_SELL))
+                if position is not None and not exact_identity(position):
+                    position = None
+                if position is None:
+                    state = self.strategy_ledger.snapshot()
+                    matches = [item for item in positions if exact_identity(item)
+                               and (base.recovery_event(item, state, base.SYMBOL, base.MAGIC) or (None,))[0] == event_id]
+                    position = matches[0] if len(matches) == 1 else None
             if position is None:
                 base.logger.warning("开仓成功但暂未找到持仓，AI-3上下文将在下次启动/轮询标记未知")
             else:
@@ -2109,6 +2295,13 @@ class ThreeAITrader(base.FibVolumePATrader):
         except Exception as exc:
             base.logger.error("M5时机评估异常: %s: %s" % (type(exc).__name__, exc))
             return
+        opportunities = (getattr(local_result, "details", None) or {}).get("opportunities")
+        if opportunities is not None:
+            append_decision_snapshot("%s-m5-local" % bar_time, "local_evaluation", {
+                "local_result": local_result.to_decision(), "trigger": "M5"})
+            if AI_ENABLED and any(base.opportunity_eligible(item) for item in opportunities):
+                self.dispatch_entry(bar_time, trigger="M5")
+                return
         if local_result.action not in ("buy", "sell"):
             reject = ""
             if "拒绝:" in (local_result.reasoning or ""):
@@ -2184,17 +2377,25 @@ class ThreeAITrader(base.FibVolumePATrader):
                     )
                     self.place_order(local_result)
                 return
+            if "opportunities" in pack and not pack["opportunities"]:
+                append_decision_snapshot(decision_id, "local_prefilter", {"reason": "no_eligible_structural_opportunity", "blockers": pack.get("opportunity_blockers")})
+                return
             if not self.entry_is_current(seq, bar_time):
                 base.logger.info("AI-1 任务已过期，取消请求 seq=%s" % seq)
                 return
 
+            request_pack = compact_market_pack(pack)
             def refresh_ai1_request():
-                nonlocal df_m15, df_h1, df_m5, local_result, pack, fib, atr, price
+                nonlocal df_m15, df_h1, df_m5, local_result, pack, fib, atr, price, request_pack
                 df_m15, df_h1, df_m5, local_result, pack, fib, atr, price = self.collect_entry_snapshot(decision_id)
+                if "opportunities" in pack and not pack["opportunities"]:
+                    append_decision_snapshot(decision_id, "local_prefilter", {"reason": "no_eligible_structural_opportunity", "blockers": pack.get("opportunity_blockers")})
+                    raise MarketSnapshotError("无合法结构候选，本轮本地观望，不请求AI")
+                request_pack = compact_market_pack(pack)
                 append_decision_snapshot(decision_id, "ai1_input", {
                     "market_evidence": pack, "local_result": local_result.to_decision(), "trigger": trigger,
                     "cost_control_version": COST_CONTROL_VERSION, "freshness_version": MARKET_FRESHNESS_VERSION})
-                return {"prompt": prompt_json("分析本次已收盘行情及当前报价，只输出契约JSON。", pack),
+                return {"prompt": prompt_json("分析本次已收盘行情及当前报价，只输出契约JSON。", request_pack),
                         "snapshot_id": pack["snapshot_id"], "quote": pack["live_quote"]}
 
             raw = call_chat(
@@ -2223,16 +2424,24 @@ class ThreeAITrader(base.FibVolumePATrader):
             self.ensure_strategy_current(pack)
             entry_price = float((local_result.details or {}).get("entry_price") or price)
             parsed_raw, json_error = parse_json_object(raw)
-            parsed, quality_error = (None, "AI-1输出格式错误: " + json_error) if json_error else normalize_ai1_quality(parsed_raw, pack)
+            parsed, quality_error = (None, "AI-1输出格式错误: " + json_error) if json_error else normalize_ai1_quality(parsed_raw, request_pack)
+            if not quality_error and "opportunities" in pack:
+                selection, selection_error = opportunity_selection(parsed, pack)
+                if selection_error:
+                    quality_error = selection_error
+                else:
+                    pack = selected_opportunity_pack(pack, selection)
+                    price = entry_price = float(pack["reference_price"]["price"])
+                    fib = None if pack["strategy_contract"].get("stop_reference") in ("region", "m5_extreme") else base.entry_fib_structure(df_m15, pack["h1_trend"], atr)
             proposal, reason = None, quality_error
             if not quality_error:
                 proposal, reason = finalize_ai_proposal(
                     parsed, entry_price, atr, pack["h1_trend"], pack["m15_trend"], fib,
                     df_m15=df_m15, df_m5=df_m5, regime=pack.get("regime"),
-                    regime_location=(local_result.details or {}).get("location"),
-                    pa_score=int((local_result.details or {}).get("pa_score") or 0),
-                    local_stop=local_result.stop_loss, local_target=local_result.take_profit,
-                    setup=(local_result.details or {}).get("setup", "pullback"),
+                    regime_location=pack.get("details", {}).get("location"),
+                    pa_score=int(pack.get("details", {}).get("pa_score") or 0),
+                    local_stop=pack.get("local_stop_loss", local_result.stop_loss), local_target=pack.get("local_take_profit", local_result.take_profit),
+                    setup=pack.get("setup", "pullback"),
                     strategy_contract=pack.get("strategy_contract") or None,
                     strategy_evidence=pack.get("strategy_evidence"),
                 )
@@ -2283,11 +2492,16 @@ class ThreeAITrader(base.FibVolumePATrader):
                 return
             proposal.score_buy = local_result.score_buy
             proposal.score_sell = local_result.score_sell
+            if pack.get("opportunity_id"):
+                proposal.details["entry_price_source"] = pack["reference_price"].get("source")
             requested_sl = parsed.get("stop_loss") if isinstance(parsed, dict) else None
             requested_tp = parsed.get("take_profit") if isinstance(parsed, dict) else None
             proposal.details.update(
                 {
                     "source": "ai1",
+                    "opportunity_id": pack.get("opportunity_id"),
+                    "event_id": pack.get("strategy_evidence", {}).get(proposal.action, {}).get("evidence", {}).get("event_id"),
+                    "reference_price": copy.deepcopy(pack.get("reference_price")),
                     "decision_id": decision_id,
                     "local_action_before_ai": local_result.action,
                     "local_confidence": local_result.confidence,

@@ -221,12 +221,18 @@ class ResearchIntegrationTests(unittest.TestCase):
         demo=SimpleNamespace(trade_mode=base.mt5.ACCOUNT_TRADE_MODE_DEMO)
         with patch.object(trader,"get_context",return_value=self.frames[:3]), \
              patch.object(trader,"evaluate_context",return_value=local), \
-             patch.object(base.mt5,"account_info",return_value=demo),patch.object(trader,"get_live_quote") as quote:
+             patch.object(base.mt5,"account_info",return_value=demo),patch.object(trader,"get_live_quote",return_value={}) as quote:
             blocked=copy.deepcopy(local)
             for item in blocked.details["strategy_assessments"].values():
                 item["blockers"]=["used event"]
+            for item in blocked.details["opportunities"]:
+                item["structural_blockers"]=["used event"]
             with patch.object(trader,"evaluate_context",return_value=blocked):
-                with self.assertRaises(ai.MarketSnapshotError):trader.collect_entry_snapshot("d")
+                snapshot=trader.collect_entry_snapshot("d")
+                self.assertEqual(snapshot[4]["opportunities"],[])
+                self.assertTrue(snapshot[4]["opportunity_blockers"])
+            quote.assert_called_once()
+            quote.reset_mock()
             with patch.object(base.mt5,"account_info",return_value=None):
                 with self.assertRaises(ai.MarketSnapshotError):trader.collect_entry_snapshot("d")
             quote.assert_not_called()
