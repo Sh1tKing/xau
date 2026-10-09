@@ -197,6 +197,7 @@ class Backtest:
         self.trades = []
         self.rejects = Counter()
         self.candidate_rejects = Counter()
+        self.rejected_fills = []
         self.stats = Counter()
         self.position = None
         self.pending = None
@@ -338,6 +339,9 @@ class Backtest:
         if freshness_error:
             self.stats["研究策略信号过期丢弃"] += 1
             self.rejects[freshness_error] += 1
+            self.rejected_fills.append(dict(signal_server_ts=signal_ts, fill_server_ts=self.t[i],
+                scheduled_fill_server_ts=signal_ts+self.entry_delay_seconds,
+                reason=freshness_error, event_id=details.get('strategy_event_id')))
             return
         event_id = details.get("strategy_event_id")
         if contract.get("one_entry_per_event"):
@@ -354,6 +358,9 @@ class Backtest:
         if execution_error:
             self.stats["研究策略成交保护拒绝"] += 1
             self.rejects[execution_error] += 1
+            self.rejected_fills.append(dict(signal_server_ts=signal_ts,fill_server_ts=self.t[i],
+                scheduled_fill_server_ts=signal_ts+self.entry_delay_seconds,
+                reason=execution_error,event_id=event_id))
             return
         sl, tp = float(result.stop_loss), float(result.take_profit)
         if base.reward_risk_ratio(side, entry, sl, tp) < base.MIN_REWARD_RISK:
@@ -756,7 +763,7 @@ def main():
     report += "\n\n策略框架: %s\n定义指纹: %s" % (meta["strategy_framework"], meta["strategy_fingerprint"])
     metrics = replay_metrics(trades, test.market_days, args.balance, args.split_date)
     metrics.update(metadata=meta, funnel=dict(test.stats), rejection_counts=dict(test.rejects),
-                   candidate_blocker_counts=dict(test.candidate_rejects))
+                   candidate_blocker_counts=dict(test.candidate_rejects), rejected_fills=test.rejected_fills)
     report += "\n\n离线启用策略: " + ','.join(meta['selected_strategies'])
     report += "\n冻结方案延迟: %ds，统一点差倍数: %g" % (args.entry_delay_seconds, args.spread_multiplier)
     report += "\n市场日 %d，零成交日 %d，去最佳日净盈亏 %.2f" % (metrics['market_days'], metrics['zero_trade_days'], metrics['best_day_removed_net'])
