@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta, timezone
 import math
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from strategies.events import make_entry_event
 
 
 DEFAULT_PARAMETERS = {
@@ -236,6 +237,16 @@ def session_retest_facts(df_m5, decision_utc: datetime,
             if not row["close_utc"] <= now < row["close_utc"] + BAR_SECONDS:
                 return blocked("first_retest_expired")
             result["closed_trigger"] = {"confirmed": True, "timeframe": "M5", "bar_time": row["time"]}
+            result["action"] = side
+            sources = opening + [breakout, row]
+            result["entry_event"] = make_entry_event(
+                event_id=result["event_id"], region_id=result["event_id"],
+                episode_start_bar_time=opening[0]["time"], action=side,
+                trigger_timeframe="M5", trigger_bar_time=row["time"],
+                trigger_close_utc=row["close_utc"],
+                valid_until_utc=min(row["close_utc"] + BAR_SECONDS, end_ts),
+                source_refs=[{"timeframe": "M5", "bar_time": r["time"]}
+                             for r in sources]).to_dict()
             return result
     last_close = candidates[-1]["close_utc"] if candidates else breakout["close_utc"]
     if len(following) >= p["max_retest_bars"] or now >= breakout["close_utc"] + p["max_retest_seconds"] or last_close - breakout["close_utc"] >= p["max_retest_seconds"]:
