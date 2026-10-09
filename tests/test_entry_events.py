@@ -71,7 +71,7 @@ class EntryEventTests(unittest.TestCase):
         e = deepcopy(self.evidence)
         e["entry_event"]["source_refs"][0]["bar_time"] -= 30000
         self.assertTrue(self.check(e))
-        for frame in (self.frame.drop(index=4), self.frame.iloc[list(range(len(self.frame))) + [-1]], add_bar(self.frame)):
+        for frame in (self.frame.drop(index=15), self.frame.iloc[list(range(len(self.frame))) + [-1]], add_bar(self.frame)):
             self.assertTrue(self.check(frame=frame))
         e = deepcopy(self.evidence)
         e["entry_event"]["source_refs"].pop()
@@ -116,6 +116,58 @@ class EntryEventTests(unittest.TestCase):
     def test_unconfirmed_session_does_not_create_event(self):
         e = facts(self.frame.iloc[:-1], self.now-timedelta(minutes=5))
         self.assertNotIn("entry_event", e)
+
+    def test_retest_metadata_checked_with_and_without_new_event(self):
+        for has_event in (False, True):
+            for keys in (("time",), ("close_utc",), ("time", "close_utc")):
+                e = deepcopy(self.evidence)
+                if not has_event:
+                    del e["entry_event"]
+                for key in keys:
+                    e["retest_bar"][key] -= 300
+                self.assertEqual(self.check(e, legacy=True), "legacy retest mismatch")
+            e = deepcopy(self.evidence)
+            if not has_event:
+                del e["entry_event"]
+            self.assertEqual(self.check(e, legacy=True), "")
+            del e["retest_bar"]
+            self.assertEqual(self.check(e, legacy=True), "")
+
+    def test_background_gaps_allowed_event_span_gaps_rejected(self):
+        frame = self.frame.copy()
+        frame.loc[0, "time"] -= 300
+        e = facts(frame, self.now)
+        self.assertEqual(e["blockers"], [])
+        self.assertEqual(self.check(e, frame=frame), "")
+        self.assertEqual(self.check(e, frame=frame, legacy=True), "")
+        # A Monday context retaining a Friday M15 bar has a market-closure
+        # gap. It is background, with no M15 event provenance declarations.
+        import pandas as pd
+        from datetime import datetime, timezone
+        monday = datetime(2026, 7, 20, 7, 40, tzinfo=timezone.utc)
+        friday = int(datetime(2026, 7, 17, 20, 45, tzinfo=timezone.utc).timestamp()) + 10800
+        monday_raw = int(datetime(2026, 7, 20, 7, 15, tzinfo=timezone.utc).timestamp()) + 10800
+        m15 = pd.DataFrame({"time": [friday, monday_raw], "close": [100., 100.]})
+        monday_frame, monday_now = fixture(day="2026-07-20")
+        monday_e = facts(monday_frame, monday_now)
+        self.assertEqual(monday_now, monday)
+        self.assertEqual(validate_entry_event(monday_e, monday_now, 3, monday_frame, m15, legacy_session=True), "")
+        for bad in (frame.drop(index=14), frame.drop(index=20)):
+            self.assertTrue(self.check(e, frame=bad, legacy=True))
+        # An uncited intermediate bar still belongs to the episode span.
+        from test_session_retest_facts import add_bar
+        longer = add_bar(self.frame, low=102., close=102.1, high=102.2)
+        e = deepcopy(self.evidence)
+        new_raw = int(longer.time.iloc[-1])
+        e["closed_trigger"]["bar_time"] = new_raw
+        event = e["entry_event"]
+        event.update(trigger_bar_time=new_raw, trigger_close_utc=self.now.timestamp()+300,
+                     valid_until_utc=self.now.timestamp()+600)
+        event["source_refs"][-1]["bar_time"] = new_raw
+        self.assertTrue(self.check(e, now=self.now+timedelta(minutes=5), frame=longer.drop(index=21)))
+        for bad in (frame.iloc[[1, 0]+list(range(2, len(frame)))],
+                    frame.iloc[[0, 0]+list(range(1, len(frame)))], add_bar(frame)):
+            self.assertTrue(self.check(evidence=self.evidence, frame=bad))
 
 
 if __name__ == "__main__":

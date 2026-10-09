@@ -1,7 +1,8 @@
 """Shared closed-bar event contract. No strategy fingerprint enters identity.
 
 Time/identity checks always run. Supplied frames additionally prove source
-membership, ordering, continuity and that every context bar has closed. Hosts
+membership, ordering, event-span continuity and closed context. Historical
+background gaps outside the declared episode/source span are permitted. Hosts
 must bind this source check at assessment and retain that original evidence.
 """
 from dataclasses import dataclass
@@ -144,9 +145,6 @@ def validate_entry_event(evidence, observed_utc, server_utc_offset=None,
             if tf != "M5" or not isinstance(evidence.get("event_id"), str) or not evidence["event_id"]:
                 raise ValueError("invalid legacy session identity")
             end = _window(evidence, now, close)
-            retest = evidence.get("retest_bar")
-            if retest is not None and (_number(retest["close_utc"]) != close or _raw(retest["time"], tf) != raw):
-                raise ValueError("legacy retest mismatch")
             expires = min(close + 300, end)
         else:
             _shape(event)
@@ -161,6 +159,13 @@ def validate_entry_event(evidence, observed_utc, server_utc_offset=None,
                 end = _window(evidence, now, close)
                 if expires > end:
                     raise ValueError("event exceeds original session window")
+        if legacy_session:
+            if tf != "M5":
+                raise ValueError("invalid legacy session timeframe")
+            retest = evidence.get("retest_bar")
+            if retest is not None and (_number(retest["close_utc"]) != close
+                                       or _raw(retest["time"], tf) != raw):
+                raise ValueError("legacy retest mismatch")
         if not close <= now < expires:
             raise ValueError("future or expired closed trigger")
         latest = math.floor((now + offset * 3600) / SECONDS[tf]) * SECONDS[tf] - SECONDS[tf]
@@ -176,8 +181,8 @@ def validate_entry_event(evidence, observed_utc, server_utc_offset=None,
                 if column in frame.columns:
                     for value in frame[column].tolist():
                         _number(value)
-            if any(b-a != SECONDS[frame_tf] for a, b in zip(times, times[1:])):
-                raise ValueError("duplicate, out of order or gapped source data")
+            if any(b <= a for a, b in zip(times, times[1:])):
+                raise ValueError("duplicate or out of order source data")
             if any(t + SECONDS[frame_tf] - offset*3600 > now for t in times):
                 raise ValueError("future or unclosed source context")
             if frame_tf == tf and times[-1] != raw:
@@ -186,6 +191,24 @@ def validate_entry_event(evidence, observed_utc, server_utc_offset=None,
                 for ref in event["source_refs"]:
                     if ref["timeframe"] == frame_tf and ref["bar_time"] not in times:
                         raise ValueError("source reference absent from input")
+            # Prove continuity for the declared provenance interval, including
+            # uncited intermediate bars that establish first-event sequencing.
+            anchors = ([ref["bar_time"] for ref in event["source_refs"]
+                        if ref["timeframe"] == frame_tf] if event else [])
+            if frame_tf == tf:
+                anchors.append(raw)
+                if event:
+                    anchors.append(event["episode_start_bar_time"])
+            if legacy_session and frame_tf == "M5":
+                original = next(w for w in evidence["windows"] if w.get("active") is True)
+                opening = _stamp(datetime.fromisoformat(original["opening_start_utc"])) + offset*3600
+                anchors.append(_raw(opening, "M5"))
+            if anchors:
+                first, last = min(anchors), max(anchors)
+                relevant = [t for t in times if first <= t <= last]
+                if (not relevant or relevant[0] != first or relevant[-1] != last
+                        or any(b-a != SECONDS[frame_tf] for a, b in zip(relevant, relevant[1:]))):
+                    raise ValueError("missing or gapped event source span")
         return ""
     except (ValueError, TypeError, KeyError, OverflowError, AttributeError) as exc:
         return str(exc) or "invalid entry event"
