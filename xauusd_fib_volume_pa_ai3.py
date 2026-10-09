@@ -528,7 +528,8 @@ def build_computed_entry_evidence(df_m15, df_h1, df_m5, local_result, fib, atr, 
         buffer = base.stop_buffer(atr)
         protected_stop = None
         if extreme is not None:
-            protected_stop = extreme + buffer if action == "sell" else extreme - buffer
+            boundary = extreme + buffer if action == "sell" else extreme - buffer
+            protected_stop = base.round_protective_stop(action, boundary)
         m5_pa = price_action["M5"][action]["score"]
         m5_pa_text = price_action["M5"][action]["description"]
         blocked, blocked_text = base.m5_blocks_entry(df_m5, action)
@@ -625,6 +626,8 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
             "chase_max_atr": base.CHASE_MAX_ATR,
             "min_rr": base.MIN_REWARD_RISK,
             "price_finalization": {"reference": "previous_closed_m15_close",
+                                   "stop_price_version": base.STOP_PRICE_VERSION,
+                                   "stop_rounding": "BUY floor / SELL ceiling to 0.01, then enforce max_stop_abs",
                                    "generation_min_risk": base.entry_risk_limits(atr)[0],
                                    "target_max_reference_r": 1.8,
                                    "execution_min_stop_clearance": 2 * base.stop_buffer(atr),
@@ -1573,7 +1576,7 @@ def clamp_proposal(action, entry, stop_loss, take_profit, atr):
             return 0.0, 0.0
         if risk <= 0 or risk < min_risk:
             stop_loss = entry - min_risk
-        stop_loss = round(float(stop_loss), 2)
+        stop_loss = base.round_protective_stop(action, stop_loss)
         risk = entry - stop_loss
         if risk <= 0 or risk > max_risk + 0.001:
             return 0.0, 0.0
@@ -1587,7 +1590,7 @@ def clamp_proposal(action, entry, stop_loss, take_profit, atr):
         return 0.0, 0.0
     if risk <= 0 or risk < min_risk:
         stop_loss = entry + min_risk
-    stop_loss = round(float(stop_loss), 2)
+    stop_loss = base.round_protective_stop(action, stop_loss)
     risk = stop_loss - entry
     if risk <= 0 or risk > max_risk + 0.001:
         return 0.0, 0.0
@@ -2649,6 +2652,7 @@ class ThreeAITrader(base.FibVolumePATrader):
             % ("entry-evidence-v5", AI_DECISION_SNAPSHOT_DIR)
         )
         base.logger.info("AI质量评分=%s，等级分值=%s，门槛=%s（非胜率）", QUALITY_VERSION, QUALITY_LEVEL_POINTS, AI_CONFIDENCE)
+        base.logger.info("止损价格=%s BUY向下/SELL向上量化，严格保留M5极值缓冲与止损上限", base.STOP_PRICE_VERSION)
         base.logger.info("AI行情刷新=%s 每次POST采集新行情，AI-2及下单前复核现价，旧提案不跨收盘K线执行",
                          MARKET_FRESHNESS_VERSION)
         base.logger.info("AI协议与JSON=%s 按主备URL分别适配；优先严格Schema，明确不支持才降级，格式错误不执行",

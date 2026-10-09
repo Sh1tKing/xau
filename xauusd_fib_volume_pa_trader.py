@@ -11,6 +11,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Dict, List, Optional, Set, Tuple
 from urllib import error, request
 
@@ -171,6 +172,7 @@ MIN_SL_MODIFY_ABS = env_float("FIB_PA_MIN_SL_MODIFY_ABS", 0.5)
 MIN_REWARD_RISK = env_float("FIB_PA_MIN_RR", 1.5)
 MAX_SL_ATR = env_float("FIB_PA_MAX_SL_ATR", 2.0)
 MAX_SL_ABS = env_float("FIB_PA_MAX_SL_ABS", 8.0)
+STOP_PRICE_VERSION = "protective-stop-v1"
 ENTRY_MIN_SL_ATR = env_float("FIB_PA_ENTRY_MIN_SL_ATR", 0.6)
 ENTRY_MIN_SL_ABS = env_float("FIB_PA_ENTRY_MIN_SL_ABS", 0.8)
 H4_HARD_FILTER = env_bool("FIB_PA_H4_HARD_FILTER", False)
@@ -1103,6 +1105,12 @@ def stop_buffer(atr: float) -> float:
     return min(max(0.6, 0.15 * max(float(atr), 0.01)), 1.0)
 
 
+def round_protective_stop(action: str, price: float) -> float:
+    """Keep the existing two-decimal precision on the safe side of a boundary."""
+    rounding = ROUND_FLOOR if action == "buy" else ROUND_CEILING
+    return float(Decimal(str(float(price))).quantize(Decimal("0.01"), rounding=rounding))
+
+
 def recent_m5_extreme(df_m5: pd.DataFrame, action: str) -> Optional[float]:
     if df_m5 is None or len(df_m5) < 3 or action not in ("buy", "sell"):
         return None
@@ -1165,13 +1173,22 @@ def reject_inside_m5_wick(action, entry, stop_loss, take_profit, atr, fib, df_m5
     if not m5_extreme_on_stop_side(action, entry, extreme):
         return stop_loss, take_profit, ""
     required = m5_extreme_risk(action, entry, extreme, atr)
-    if required <= 0 or required > MAX_SL_ABS + 0.001:
+    if required <= 0:
+        return 0.0, 0.0, "M5保护止损方向或距离无效，拒绝开仓"
+    if required > MAX_SL_ABS + 0.001:
         return 0.0, 0.0, m5_wick_reject_text()
     if stop_covers_m5_extreme(action, stop_loss, extreme, atr):
         return stop_loss, take_profit, ""
     new_sl, new_tp = calculate_targets(action, entry, atr, fib, extreme, extreme)
-    if new_sl <= 0 or not stop_covers_m5_extreme(action, new_sl, extreme, atr):
-        return 0.0, 0.0, m5_wick_reject_text()
+    if new_sl <= 0:
+        boundary = extreme + stop_buffer(atr) if action == "sell" else extreme - stop_buffer(atr)
+        safe_sl = round_protective_stop(action, boundary)
+        safe_risk = directional_stop_distance(action, entry, safe_sl)
+        if safe_risk > MAX_SL_ABS + 0.001:
+            return 0.0, 0.0, "M5保护止损按价格精度量化后距离 %.4f 超过上限 %.2f，拒绝开仓" % (safe_risk, MAX_SL_ABS)
+        return 0.0, 0.0, "M5保护止损无法按价格精度生成，拒绝开仓"
+    if not stop_covers_m5_extreme(action, new_sl, extreme, atr):
+        return 0.0, 0.0, "M5保护止损未覆盖最近3根极值及缓冲，拒绝开仓"
     return new_sl, new_tp, "止损改到最近3根M5极值之外"
 
 def calculate_targets(
@@ -1204,7 +1221,7 @@ def calculate_targets(
             return 0.0, 0.0
         if risk <= 0 or risk < min_risk:
             raw_sl = entry_price - min_risk
-        stop_loss = round(raw_sl, 2)
+        stop_loss = round_protective_stop(action, raw_sl)
         risk = entry_price - stop_loss
         if risk <= 0 or risk > max_risk + 0.001:
             return 0.0, 0.0
@@ -1234,7 +1251,7 @@ def calculate_targets(
         return 0.0, 0.0
     if risk <= 0 or risk < min_risk:
         raw_sl = entry_price + min_risk
-    stop_loss = round(raw_sl, 2)
+    stop_loss = round_protective_stop(action, raw_sl)
     risk = stop_loss - entry_price
     if risk <= 0 or risk > max_risk + 0.001:
         return 0.0, 0.0
@@ -2297,6 +2314,7 @@ class FibVolumePATrader:
             f"min_rr={MIN_REWARD_RISK}, align={'ON' if ALIGN_HARD_FILTER else 'OFF'}, "
             f"max_sl={MAX_SL_ABS}, chase={CHASE_MAX_ATR}ATR, trading={'ON' if ENABLE_TRADING else 'DRY-RUN'}"
         )
+        logger.info("止损价格=%s BUY向下/SELL向上量化，严格保留M5极值缓冲与止损上限", STOP_PRICE_VERSION)
 
         last_bar_time = 0
         last_m5_time = 0

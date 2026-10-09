@@ -101,8 +101,9 @@ class EntryGateV2Tests(unittest.TestCase):
         sl, tp = ai.clamp_proposal("buy", 4134.65, 4131.01, 4146.04, 6.717857142857221)
         facts = ai.plan_feasibility("buy", 4134.65, sl, tp, {"bid": 4134.81, "ask": 4135.14},
                                     6.717857142857221, 4127.652983931848)
-        self.assertEqual((sl, tp), (4130.62, 4141.90))
-        self.assertAlmostEqual(facts["live_rr"], 1.495575)
+        self.assertEqual((sl, tp), (4130.61, 4141.92))
+        self.assertAlmostEqual(facts["live_rr"], 1.496689)
+        self.assertFalse(facts["rr_passes"])
         self.assertFalse(facts["executable"])
 
     def test_new_schema_and_template_remove_duplicate_ownership_fields(self):
