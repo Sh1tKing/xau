@@ -2719,8 +2719,9 @@ class ThreeAITrader(base.FibVolumePATrader):
 
 
 def run_http_retry_self_test():
-    global AI_HTTP_RETRIES, AI_HTTP_RETRY_PAUSE, AI_READ_TIMEOUT_RETRIES, AI_USAGE_DIR
+    global AI_HTTP_RETRIES, AI_HTTP_RETRY_PAUSE, AI_READ_TIMEOUT_RETRIES, AI_USAGE_DIR, backup_chat_config
     old_post = requests.post
+    old_backup_config = backup_chat_config
     old_logger = base.logger
     old_retries = AI_HTTP_RETRIES
     old_pause = AI_HTTP_RETRY_PAUSE
@@ -2737,13 +2738,18 @@ def run_http_retry_self_test():
         encoding = "utf-8"
 
         def json(self):
-            return {"choices": [{"message": {"content": "{\"action\":\"no\"}"}}]}
+            return {"choices": [{"finish_reason": "stop", "message": {"content": "{\"action\":\"no\"}"}}]}
 
     try:
         # Mock failures must never look like live API failures in trading logs.
         self_test_logger = logging.Logger("xauusd_fib_volume_pa.http_retry_self_test")
         self_test_logger.addHandler(logging.NullHandler())
         base.logger = self_test_logger
+        # The synthetic Chat transport must not inherit configured Messages routes.
+        def self_test_backup(role, model, effort, url, api_key):
+            return {"model": model, "effort": effort, "url": str(url or "").strip(),
+                    "key": str(api_key or "").strip()}
+        backup_chat_config = self_test_backup
         state = {"n": 0}
 
         def flaky(url, headers=None, json=None, timeout=None, **kwargs):
@@ -2783,6 +2789,7 @@ def run_http_retry_self_test():
         assert stale == "" and state["n"] == 1, state["n"]
     finally:
         requests.post = old_post
+        backup_chat_config = old_backup_config
         base.logger = old_logger
         AI_HTTP_RETRIES = old_retries
         AI_HTTP_RETRY_PAUSE = old_pause

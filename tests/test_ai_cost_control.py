@@ -246,6 +246,50 @@ class CostControlTests(unittest.TestCase):
         with patch.object(ai.os, "makedirs", side_effect=OSError("disk full")), patch.object(ai.requests, "post", return_value=Response()):
             self.assertIn("action", self.call())
 
+    def self_test_state(self):
+        return (ai.requests.post,ai.backup_chat_config,ai.base.logger,ai.AI_HTTP_RETRIES,
+                ai.AI_HTTP_RETRY_PAUSE,ai.AI_READ_TIMEOUT_RETRIES,ai.AI_USAGE_DIR)
+
+    def test_retry_self_test_ignores_configured_messages_backups_and_restores_patches(self):
+        backups = {f"AI{number}_BACKUP_URL":"https://configured.example.test/v1/messages"
+                   for number in (1,2,3)}
+        backups.update({f"AI{number}_BACKUP_KEY":"configured-key" for number in (1,2,3)})
+        with patch.dict(ai.os.environ,backups), \
+             patch.object(ai.requests,"post",side_effect=AssertionError("real HTTP forbidden")) as post, \
+             patch.object(ai,"record_ai_usage") as usage,patch.object(ai.base.mt5,"initialize") as terminal:
+            before = self.self_test_state()
+            self.assertEqual(ai.backup_chat_config("AI-1","m","low","http://example.test","key")["url"],
+                             backups["AI1_BACKUP_URL"])
+            ai.run_http_retry_self_test()
+            self.assertEqual(self.self_test_state(),before)
+            self.assertEqual(ai.backup_chat_config("AI-1","m","low","http://example.test","key")["url"],
+                             backups["AI1_BACKUP_URL"])
+            post.assert_not_called()
+            terminal.assert_not_called()
+            events = [call.args[0] for call in usage.call_args_list]
+            self.assertEqual(len(events),9)
+            self.assertTrue(all(event["host"] == "example.test" and event["protocol"] == "chat" for event in events))
+            self.assertEqual([event["finish_reason"] for event in events if event["outcome"] == "success"],["stop"])
+
+    def test_retry_self_test_restores_all_patches_and_temp_directory_after_failure(self):
+        directories = []
+        def fail(*args,**kwargs):
+            directories.append(ai.AI_USAGE_DIR)
+            raise RuntimeError("injected self-test failure")
+        with patch.dict(ai.os.environ,{"AI1_BACKUP_URL":"https://configured.example.test/v1/messages"}), \
+             patch.object(ai.requests,"post",side_effect=AssertionError("real HTTP forbidden")) as post, \
+             patch.object(ai,"call_chat",side_effect=fail),patch.object(ai.base.mt5,"initialize") as terminal:
+            before = self.self_test_state()
+            environment = dict(ai.os.environ)
+            with self.assertRaisesRegex(RuntimeError,"injected self-test failure"):
+                ai.run_http_retry_self_test()
+            self.assertEqual(self.self_test_state(),before)
+            self.assertEqual(dict(ai.os.environ),environment)
+            post.assert_not_called()
+            terminal.assert_not_called()
+        self.assertEqual(len(directories),1)
+        self.assertFalse(Path(directories[0]).exists())
+
 
 class PromptCompactionTests(unittest.TestCase):
     def pack(self):
