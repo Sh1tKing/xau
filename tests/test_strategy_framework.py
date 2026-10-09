@@ -282,7 +282,8 @@ class FrameworkTests(unittest.TestCase):
         self.assertEqual([s.id for s in snapshot.active("asia")],["session_retest"])
         self.assertEqual([s.id for s in snapshot.active("overlap")],["session_retest"])
         for strategy in snapshot.strategies:
-            self.assertEqual(strategy.target_r,3.0 if strategy.id == "session_retest" else 1.8)
+            self.assertEqual(strategy.target_r, {"session_retest": 3.0, "region_retest": 2.5,
+                                               "region_rejection": 2.5}.get(strategy.id, 1.8))
             self.assertEqual(strategy.enabled,strategy.id == "session_retest")
         shutil.copyfile(Path(__file__).resolve().parents[1]/'docs/strategies/strategy_template.py',self.directory/'template.py')
         self.assertFalse(self.registry.snapshot().error)

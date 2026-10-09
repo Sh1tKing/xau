@@ -171,7 +171,7 @@ class Registry:
             raise StrategyError(f"{s.id} sessions需指定合法时段及0–100优先级")
         if type(s.target_r) not in (int, float) or not math.isfinite(s.target_r) or not 1.5 <= s.target_r <= 6:
             raise StrategyError(f"{s.id} target_r必须在1.5–6之间")
-        if s.entry_reference not in ("closed_m15", "closed_m5") or s.stop_reference not in ("structure", "m5_extreme"):
+        if s.entry_reference not in ("closed_m15", "closed_m5") or s.stop_reference not in ("structure", "m5_extreme", "region"):
             raise StrategyError(f"{s.id} 入场/止损来源非法")
         if (type(s.max_hold_minutes) is not int or not 0 <= s.max_hold_minutes <= 2880
                 or type(s.cooldown_seconds) is not int or not 0 <= s.cooldown_seconds <= 86400
