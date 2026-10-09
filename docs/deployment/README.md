@@ -1,6 +1,6 @@
 # 三AI黄金策略服务器部署
 
-此部署包的代码提交以 `MANIFEST.json` 为准，证据版本 `entry-evidence-v5`，评分版本 `entry-quality-v2`，行情刷新版本 `request-freshness-v2`，JSON契约版本 `response-contract-v2`。
+此部署包的代码提交以 `MANIFEST.json` 为准，证据版本 `entry-evidence-v5`，评分版本 `entry-quality-v2`，行情刷新版本 `request-freshness-v2`，JSON契约版本 `response-contract-v3`。
 运行入口是 `xauusd_fib_volume_pa_ai3.py`，它会导入同目录的 `xauusd_fib_volume_pa_trader.py` 和完整 `strategies/` 包。
 
 若从GitHub源码部署：将这两个脚本、完整 `strategies/` 文件夹及 `docs/deployment` 下的 `requirements.txt`、`install.cmd`、`start.cmd` 放在同一目录，再将 `.env.example` 复制为 `.env` 并填写自己的账户及接口配置。公开仓库不包含私人 `server_deploy` 目录、实际 `.env`、日志或持仓状态。下述“部署包”指本机生成的私人目录。
@@ -28,7 +28,9 @@
 
 0.6ATR/0.8美元继续用于M15参考价下生成止损；实时成交检查改为止损触发侧BUY Bid/SELL Ask至少剩余 `2*stop_buffer(atr)`（现有参数下1.2–2美元），并考虑点差、止损8美元上限、RR1.5、EMA21追价及旧K线过期。价格向有利方向变化不再仅因低于生成宽度而拒绝，贴近止损仍拒绝。AI-2与实际下单使用同一检查。详见入场可靠性v2设计；本次不修改实际配置和本地策略。
 
-Claude原生接口按URL的 `/v1/messages` 路径选择Messages协议，GPT备用可继续使用 `/v1/chat/completions`，各路线独立适配。三角色优先Schema，接口明确不支持才降级；max_tokens、截断拒绝与5次总请求预算保持。新格式减少冗余声明，仍不能保证中转或模型永不返回无效引用。
+2026-10-09按用户要求，私人部署包的AI-1/2/3主路与已填写的备用均统一为Messages：中转站使用 `https://hapiopen.cc/v1/messages`，DeepSeek官网使用 `https://api.deepseek.com/anthropic/v1/messages`。空白备用项仍继承主路，不新增通道。模型、密钥、档位、超时和交易门槛保留各自配置；同步服务器时必须带上更新的 `.env`，旧进程需自行重启。
+
+Messages统一使用顶层system、user消息、`anthropic-version`、`x-api-key`（保留中转站要求的Bearer认证）、`max_tokens`及`output_config.effort`。DeepSeek官方只支持effort、不支持format，因此首发直接使用提示词JSON并记录 `json_mode_sent=prompt`，Python仍严格校验JSON和策略契约；其它路线继续优先Schema，明确不支持才降级。历史Chat兼容分支保留，但本包配置没有主备路线走Chat。截断拒绝、5次总预算和每次POST刷新行情保持。详见 [Messages迁移记录](../superpowers/specs/2026-10-09-messages-route-migration.md)。
 
 退出脚本使用控制台 `Ctrl+C`。此包是前台运行方式，没有注册Windows服务或开机任务。关闭控制台、注销Windows用户或服务器重启会中断运行，需自行重新启动。
 
@@ -73,7 +75,7 @@ FIB_PA_AI3_MAX_TOKENS=2048
 
 `READ_TIMEOUT_RETRIES`为每通道读超时后的额外补发次数，0代表不重复同一慢请求；仍受HTTP总预算限制。减少重复请求意味着主线路较慢且没有备用时，本轮会较早结束，不再靠第2至5次同线路补发等回复。备用项留空仍没有新服务可用。
 
-Chat Completions使用 `reasoning_effort`。GPT/o系列用 `max_completion_tokens`，其余兼容模型先用 `max_tokens`；接口明确拒绝该上限字段时最多改用另一字段，始终保留上限。拒绝推理参数时可去掉该参数恢复，并在进程内记住兼容结果。不同中转如何映射思考参数及计费需要看实际usage，不能仅凭HTTP200认定推理档位生效。
+当前Messages路线无论模型是Claude、GPT、Grok还是DeepSeek，都发送 `max_tokens` 和 `output_config.effort`，不因GPT模型名改用Chat字段。接口拒绝必填上限时切独立备用或结束，不取消上限。可选effort或Schema明确不兼容时仍可按原预算恢复，并在进程内记住结果。历史Chat兼容分支仍保留自己的字段转换。中转如何映射思考参数及计费需要看实际usage，不能仅凭HTTP200认定档位生效。
 
 回复结束原因是 `length`/`max_tokens` 时视为截断，即使可解析JSON也不执行、不另换模型重审。日志会提示调整对应角色上限；上限在部分模型上包含思考token，因此不要仅按可见JSON长度继续压低。
 

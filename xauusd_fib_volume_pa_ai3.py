@@ -52,7 +52,7 @@ AI_CONFIDENCE = env_int("FIB_PA_AI_CONFIDENCE", 75)
 AI1_MODEL = os.getenv("FIB_PA_AI1_MODEL", os.getenv("GPTSTORE_MODEL", "gpt-5.5"))
 AI2_MODEL = os.getenv("FIB_PA_AI2_MODEL", AI1_MODEL)
 AI3_MODEL = os.getenv("FIB_PA_AI3_MODEL", AI1_MODEL)
-DEFAULT_AI_URL = os.getenv("GPTSTORE_BASE_URL", "https://pool.gptstore.club/v1/chat/completions").strip()
+DEFAULT_AI_URL = os.getenv("GPTSTORE_BASE_URL", "https://hapiopen.cc/v1/messages").strip() or "https://hapiopen.cc/v1/messages"
 AI1_URL = os.getenv("AI1_URL", DEFAULT_AI_URL).strip() or DEFAULT_AI_URL
 AI2_URL = os.getenv("AI2_URL", DEFAULT_AI_URL).strip() or DEFAULT_AI_URL
 AI3_URL = os.getenv("AI3_URL", DEFAULT_AI_URL).strip() or DEFAULT_AI_URL
@@ -87,7 +87,7 @@ _CHAT_OPTIONS_LOCK = threading.RLock()
 _CHAT_OPTIONS = {}
 COST_CONTROL_VERSION = "cost-latency-v2"
 MARKET_FRESHNESS_VERSION = "request-freshness-v2"
-RESPONSE_CONTRACT_VERSION = "response-contract-v2"
+RESPONSE_CONTRACT_VERSION = "response-contract-v3"
 QUALITY_LEVEL_POINTS = {"strong": 20, "adequate": 16, "weak": 8, "missing": 0}
 QUALITY_DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_evidence")
 QUALITY_CAUSES = {"volume", "shallow_retrace", "trigger_weakness", "opposing_structure", "stop_vulnerability", "target_uncertainty", "execution_drift", "missing_data", "hard_limit"}
@@ -1045,6 +1045,13 @@ def request_protocol(url):
     return "anthropic" if urlsplit(url).path.rstrip("/").endswith("/messages") else "chat"
 
 
+def messages_supports_schema(url):
+    """DeepSeek's official Messages route supports effort but ignores format."""
+    parsed = urlsplit(url)
+    return not (parsed.hostname == "api.deepseek.com"
+                and parsed.path.rstrip("/") == "/anthropic/v1/messages")
+
+
 def extract_chat_text(result):
     if not isinstance(result, dict):
         return ""
@@ -1239,6 +1246,8 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             options = dict(_CHAT_OPTIONS.get(option_key, {}))
         token_field = "max_tokens" if protocol == "anthropic" else options.get("token_field", default_token_field)
         json_mode = options.get("json_mode", "schema") if schema else "prompt"
+        if protocol == "anthropic" and not messages_supports_schema(active["url"]):
+            json_mode = "prompt"
         omit_reasoning = omit_reasoning or options.get("omit_reasoning", False)
         if low_retry:
             label += "/low_retry"
@@ -1281,6 +1290,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             if output_config:
                 data["output_config"] = output_config
             headers["anthropic-version"] = "2023-06-01"
+            headers["x-api-key"] = active["key"]
         else:
             if this_effort and not omit_reasoning:
                 data["reasoning_effort"] = this_effort
@@ -2588,7 +2598,7 @@ class ThreeAITrader(base.FibVolumePATrader):
         base.logger.info("止损价格=%s BUY向下/SELL向上量化，严格保留M5极值缓冲与止损上限", base.STOP_PRICE_VERSION)
         base.logger.info("AI行情刷新=%s 每次POST采集新行情，AI-2及下单前复核现价，旧提案不跨收盘K线执行",
                          MARKET_FRESHNESS_VERSION)
-        base.logger.info("AI协议与JSON=%s 按主备URL分别适配；优先严格Schema，明确不支持才降级，格式错误不执行",
+        base.logger.info("AI协议与JSON=%s 按主备URL分别适配；支持时优先Schema，DeepSeek官方Messages仅发送effort；格式错误不执行",
                          RESPONSE_CONTRACT_VERSION)
         base.logger.info("AI成本控制=%s token上限=%s 同通道读超时补发=%s 用量目录=%s",
                          COST_CONTROL_VERSION, AI_MAX_TOKENS, AI_READ_TIMEOUT_RETRIES, AI_USAGE_DIR)
@@ -2604,6 +2614,8 @@ class ThreeAITrader(base.FibVolumePATrader):
         ):
             backup = backup_chat_config(role, model, effort, url, key)
             primary = {"model": model, "effort": effort, "url": url, "key": key}
+            base.logger.info("%s 协议: 主路=%s 备用=%s；DeepSeek官方Messages使用提示词JSON及Python契约校验", role,
+                             request_protocol(url), request_protocol(backup["url"]))
             base.logger.info("%s 备用配置: %s host=%s model=%s effort=%s key=%s timeout=%ss 主路timeout=%ss", role,
                              "独立备用" if backup != primary else "沿用主配置",
                              urlsplit(backup["url"]).hostname, backup["model"], backup["effort"],

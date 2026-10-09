@@ -79,6 +79,85 @@ class ResponseContractTests(unittest.TestCase):
         self.assertNotIn("anthropic-version", second["headers"])
         self.assertEqual([e["protocol"] for e in self.events()], ["anthropic", "chat"])
 
+    def test_official_deepseek_messages_sends_auth_effort_and_no_ignored_schema(self):
+        with patch.object(ai.requests, "post", return_value=Response()) as post:
+            ai.call_chat("AI-2", "deepseek-v4-pro", "low", "Return a complete JSON object", "fresh market",
+                         40, "https://api.deepseek.com/anthropic/v1/messages", "SECRET")
+        request = post.call_args.kwargs
+        self.assertEqual(request["headers"]["x-api-key"], "SECRET")
+        self.assertEqual(request["json"]["output_config"], {"effort": "low"})
+        self.assertEqual(request["json"]["model"], "deepseek-v4-pro")
+        self.assertEqual(request["json"]["max_tokens"], ai.AI_MAX_TOKENS["AI-2"])
+        self.assertEqual(request["json"]["messages"][0]["role"], "user")
+        self.assertNotIn("response_format", request["json"])
+        self.assertEqual(self.events()[0]["json_mode_sent"], "prompt")
+        self.assertNotIn("SECRET", json.dumps(self.events()))
+
+    def test_deepseek_relay_messages_still_attempts_schema(self):
+        with patch.object(ai.requests, "post", return_value=Response()) as post:
+            ai.call_chat("AI-2", "deepseek-v4-pro", "low", "rules", "market", 40,
+                         "https://relay.test/v1/messages", "SECRET")
+        self.assertIn("format", post.call_args.kwargs["json"]["output_config"])
+        self.assertEqual(self.events()[0]["json_mode_sent"], "schema")
+
+    def test_schema_profile_matches_exact_official_endpoint(self):
+        self.assertFalse(ai.messages_supports_schema("https://API.DEEPSEEK.COM/anthropic/v1/messages/?a=b"))
+        for url in ("https://api.deepseek.com.fake.test/anthropic/v1/messages",
+                    "https://relay.test/anthropic/v1/messages", "https://api.deepseek.com/v1/messages"):
+            with self.subTest(url=url):
+                self.assertTrue(ai.messages_supports_schema(url))
+
+    def test_gpt_and_grok_messages_keep_native_max_tokens(self):
+        for model in ("gpt-6.1-sol", "grok-4.7"):
+            with self.subTest(model=model), patch.object(ai.requests, "post", return_value=Response()) as post:
+                ai.call_chat("AI-2", model, "low", "rules", "market", 60,
+                             "https://relay.test/v1/messages", "SECRET")
+                data = post.call_args.kwargs["json"]
+                self.assertIn("max_tokens", data)
+                self.assertNotIn("max_completion_tokens", data)
+                self.assertNotIn("reasoning_effort", data)
+                self.assertEqual(data["output_config"]["effort"], "low")
+
+    def test_messages_primary_to_official_backup_refreshes_and_shares_budget(self):
+        snapshots = iter(("quote1", "quote2"))
+        with patch.dict(ai.os.environ, {"AI2_BACKUP_URL": "https://api.deepseek.com/anthropic/v1/messages",
+                                       "AI2_BACKUP_KEY": "BACKUP", "FIB_PA_AI2_BACKUP_MODEL": "deepseek-v4-pro",
+                                       "FIB_PA_AI2_BACKUP_EFFORT": "low", "FIB_PA_AI2_BACKUP_TIMEOUT": "40"}), \
+             patch.object(ai, "AI_HTTP_RETRIES", 2), \
+             patch.object(ai.requests, "post", side_effect=[ai.requests.ReadTimeout("slow"), Response()]) as post:
+            ai.call_chat("AI-2", "grok-4.7", "low", "rules", "old market", 120,
+                         "https://relay.test/v1/messages", "SECRET",
+                         refresh_request=lambda: {"prompt": next(snapshots)})
+        first, second = [c.kwargs for c in post.call_args_list]
+        self.assertEqual((first["timeout"], second["timeout"]), (120, 40))
+        self.assertEqual(second["headers"]["x-api-key"], "BACKUP")
+        self.assertEqual([c["json"]["messages"][0]["content"] for c in (first, second)], ["quote1", "quote2"])
+        self.assertEqual(second["json"]["output_config"], {"effort": "low"})
+        self.assertEqual([e["protocol"] for e in self.events()], ["anthropic", "anthropic"])
+        self.assertEqual([e["request_budget"] for e in self.events()], [2, 2])
+
+    def test_official_messages_read_timeout_does_not_repeat(self):
+        with patch.object(ai, "AI_READ_TIMEOUT_RETRIES", 0), \
+             patch.object(ai.requests, "post", side_effect=ai.requests.ReadTimeout("slow")) as post:
+            with self.assertRaises(ai.AIRequestError):
+                self.call("AI-3", "https://api.deepseek.com/anthropic/v1/messages")
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(self.events()[0]["outcome"], "read_timeout")
+
+    def test_official_messages_invalid_json_is_not_repaired_or_regenerated(self):
+        raw = '{"action":"close"'
+        with patch.object(ai.requests, "post", return_value=Response(text=raw)) as post:
+            self.assertEqual(self.call("AI-3", "https://api.deepseek.com/anthropic/v1/messages"), raw)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(self.events()[0]["outcome"], "invalid_decision_json")
+
+    def test_example_gold_routes_are_all_messages(self):
+        path = Path(__file__).resolve().parents[1] / ".env.example"
+        env = dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
+                   if "=" in line and not line.lstrip().startswith("#"))
+        for key in ("GPTSTORE_BASE_URL", "AI1_URL", "AI2_URL", "AI3_URL"):
+            self.assertEqual(ai.request_protocol(env[key]), "anthropic", key)
+
     def test_chat_primary_can_switch_to_native_backup(self):
         with patch.dict(ai.os.environ, {"AI2_BACKUP_URL": "https://backup.test/v1/messages"}), \
              patch.object(ai.requests, "post", side_effect=[ai.requests.ReadTimeout("slow"), Response()]) as post:

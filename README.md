@@ -12,6 +12,8 @@ H1判断方向，M15提供斐波那契、量能与价格行为，M5确认进场�
 
 将 `.env.example` 复制为本机 `.env` 并填写自己的配置；示例值不代表当前服务器配置。密钥、账户、日志与持仓状态不在公开仓库中。框架代码或配置修改需要自行重启；加载新框架后，策略定义保存将在下一次评估/请求刷新时自动检查。
 
+三AI主备配置统一使用Messages：中转站 `/v1/messages`，DeepSeek官网 `/anthropic/v1/messages`。DeepSeek官方只发送effort、使用提示词JSON与Python严格校验；其它Messages路线优先Schema。模型、档位和超时按实际 `.env`，切换协议不保证消除超时。参见 [协议迁移记录](docs/superpowers/specs/2026-10-09-messages-route-migration.md)。
+
 离线验证（不连接MT5，不请求模型）：
 
 ```powershell

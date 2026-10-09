@@ -210,6 +210,8 @@ class FreshnessTests(unittest.TestCase):
         ticks = iter(SimpleNamespace(bid=p, ask=p + .1, time=t) for p, t in ((100., 1100), (101., 1200), (102., 1300)))
         positions = iter(([self.guardian_position(p)] for p in (0, 1, 2, 2)))
         with patch.dict(ai.os.environ, {"AI3_BACKUP_URL": "https://backup.example.test/chat"}), \
+             patch.object(ai, "AI3_URL", "https://primary.example.test/v1/messages"), \
+             patch.object(ai, "AI3_KEY", "test-key"), \
              patch.object(self.trader, "get_positions", side_effect=lambda: next(positions)), \
              patch.object(self.trader, "get_rates", return_value=frame()), \
              patch.object(ai.base.mt5, "symbol_info_tick", side_effect=lambda _: next(ticks)), \
@@ -218,7 +220,7 @@ class FreshnessTests(unittest.TestCase):
              patch.object(ai.requests, "post", side_effect=[ai.requests.ReadTimeout("slow"), Response()]) as post:
             self.trader.ai3_task(1, 1)
         self.assertEqual(post.call_count, 2)
-        payloads = [json.loads(c.kwargs["json"]["messages"][1]["content"].split("\n", 1)[1])
+        payloads = [json.loads(c.kwargs["json"]["messages"][-1]["content"].split("\n", 1)[1])
                     for c in post.call_args_list]
         self.assertEqual([p["bid"] for p in payloads], [101., 102.])
         self.assertEqual([p["positions"][0]["profit"] for p in payloads], [1., 2.])
