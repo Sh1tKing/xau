@@ -1,5 +1,7 @@
 """Offline frozen-plan latency and cost behavior; no broker calls."""
 import copy
+import contextlib
+import io
 import unittest
 from unittest.mock import patch
 import test_session_retest_backtest as old
@@ -99,7 +101,7 @@ class IntradayReplayTests(unittest.TestCase):
         data['M1'].loc[1,'open']=102.
         test=replay.Backtest(data,self.meta,55,entry_delay_seconds=60)
         result=self.generic();test.pending=(copy.deepcopy(result),self.ts)
-        with patch.object(test,'evaluate',side_effect=AssertionError('must not rebuild frozen pending')):
+        with patch.object(test,'evaluate',side_effect=AssertionError('must not rebuild frozen pending')), contextlib.redirect_stdout(io.StringIO()):
             trades=test.run()
         self.assertEqual(len(trades),1)
         self.assertEqual(trades[0]['fill_server_ts'],self.ts+60)
