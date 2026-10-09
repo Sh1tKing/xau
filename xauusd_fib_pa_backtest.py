@@ -16,6 +16,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from datetime import datetime
+from types import SimpleNamespace
 
 import xauusd_fib_volume_pa_trader as base
 
@@ -175,6 +176,21 @@ class Backtest:
         self._m5_end = None
         self._m5 = None
         self._atr = 0.0
+        self.consumed_events = set()
+        self.cooldown_until_utc = 0.0
+
+    def utc_timestamp(self, server_ts):
+        return float(server_ts) - self.offset * 3600
+
+    def entry_gate(self, event_id, decision_utc):
+        """Replay-only reservations; the builder's clock already represents UTC."""
+        if not isinstance(event_id, str) or not event_id.strip():
+            return "策略事件标识缺失"
+        if event_id in self.consumed_events:
+            return "策略事件已经尝试，不能重复入场"
+        if float(decision_utc) < self.cooldown_until_utc:
+            return "策略平仓后10分钟冷却中"
+        return ""
 
     def guardian_context(self, ts):
         window = self.windows["M5"]
@@ -188,7 +204,7 @@ class Backtest:
     def evaluate(self, ts):
         df_m15 = self.windows["M15"].upto(ts, 160)
         df_h1 = self.windows["H1"].upto(ts, 120)
-        df_m5 = self.windows["M5"].upto(ts, 40)
+        df_m5 = self.windows["M5"].upto(ts, 80)
         if len(df_m15) < 80 or len(df_h1) < 60 or len(df_m5) < 10:
             self.stats["数据不足跳过"] += 1
             return None
@@ -196,7 +212,8 @@ class Backtest:
         try:
             result = base.build_fib_volume_pa_decision(
                 df_m15, df_h1, df_m5, self.threshold, now=beijing(ts, self.offset),
-                strategy_snapshot=self.strategy_snapshot
+                strategy_snapshot=self.strategy_snapshot, server_utc_offset=self.offset,
+                entry_gate=self.entry_gate,
             )
         except Exception as exc:
             self.stats["评估异常"] += 1
@@ -208,10 +225,68 @@ class Backtest:
         self.rejects[reject_key(result.reasoning)] += 1
         return None
 
+    def research_signal_error(self, result, i, signal_ts):
+        """Keep the frozen confirmation valid at the sole, zero-delay replay fill."""
+        details = result.details or {}
+        if not details.get("strategy_contract", {}).get("demo_only"):
+            return ""
+        fill_ts = self.t[i]
+        if fill_ts != signal_ts:
+            return "研究策略确认后的对应M1开盘缺失，不延迟成交"
+        try:
+            evidence = details["strategy_assessments"][result.action]["evidence"]
+            trigger = evidence["closed_trigger"]
+            stamp = trigger["bar_time"]
+            latest_m5 = self.windows["M5"].upto(fill_ts, 1)
+            if (trigger["confirmed"] is not True or trigger["timeframe"] != "M5"
+                    or type(stamp) is not int or latest_m5.empty
+                    or int(latest_m5["time"].iloc[-1]) != stamp
+                    or details["reference_bar_time"] != stamp
+                    or not stamp + 300 <= fill_ts < stamp + 600):
+                return "研究策略原M5确认已过期或不再是最新闭合K线"
+            own_window = [window for window in evidence["windows"]
+                          if window["zone"] == evidence["zone"]
+                          and window["local_date"] == evidence["local_date"]]
+            if len(own_window) != 1 or own_window[0]["active"] is not True:
+                return "研究策略原事件窗口不再有效"
+            start = datetime.fromisoformat(own_window[0]["entry_start_utc"])
+            end = datetime.fromisoformat(own_window[0]["entry_end_utc"])
+            if (start.utcoffset() is None or end.utcoffset() is None
+                    or not start.timestamp() <= self.utc_timestamp(fill_ts) < end.timestamp()):
+                return "研究策略原事件时段已过期"
+            if evidence["event_id"] != details["strategy_event_id"]:
+                return "研究策略原事件标识不一致"
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+            return "研究策略原确认或时段证据缺失"
+        return ""
+
     def open_position(self, result, i, signal_ts):
         side = result.action
         bid = self.o[i]
         entry = bid + self.spreads[i] if side == "buy" else bid
+        details = result.details or {}
+        contract = details.get("strategy_contract", {})
+        freshness_error = self.research_signal_error(result, i, signal_ts)
+        if freshness_error:
+            self.stats["研究策略信号过期丢弃"] += 1
+            self.rejects[freshness_error] += 1
+            return
+        event_id = details.get("strategy_event_id")
+        if contract.get("one_entry_per_event"):
+            event_id = event_id or details.get("strategy_assessments", {}).get(side, {}).get("evidence", {}).get("event_id")
+            event_error = self.entry_gate(event_id, self.utc_timestamp(self.t[i]))
+            if event_error:
+                self.stats["事件或冷却阻止成交"] += 1
+                self.rejects[event_error] += 1
+                return
+            # A rejected executable quote still consumes this window's sole attempt.
+            self.consumed_events.add(event_id)
+        execution_error = base.research_execution_error(
+            result, SimpleNamespace(bid=bid, ask=bid + self.spreads[i]))
+        if execution_error:
+            self.stats["研究策略成交保护拒绝"] += 1
+            self.rejects[execution_error] += 1
+            return
         sl, tp = float(result.stop_loss), float(result.take_profit)
         if base.reward_risk_ratio(side, entry, sl, tp) < base.MIN_REWARD_RISK:
             self.stats["成交价盈亏比不足放弃"] += 1
@@ -227,7 +302,6 @@ class Backtest:
             highest_price=entry,
             lowest_price=entry,
         )
-        details = result.details or {}
         self.position = {
             "side": side,
             "state": state,
@@ -238,7 +312,10 @@ class Backtest:
             "score": result.confidence,
             "session": details.get("session", ""),
             "setup": details.get("setup", ""),
-            "setup_name": details.get("strategy_contract", {}).get("name"),
+            "setup_name": contract.get("name"),
+            "event_id": event_id,
+            "max_hold_minutes": int(contract.get("max_hold_minutes", 0)),
+            "cooldown_seconds": int(contract.get("cooldown_seconds", 0)),
         }
         self.stats["成交"] += 1
 
@@ -262,9 +339,16 @@ class Backtest:
             "pnl": round(pnl, 2),
             "r": round(pnl / (state.risk * self.lot_value), 2),
             "hold_min": int((ts - pos["open_ts"]) / 60),
+            "event_id": pos.get("event_id") or "",
         })
+        self.cooldown_until_utc = max(
+            self.cooldown_until_utc, self.utc_timestamp(ts) + pos.get("cooldown_seconds", 0))
         self.position = None
         return True
+
+    def time_exit_due(self, i):
+        hold = self.position.get("max_hold_minutes", 0)
+        return hold > 0 and self.t[i] >= self.position["open_ts"] + hold * 60
 
     def check_exit(self, i):
         # Pessimistic intrabar order: a bar that reaches both the stop and the target counts as a stop.
@@ -279,6 +363,8 @@ class Backtest:
                 stop, reason = state.virtual_sl, "虚拟锁盈线"
             if self.o[i] <= stop:
                 return self.close(t, self.o[i], reason + "(跳空)")
+            if self.time_exit_due(i):
+                return self.close(t, self.o[i], "策略持仓时限")
             if self.l[i] <= stop:
                 return self.close(t, stop, reason)
             if pos["tp"] > 0 and self.h[i] >= pos["tp"]:
@@ -290,6 +376,8 @@ class Backtest:
             stop, reason = state.virtual_sl, "虚拟锁盈线"
         if self.o[i] + spread >= stop:
             return self.close(t, self.o[i] + spread, reason + "(跳空)")
+        if self.time_exit_due(i):
+            return self.close(t, self.o[i] + spread, "策略持仓时限")
         if self.h[i] + spread >= stop:
             return self.close(t, stop, reason)
         if pos["tp"] > 0 and self.l[i] + spread <= pos["tp"]:
@@ -361,7 +449,7 @@ class Backtest:
                 self.open_position(result, i, signal_ts)
             if self.position is not None:
                 reason = self.position.pop("exit_next", None)
-                if reason:
+                if reason and not self.time_exit_due(i):
                     bid = self.o[i]
                     price = bid if self.position["side"] == "buy" else bid + self.spreads[i]
                     self.close(self.t[i], price, reason)

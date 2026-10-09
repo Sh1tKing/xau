@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from datetime import datetime
 from urllib.parse import urlsplit
 
@@ -43,6 +44,11 @@ def env_float(name, default):
 
 def env_bool(name, default):
     return base.env_bool(name, default)
+
+
+def request_trace_id(prefix):
+    """Keep readable trace prefixes without relying on clock resolution for uniqueness."""
+    return "%s-%s-%s" % (prefix, time.time_ns(), uuid.uuid4().hex)
 
 
 AI_ENABLED = env_bool("FIB_PA_AI_ENABLED", True)
@@ -458,10 +464,14 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
     m15_trend = base.trend_from_ema(df_m15, 50)
     fib = base.entry_fib_structure(df_m15, h1_trend, atr)
     contract = copy.deepcopy((local_result.details or {}).get("strategy_contract", {}))
+    price, reference_source, reference_time = base.strategy_reference(df_m15, df_m5, contract)
+    if contract.get("stop_reference") == "m5_extreme":
+        fib = None
     parameters = contract.get("parameters", {})
     pack = {
         "symbol": base.SYMBOL,
-        "timeframe": "M15",
+        "timeframe": "M5" if contract.get("entry_reference") == "closed_m5" else "M15",
+        "risk_timeframe": "M15",
         "direction_timeframe": "H1",
         "price": round(price, 2),
         "decision_id": decision_id,
@@ -479,8 +489,8 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
         },
         "reference_price": {
             "price": round(price, 2),
-            "source": "previous_closed_m15_close",
-            "bar_time": reference_bar_time,
+            "source": reference_source,
+            "bar_time": reference_time,
         },
         "live_quote": quote or {"bid": None, "ask": None, "time": None},
         "atr": round(atr, 2),
@@ -508,7 +518,7 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
         "quality_rubric": quality_rubric(),
         "rules": {
             "h1_sets_direction": True,
-            "m15_opposite_is_pullback": True,
+            "m15_opposite_is_pullback": contract.get("regime_filter", "pullback") == "pullback",
             "h4_is_not_a_veto": True,
             "pullback_tight_range_is_no": contract.get("regime_filter", "pullback") == "pullback",
             "pullback_wide_range_only_at_edges": contract.get("regime_filter", "pullback") == "pullback",
@@ -516,7 +526,7 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
             "max_stop_abs": base.MAX_SL_ABS,
             "chase_max_atr": base.CHASE_MAX_ATR,
             "min_rr": base.MIN_REWARD_RISK,
-            "price_finalization": {"reference": "previous_closed_m15_close",
+            "price_finalization": {"reference": reference_source,
                                    "stop_price_version": base.STOP_PRICE_VERSION,
                                    "stop_rounding": "BUY floor / SELL ceiling to 0.01, then enforce max_stop_abs",
                                    "generation_min_risk": base.entry_risk_limits(atr)[0],
@@ -1211,7 +1221,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
     token_fallback_used = False
     read_failures = {"primary": 0, "backup": 0}
     context = request_context or {}
-    call_id = "%s-%s" % (role, time.time_ns())
+    call_id = request_trace_id(role)
     schema = response_json_schema(role)
 
     def task_alive():
@@ -1571,13 +1581,25 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
     except (TypeError, ValueError):
         stop_loss, take_profit = 0.0, 0.0
 
+    requested_take_profit = take_profit
     risk = (entry - stop_loss) if action == "buy" else (stop_loss - entry)
     if prices_are_valid(action, entry, stop_loss, take_profit) and 0 < risk <= base.MAX_SL_ABS:
         stop_loss, take_profit = clamp_proposal(action, entry, stop_loss, take_profit, atr, target_r)
     else:
         stop_loss, take_profit = 0.0, 0.0
 
-    entry_price_source = "previous_closed_m15_close"
+    entry_price_source = "confirmed_closed_m5_close" if (strategy_contract or {}).get("entry_reference") == "closed_m5" else "previous_closed_m15_close"
+    if (strategy_contract or {}).get("stop_reference") == "m5_extreme":
+        fib = None
+        extreme = base.recent_m5_extreme(df_m5, action)
+        if not base.m5_extreme_on_stop_side(action, entry, extreme):
+            return None, "Python拒绝: 研究策略缺少最近三根M5保护极值"
+        required_sl, _ = base.calculate_targets(action, entry, atr, None, extreme, extreme, target_r=target_r)
+        if required_sl <= 0:
+            return None, "Python拒绝: 研究策略结构止损无法放入8美元"
+        if stop_loss <= 0 or (action == "buy" and stop_loss > required_sl) or (action == "sell" and stop_loss < required_sl):
+            stop_loss = required_sl
+        stop_loss, take_profit = clamp_proposal(action, entry, stop_loss, requested_take_profit, atr, target_r)
     if not prices_are_valid(action, entry, stop_loss, take_profit):
         replaced = False
         if prices_are_valid(action, entry, local_stop, local_target):
@@ -1587,7 +1609,7 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
                 replaced = True
                 reasoning = (reasoning + "；AI止损放不下，改用本地结构止损").strip("；")
         if not replaced:
-            timed = base.m5_rejection_anchor(df_m5, action, atr) if df_m5 is not None else None
+            timed = base.m5_rejection_anchor(df_m5, action, atr) if df_m5 is not None and (strategy_contract or {}).get("stop_reference") != "m5_extreme" else None
             if timed is None:
                 return None, "Python拒绝: 结构止损超过小资金上限 %.2f" % base.MAX_SL_ABS
             entry, setup_price = timed
@@ -1876,12 +1898,20 @@ class ThreeAITrader(base.FibVolumePATrader):
 
     def collect_entry_snapshot(self, decision_id):
         df_m15, df_h1, df_m5 = self.get_context()
-        local_result = base.build_fib_volume_pa_decision(df_m15, df_h1, df_m5, base.CONFIDENCE_THRESHOLD)
+        local_result = self.evaluate_context(df_m15, df_h1, df_m5)
         if (local_result.details or {}).get("strategy_error"):
             raise MarketSnapshotError(local_result.details["strategy_error"])
+        if (local_result.details or {}).get("strategy_contract", {}).get("demo_only"):
+            account = base.mt5.account_info()
+            if account is None or getattr(account, "trade_mode", None) != base.mt5.ACCOUNT_TRADE_MODE_DEMO:
+                raise MarketSnapshotError("研究策略仅允许模拟账户，不请求AI或下单")
+        assessments = (local_result.details or {}).get("strategy_assessments", {})
+        if ((local_result.details or {}).get("strategy_contract", {}).get("one_entry_per_event")
+                and assessments and all(item.get("blockers") for item in assessments.values())):
+            raise MarketSnapshotError("研究策略本轮无合法首次事件，不请求AI: " + local_result.reasoning)
         pack, fib, atr, price = build_feature_pack(
             df_m15, df_h1, df_m5, local_result, quote=self.get_live_quote(), decision_id=decision_id)
-        pack["snapshot_id"] = "%s-ai1-%s" % (decision_id, time.time_ns())
+        pack["snapshot_id"] = request_trace_id("%s-ai1" % decision_id)
         return df_m15, df_h1, df_m5, local_result, compact_market_pack(pack), fib, atr, price
 
     def ensure_strategy_current(self, pack):
@@ -1900,9 +1930,12 @@ class ThreeAITrader(base.FibVolumePATrader):
     def prepare_review_request(self, proposal, ai1_pack, parsed, reason, decision_id, trigger):
         self.ensure_strategy_current(ai1_pack)
         self.ensure_review_bars_current(ai1_pack["bar_closure"])
+        strategy_error = self.validate_strategy_entry(proposal)
+        if strategy_error:
+            raise MarketSnapshotError("AI-2请求前策略复核拒绝: " + strategy_error)
         market = copy.deepcopy(ai1_pack)
         market["live_quote"] = self.get_live_quote()
-        market["snapshot_id"] = "%s-ai2-%s" % (decision_id, time.time_ns())
+        market["snapshot_id"] = request_trace_id("%s-ai2" % decision_id)
         reference = float(proposal.details.get("reference_entry_price") or ai1_pack["reference_price"]["price"])
         entry = float(proposal.details.get("entry_price") or reference)
         atr = proposal.details.get("execution_guard", {}).get("atr", market["atr"])
@@ -1939,6 +1972,9 @@ class ThreeAITrader(base.FibVolumePATrader):
                 "snapshot_id": market["snapshot_id"], "quote": market["live_quote"]}
 
     def validate_execution_prices(self, result, tick):
+        research_error = base.research_execution_error(result, tick)
+        if research_error:
+            return research_error
         guard = (result.details or {}).get("execution_guard")
         if guard is None:
             return ""
@@ -2069,9 +2105,7 @@ class ThreeAITrader(base.FibVolumePATrader):
     def dispatch_m5_entry(self, bar_time):
         try:
             df_m15, df_h1, df_m5 = self.get_context()
-            local_result = base.build_fib_volume_pa_decision(
-                df_m15, df_h1, df_m5, base.CONFIDENCE_THRESHOLD
-            )
+            local_result = self.evaluate_context(df_m15, df_h1, df_m5)
         except Exception as exc:
             base.logger.error("M5时机评估异常: %s: %s" % (type(exc).__name__, exc))
             return
@@ -2257,6 +2291,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "strategy_fingerprint": pack.get("strategy_fingerprint"),
                     "strategy_contract": copy.deepcopy(pack.get("strategy_contract")),
                     "strategy_evidence": copy.deepcopy(pack.get("strategy_evidence")),
+                    "entry_guard_atr": atr,
+                    "entry_guard_ema21": pack.get("m15_ema21"),
                     "reference_price_source": pack["reference_price"].get("source"),
                     "reference_entry_price": entry_price,
                     "trigger_evidence": parsed.get("trigger_evidence") if isinstance(parsed, dict) else None,
@@ -2377,7 +2413,7 @@ class ThreeAITrader(base.FibVolumePATrader):
         quote = quote_from_tick(tick)
         payload = {
             "symbol": base.SYMBOL,
-            "snapshot_id": "ai3-%s" % time.time_ns(),
+            "snapshot_id": request_trace_id("ai3"),
             "live_quote": quote,
             "bid": float(tick.bid) if tick else 0,
             "ask": float(tick.ask) if tick else 0,
@@ -2591,8 +2627,9 @@ class ThreeAITrader(base.FibVolumePATrader):
             )
         )
         base.logger.info(
-            "AI证据契约=%s，决策快照目录=%s，参考入场=上一根已收盘M15"
-            % ("entry-evidence-v5", AI_DECISION_SNAPSHOT_DIR)
+            "AI证据契约=%s，决策快照目录=%s，参考入场按启用策略契约=%s"
+            % ("entry-evidence-v5", AI_DECISION_SNAPSHOT_DIR,
+               {s.id: s.entry_reference for s in strategies.strategies if s.enabled})
         )
         base.logger.info("AI质量评分=%s，等级分值=%s，门槛=%s（非胜率）", QUALITY_VERSION, QUALITY_LEVEL_POINTS, AI_CONFIDENCE)
         base.logger.info("止损价格=%s BUY向下/SELL向上量化，严格保留M5极值缓冲与止损上限", base.STOP_PRICE_VERSION)

@@ -1,3 +1,9 @@
+# 当前默认策略：欧美时段突破回踩（模拟账户）
+
+必须完整复制两个主脚本和 `strategies/`，安装最新requirements中的tzdata并由用户重启一次。默认只启用报告候选session_retest，旧三策略保留但关闭；框架版本strategy-framework-v2。伦敦/纽约当地08:00–08:30建箱，08:30–11:00首次突破回踩，自动处理夏令时；参考3R、SL≤8、最长180分钟，每窗口最多一次订单尝试，平仓后冷却10分钟。时间外无新确认就停止AI入场请求，已有仓继续护盘。
+
+账户不是MT5模拟类型或账户类型未知时，程序拒绝新研究入场。已有仓仍保留原版本入场上下文。迁移同一账户需要保留 `xau_fib_pa_logs/strategy_event_state.json` 和AI3持仓上下文；不要删除事件状态以追同一窗口。实际.env模型、档位、门槛、超时和Messages无需因本次策略接入更改。只启动一个实例。
+
 # 三AI黄金策略服务器部署
 
 此部署包的代码提交以 `MANIFEST.json` 为准，证据版本 `entry-evidence-v5`，评分版本 `entry-quality-v2`，行情刷新版本 `request-freshness-v2`，JSON契约版本 `response-contract-v3`。
@@ -88,7 +94,7 @@ FIB_PA_AI3_MAX_TOKENS=2048
 - 两个 `.py`：三AI与本地策略/交易/护盘模块。
 - `strategies/`：必需的框架、公共证据工具和策略定义，保留文件夹结构。更新策略只改 `definitions/*.py`；部署新框架第一次仍需自行重启。参见策略文件说明。
 - `.env`：当前实际配置，含密钥和账户信息，仅私下传输保存，不提交Git或公开上传。
-- `requirements.txt`：当前已安装的三个直接依赖版本。
+- `requirements.txt`：交易依赖及Windows IANA时区数据；本次DST回归使用tzdata 2023.3。
 - `install.cmd` / `start.cmd`：安装与启动入口。
 - `MANIFEST.json`：打包时间、源代码版本、脚本SHA256，便于检查是否复制完整。
 

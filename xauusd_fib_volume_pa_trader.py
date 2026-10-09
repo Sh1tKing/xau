@@ -11,6 +11,7 @@ import sys
 import time
 from types import SimpleNamespace
 from strategies.framework import Context, DEFAULT_REGISTRY, StrategyError, VERSION as STRATEGY_FRAMEWORK_VERSION
+from strategies.lifecycle import EventLedger
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -34,6 +35,60 @@ def strategy_api():
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.path.join(BASE_DIR, ".env")
 LOG_DIR = os.path.join(BASE_DIR, "xau_fib_pa_logs")
+
+
+def strategy_reference(df_m15, df_m5, contract):
+    use_m5 = (contract or {}).get("entry_reference") == "closed_m5"
+    frame = df_m5 if use_m5 else df_m15
+    if frame is None or frame.empty:
+        raise StrategyError("策略参考K线缺失")
+    return (float(frame["close"].iloc[-1]),
+            "confirmed_closed_m5_close" if use_m5 else "previous_closed_m15_close",
+            int(frame["time"].iloc[-1]) if "time" in frame else 0)
+
+
+def tick_clock_offset(tick, observed_at=None):
+    """Infer server pseudo-epoch offset from a fresh tick, never from missing bars."""
+    observed = time.time() if observed_at is None else observed_at
+    try:
+        delta = float(tick.time) - float(observed)
+        offset = round(delta / 1800) / 2
+        if not math.isfinite(delta) or not -12 <= offset <= 14 or abs(delta - offset * 3600) > 30:
+            return None
+        return offset
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def research_execution_error(result, tick):
+    """Shared executable-price guard for the demo research policy and replay."""
+    details = result.details or {}
+    if not details.get("strategy_contract", {}).get("demo_only"):
+        return ""
+    try:
+        bid, ask = float(tick.bid), float(tick.ask)
+        atr, ema = float(details["entry_guard_atr"]), float(details["entry_guard_ema21"])
+        sl, tp = float(result.stop_loss), float(result.take_profit)
+        if not all(math.isfinite(x) and x > 0 for x in (bid, ask, atr, ema, sl, tp)) or ask < bid:
+            return "研究策略执行行情或保护指标无效"
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        return "研究策略执行行情或保护指标缺失"
+    action = result.action
+    if action not in ("buy", "sell"):
+        return "研究策略方向无效"
+    entry = ask if action == "buy" else bid
+    trigger_price = bid if action == "buy" else ask
+    risk = directional_stop_distance(action, entry, sl)
+    clearance = directional_stop_distance(action, trigger_price, sl)
+    if risk <= 0 or risk > MAX_SL_ABS + .001:
+        return "研究策略实时止损距离超出上限"
+    if clearance < 2 * stop_buffer(atr):
+        return "研究策略实时止损触发侧余量不足"
+    if reward_risk_ratio(action, entry, sl, tp) < MIN_REWARD_RISK:
+        return "研究策略实时盈亏比不足"
+    if abs(entry - ema) > CHASE_MAX_ATR * atr:
+        return "研究策略实时EMA21偏离过大，不追价"
+    return ""
 
 
 def load_env_file(path=ENV_FILE):
@@ -1381,9 +1436,14 @@ def build_fib_volume_pa_decision(
     threshold=80,
     now: Optional[datetime] = None,
     strategy_snapshot=None,
+    server_utc_offset=None,
+    entry_gate=None,
 ) -> StrategyResult:
     snapshot = strategy_snapshot if strategy_snapshot is not None else STRATEGIES.snapshot()
     session = trading_session(now)
+    decision_clock = now or datetime.now(BEIJING_TZ)
+    if decision_clock.tzinfo is None:
+        decision_clock = decision_clock.replace(tzinfo=BEIJING_TZ)
     active = snapshot.active(session)
     if snapshot.error or not active:
         reason = snapshot.error or f"时段{session}没有启用策略"
@@ -1420,8 +1480,18 @@ def build_fib_volume_pa_decision(
         for side in ("buy", "sell"):
             best = None
             for strategy in active:
-                context = Context(side, df_m15, df_h1, df_m5, fib, atr, h1_trend, m15_trend, adx, session, strategy_api())
+                context = Context(side, df_m15, df_h1, df_m5, fib, atr, h1_trend, m15_trend, adx, session, strategy_api(),
+                                  decision_clock, server_utc_offset)
                 result = strategy.assess(context)
+                blockers = list(result.blockers)
+                event_id = result.evidence.get("event_id")
+                if strategy.one_entry_per_event and result.evidence.get("closed_trigger", {}).get("confirmed"):
+                    if not isinstance(event_id, str) or not event_id.strip():
+                        blockers.append("策略事件标识缺失")
+                    elif entry_gate is not None:
+                        event_error = entry_gate(event_id, decision_clock.timestamp())
+                        if event_error:
+                            blockers.append(event_error)
                 score, details, structure = result.score, dict(result.details), result.structure
                 # Keep generic fields available for custom strategies, without fabricating facts.
                 for key in ("fib", "volume", "price_action", "trend"):
@@ -1436,9 +1506,9 @@ def build_fib_volume_pa_decision(
                 details.update(momentum=momentum_text, regime=regime, regime_text=regime_text,
                                location=str(regime_meta.get("location", .5)), session=session, setup=strategy.id,
                                strategy_contract=strategy.manifest(), strategy_fingerprint=snapshot.fingerprint,
-                               strategy_blockers=list(result.blockers))
+                               strategy_blockers=blockers, strategy_event_id=event_id)
                 assessments.setdefault(strategy.id, {})[side] = {
-                    "score": score, "evidence": result.evidence, "blockers": list(result.blockers)}
+                    "score": score, "evidence": result.evidence, "blockers": blockers}
                 if best is None or score > best[0]:
                     best = (score, details, structure)
             picks[side] = best
@@ -1472,17 +1542,26 @@ def build_fib_volume_pa_decision(
         if blocked:
             blocks.append(m5_text)
         setup_price = float(df_m15["low"].tail(3).min() if action == "buy" else df_m15["high"].tail(3).max())
-        # Keep the closed M15 close as the planned entry. Pricing M5 rechecks off the latest
-        # M5 close was backtested on 2026-10-06: 175 trades, -70 USD vs 101 trades, -1.65 USD.
-        entry_price = price
+        # Legacy definitions retain their M15 reference; only an explicit research
+        # contract selects the confirming M5. Do not globally revert the old experiment.
+        entry_price, reference_source, reference_time = strategy_reference(df_m15, df_m5, details["strategy_contract"])
+        details["reference_price_source"] = reference_source
+        details["reference_bar_time"] = reference_time
+        details["entry_guard_atr"] = atr
+        details["entry_guard_ema21"] = float(ema_last(df_m15["close"], 21))
         extreme = recent_m5_extreme(df_m5, action)
+        if details["strategy_contract"].get("stop_reference") == "m5_extreme":
+            fib = None
+            setup_price = extreme
+            if not m5_extreme_on_stop_side(action, entry_price, extreme):
+                blocks.append("研究策略缺少参考价外侧的最近三根M5保护极值")
         protect = extreme if m5_extreme_on_stop_side(action, entry_price, extreme) else None
         stop_loss, take_profit = 0.0, 0.0
         if protect is not None and m5_extreme_risk(action, entry_price, protect, atr) > MAX_SL_ABS:
             blocks.append(m5_wick_reject_text())
         else:
             stop_loss, take_profit = calculate_targets(action, entry_price, atr, fib, setup_price, protect, target_r=target_r)
-            if stop_loss <= 0 and not blocked:
+            if stop_loss <= 0 and not blocked and details["strategy_contract"].get("stop_reference") != "m5_extreme":
                 timed = m5_rejection_anchor(df_m5, action, atr)
                 if timed is not None:
                     entry_price, setup_price = timed
@@ -1528,7 +1607,7 @@ def build_fib_volume_pa_decision(
         elif prices_ok:
             review_text = "未进入盈亏比审核"
         reasoning = label(details) + (
-            f"{action.upper()}三策略共振，score={score}。{regime_text}。"
+            f"{action.upper()}策略确认，score={score}。{regime_text}。"
             f"{details['fib']}；{details['volume']}；"
             f"{details['price_action']}；{details['trend']}；{details.get('momentum', '')}。"
         )
@@ -1560,6 +1639,8 @@ def build_fib_volume_pa_decision(
         f"{details.get('fib', '')}；{details.get('volume', '')}；"
         f"{details.get('price_action', '')}；{details.get('trend', '')}"
     )
+    if details.get("strategy_blockers"):
+        reasoning += "；策略条件未满足: " + "；".join(details["strategy_blockers"])
     return StrategyResult("no", best_score, False, reasoning, 0.0, 0.0, buy_score, sell_score, details)
 
 class FibVolumePATrader:
@@ -1571,6 +1652,92 @@ class FibVolumePATrader:
         # Confidence at entry, keyed by position ticket, so close messages can show it.
         self.entry_confidence: Dict[int, str] = {}
         self.last_order_ticket = 0
+        state_path = os.getenv("FIB_PA_STRATEGY_STATE_FILE", "").strip() or os.path.join(LOG_DIR, "strategy_event_state.json")
+        self.strategy_ledger = EventLedger(state_path)
+        self.positions_known = None
+
+    def evaluate_context(self, df_m15, df_h1, df_m5):
+        observed = time.time()
+        tick = mt5.symbol_info_tick(SYMBOL)
+        return build_fib_volume_pa_decision(
+            df_m15, df_h1, df_m5, CONFIDENCE_THRESHOLD,
+            now=datetime.fromtimestamp(observed, BEIJING_TZ), server_utc_offset=tick_clock_offset(tick, observed),
+            entry_gate=self.strategy_ledger.entry_error)
+
+    def validate_strategy_entry(self, result):
+        details = result.details or {}
+        contract = details.get("strategy_contract", {})
+        if contract.get("demo_only"):
+            account = mt5.account_info()
+            if account is None or getattr(account, "trade_mode", None) != mt5.ACCOUNT_TRADE_MODE_DEMO:
+                return "研究策略仅允许MT5模拟账户，账户类型未知或实盘时拒绝"
+        if contract.get("one_entry_per_event"):
+            assessments = details.get("strategy_evidence", details.get("strategy_assessments", {}))
+            evidence = assessments.get(result.action, {}).get("evidence", {})
+            event_id = details.get("strategy_event_id") or evidence.get("event_id")
+            if not evidence.get("closed_trigger", {}).get("confirmed") or not event_id:
+                return "策略缺少真实首次收盘事件，拒绝下单"
+            if event_id != evidence.get("event_id"):
+                return "策略事件与收盘证据不一致，拒绝下单"
+            try:
+                now = time.time()
+                closed = float(evidence["retest_bar"]["close_utc"])
+                window = next(w for w in evidence["windows"] if w["active"])
+                ends = datetime.fromisoformat(window["entry_end_utc"]).timestamp()
+                if not closed <= now < min(closed + 300, ends):
+                    return "策略首次确认或入场窗口已过期，拒绝下单"
+            except (KeyError, TypeError, ValueError, StopIteration):
+                return "策略确认时间或窗口证据缺失，拒绝下单"
+            if assessments.get(result.action, {}).get("blockers"):
+                return "策略硬条件已拒绝，不能提交订单"
+            return self.strategy_ledger.entry_error(event_id, time.time())
+        return ""
+
+    def record_strategy_close(self, ticket):
+        saved = self.strategy_ledger.snapshot().get("positions", {})
+        if str(int(ticket)) in saved:
+            self.strategy_ledger.closed_positions({int(t) for t in saved if int(t) != int(ticket)}, time.time())
+
+    def guard_strategy_lifecycle(self, positions):
+        now = time.time()
+        saved = self.strategy_ledger.snapshot()
+        recovered_due = set()
+        # Recover an acknowledged/uncertain research order after a crash between
+        # order_send and ticket binding, using persisted pre-order clock/contract.
+        for position in positions:
+            ticket = int(position.ticket)
+            if (int(getattr(position, "magic", 0) or 0) != MAGIC
+                    or getattr(position, "symbol", SYMBOL) != SYMBOL
+                    or str(ticket) in saved.get("positions", {})
+                    or "_SR_" not in str(getattr(position, "comment", ""))):
+                continue
+            candidates = []
+            for event_id, event in saved.get("events", {}).items():
+                meta = event.get("metadata", {})
+                offset = meta.get("server_utc_offset")
+                if offset is None or not meta.get("max_hold_minutes"):
+                    continue
+                opened = float(getattr(position, "time", 0)) - float(offset) * 3600
+                if abs(opened - event["reserved_at_utc"]) <= 120:
+                    candidates.append((abs(opened - event["reserved_at_utc"]), event_id, opened, meta))
+            if candidates:
+                _, event_id, opened, meta = min(candidates, key=lambda value: value[0])
+                self.strategy_ledger.record_position(ticket, event_id, opened, meta["max_hold_minutes"], meta["cooldown_seconds"])
+                if now >= opened + meta["max_hold_minutes"] * 60:
+                    recovered_due.add(ticket)
+        if self.positions_known is True:
+            # Allow an opening acknowledgement a short propagation interval.
+            active = {int(p.ticket) for p in positions}
+            active.update(int(t) for t, p in saved.get("positions", {}).items() if now < p["opened_at_utc"] + 30)
+            self.strategy_ledger.closed_positions(active, now)
+        due = set(self.strategy_ledger.due_tickets(now)) | recovered_due
+        remaining = []
+        for position in positions:
+            if (int(getattr(position, "magic", 0) or 0) == MAGIC and int(position.ticket) in due
+                    and self.close_position_by_ticket(position, "策略最长持有期限到达，Python强制退出")):
+                continue
+            remaining.append(position)
+        return remaining
 
     def entry_confidence_line(self, ticket: int) -> str:
         return f"开仓置信度: {self.entry_confidence.get(int(ticket), '未知(非本进程开仓或已重启)')}"
@@ -1630,7 +1797,7 @@ class FibVolumePATrader:
     def get_context(self):
         df_m15 = self.get_rates(mt5.TIMEFRAME_M15, 160, shift=1)
         df_h1 = self.get_rates(mt5.TIMEFRAME_H1, 120, shift=1)
-        df_m5 = self.get_rates(mt5.TIMEFRAME_M5, 40, shift=1)
+        df_m5 = self.get_rates(mt5.TIMEFRAME_M5, 80, shift=1)
         if len(df_m15) < 80 or len(df_h1) < 60 or len(df_m5) < 10:
             raise RuntimeError("K线数据不足，无法计算H1/M15策略")
         return df_m15, df_h1, df_m5
@@ -1643,6 +1810,7 @@ class FibVolumePATrader:
 
     def get_positions(self):
         positions = mt5.positions_get(symbol=SYMBOL)
+        self.positions_known = positions is not None
         return list(positions) if positions else []
 
     def create_position_snapshot(self, position) -> PositionSnapshot:
@@ -1886,6 +2054,7 @@ class FibVolumePATrader:
         result = mt5.order_send(request_body)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
             logger.warning(f"✅ 护盘单票平仓成功 ticket={ticket}, reason={reason}")
+            self.record_strategy_close(ticket)
             self.guardian_states.pop(ticket, None)
             self.notified_close_tickets.add(ticket)
             close_deal = None
@@ -1944,10 +2113,9 @@ class FibVolumePATrader:
         return state
 
     def run_guardian(self):
+        positions = self.guard_strategy_lifecycle(self.get_positions())
         if not GUARDIAN_ENABLED:
             return
-
-        positions = self.get_positions()
         active_tickets = {int(pos.ticket) for pos in positions}
         for ticket in list(self.guardian_states.keys()):
             if ticket not in active_tickets:
@@ -2055,12 +2223,17 @@ class FibVolumePATrader:
 
     def validate_execution_prices(self, result: StrategyResult, tick) -> str:
         """Optional execution checks for subclasses using independently reviewed plans."""
-        return ""
+        return research_execution_error(result, tick)
 
     def place_order(self, result: StrategyResult):
         action = result.action
         if action not in ("buy", "sell"):
             return False
+        strategy_error = self.validate_strategy_entry(result)
+        if strategy_error:
+            logger.info("策略执行拒绝: %s", strategy_error)
+            return False
+        contract = (result.details or {}).get("strategy_contract", {})
         fingerprint = (result.details or {}).get("strategy_fingerprint")
         if fingerprint:
             try:
@@ -2075,6 +2248,15 @@ class FibVolumePATrader:
         if positions_count >= MAX_POSITIONS:
             logger.info(f"✋ 已有 {positions_count} 个 {SYMBOL} 持仓，达到上限 {MAX_POSITIONS}，不再开仓")
             return False
+        if contract.get("one_entry_per_event"):
+            self.get_positions()
+            if self.positions_known is not True:
+                logger.info("持仓查询失败，研究策略停止新下单")
+                return False
+            all_positions = mt5.positions_get(symbol=SYMBOL)
+            if all_positions is None or len(all_positions) >= MAX_POSITIONS:
+                logger.info("研究策略持仓状态不明或全品种持仓已达到上限")
+                return False
 
         tick = mt5.symbol_info_tick(SYMBOL)
         if tick is None:
@@ -2089,6 +2271,8 @@ class FibVolumePATrader:
             order_type = mt5.ORDER_TYPE_SELL
             price = float(tick.bid)
             comment = f"{ORDER_TAG}_SELL"
+        if contract.get("one_entry_per_event"):
+            comment = f"{ORDER_TAG}_SR_{action.upper()}"
 
         if not self.validate_order_prices(action, price, result.stop_loss, result.take_profit):
             logger.error(
@@ -2159,6 +2343,20 @@ class FibVolumePATrader:
             except StrategyError as exc:
                 logger.warning("提交前策略已改变: %s", exc)
                 return False
+        event_id = None
+        if contract.get("one_entry_per_event"):
+            if self.validate_strategy_entry(result):
+                return False
+            assessments = result.details.get("strategy_evidence", result.details.get("strategy_assessments", {}))
+            event_id = result.details.get("strategy_event_id") or assessments.get(action, {}).get("evidence", {}).get("event_id")
+            observed = time.time()
+            offset = tick_clock_offset(tick, observed)
+            if offset is None or not self.strategy_ledger.reserve(event_id, observed, {
+                    "server_utc_offset": offset, "contract": contract,
+                    "max_hold_minutes": contract.get("max_hold_minutes", 0),
+                    "cooldown_seconds": contract.get("cooldown_seconds", 0)}):
+                logger.info("策略事件无法持久保留或行情时差不明，停止提交订单")
+                return False
         order_result = mt5.order_send(request_body)
         if order_result is None:
             logger.error("❌ 订单发送失败: 返回 None")
@@ -2197,6 +2395,10 @@ class FibVolumePATrader:
         # On netting/hedging MT5 the new position ticket equals the opening order ticket.
         order_ticket = int(getattr(order_result, "order", 0) or 0)
         self.last_order_ticket = order_ticket
+        if event_id and order_ticket > 0:
+            if not self.strategy_ledger.record_position(order_ticket, event_id, time.time(),
+                                                       contract["max_hold_minutes"], contract["cooldown_seconds"]):
+                logger.error("策略持仓期限绑定失败，保留预提交事件供护盘恢复: %s", self.strategy_ledger.error)
         if order_ticket > 0:
             self.entry_confidence[order_ticket] = (
                 f"{result.confidence} (BUY={result.score_buy} SELL={result.score_sell})"
@@ -2226,9 +2428,9 @@ class FibVolumePATrader:
 
     def evaluate_once(self):
         df_m15, df_h1, df_m5 = self.get_context()
-        result = build_fib_volume_pa_decision(df_m15, df_h1, df_m5, CONFIDENCE_THRESHOLD)
+        result = self.evaluate_context(df_m15, df_h1, df_m5)
         logger.info(
-            f"📊 三策略评分: action={result.action}, confidence={result.confidence}, "
+            f"📊 本地策略评分: action={result.action}, confidence={result.confidence}, "
             f"BUY={result.score_buy}, SELL={result.score_sell}, SL={result.stop_loss}, TP={result.take_profit}"
         )
         logger.info(f"🧠 策略理由: {result.reasoning}")
@@ -2241,7 +2443,7 @@ class FibVolumePATrader:
             return 1
 
         logger.info(
-            f"🚀 XAUUSD 三策略交易脚本启动: symbol={SYMBOL}, entry=M15, direction=H1, "
+            f"🚀 XAUUSD 策略交易脚本启动: symbol={SYMBOL}, entry=策略契约声明, direction=H1, "
             f"lot={LOT_SIZE}, max_positions={MAX_POSITIONS}, threshold={CONFIDENCE_THRESHOLD}, "
             f"min_rr={MIN_REWARD_RISK}, align={'ON' if ALIGN_HARD_FILTER else 'OFF'}, "
             f"max_sl={MAX_SL_ABS}, chase={CHASE_MAX_ATR}ATR, trading={'ON' if ENABLE_TRADING else 'DRY-RUN'}"
@@ -2317,6 +2519,16 @@ def make_test_df(prices: List[float], volumes: List[float]) -> pd.DataFrame:
 
 
 def run_self_test():
+    # Keep historical mathematical fixtures pinned to the legacy definitions.
+    # The default research strategy has timestamp/DST fixtures in tests/.
+    from dataclasses import replace
+    from strategies.framework import Snapshot
+    saved = STRATEGIES.snapshot()
+    legacy = Snapshot(saved.fingerprint, tuple(replace(s, enabled=True) for s in saved.strategies
+                                             if s.id in ("pullback", "range_edge", "breakout")))
+    def legacy_decision(*args, **kwargs):
+        return build_fib_volume_pa_decision(*args, strategy_snapshot=legacy, **kwargs)
+
     def ohlc_frame(rows, volumes):
         return pd.DataFrame([
             {
@@ -2389,7 +2601,7 @@ def run_self_test():
     buy_df = tight_buy_df()
     sell_df = tight_sell_df()
 
-    result_buy = build_fib_volume_pa_decision(buy_df, h1_bull, m5_quiet, 80)
+    result_buy = legacy_decision(buy_df, h1_bull, m5_quiet, 80)
     assert result_buy.action == "buy", result_buy
     buy_entry = float(buy_df["close"].iloc[-1])
     buy_risk = buy_entry - result_buy.stop_loss
@@ -2398,7 +2610,7 @@ def run_self_test():
     assert directional_stop_distance("buy", 108.1, 100.0) > MAX_SL_ABS
     assert 0 < directional_stop_distance("buy", 107.9, 100.0) <= MAX_SL_ABS
 
-    result_sell = build_fib_volume_pa_decision(sell_df, h1_bear, m5_quiet, 80)
+    result_sell = legacy_decision(sell_df, h1_bear, m5_quiet, 80)
     assert result_sell.action == "sell", result_sell
     sell_entry = float(sell_df["close"].iloc[-1])
     sell_risk = result_sell.stop_loss - sell_entry
@@ -2407,7 +2619,7 @@ def run_self_test():
     assert directional_stop_distance("sell", 91.9, 100.0) > MAX_SL_ABS
     assert 0 < directional_stop_distance("sell", 92.1, 100.0) <= MAX_SL_ABS
 
-    misaligned = build_fib_volume_pa_decision(buy_df, h1_bear, m5_quiet, 80)
+    misaligned = legacy_decision(buy_df, h1_bear, m5_quiet, 80)
     assert misaligned.action == "no", misaligned
     assert "不同向" in misaligned.reasoning, misaligned.reasoning
 
@@ -2428,7 +2640,7 @@ def run_self_test():
         (113.5, 113.9, 113.2, 113.6),
         (113.6, 113.9, 113.3, 113.7),
     ], [100, 100, 100])
-    wide_result = build_fib_volume_pa_decision(wide_df, h1_bull, wide_m5, 80)
+    wide_result = legacy_decision(wide_df, h1_bull, wide_m5, 80)
     assert wide_result.action == "buy", wide_result
     wide_entry = float(wide_df["close"].iloc[-1])
     wide_risk = wide_entry - wide_result.stop_loss
@@ -2446,11 +2658,11 @@ def run_self_test():
     m5_bad.iloc[-1, m5_bad.columns.get_loc("close")] = 103.6
     m5_bad.iloc[-1, m5_bad.columns.get_loc("high")] = 105.4
     m5_bad.iloc[-1, m5_bad.columns.get_loc("low")] = 103.4
-    blocked = build_fib_volume_pa_decision(buy_df, h1_bull, m5_bad, 80)
+    blocked = legacy_decision(buy_df, h1_bull, m5_bad, 80)
     assert blocked.action == "no" and "M5" in blocked.reasoning, blocked.reasoning
 
     flat_df = make_test_df([100 + math.sin(i / 3) * 0.2 for i in range(80)], [100] * 80)
-    result_no = build_fib_volume_pa_decision(flat_df, h1_bull, m5_quiet, 80)
+    result_no = legacy_decision(flat_df, h1_bull, m5_quiet, 80)
     assert result_no.action == "no", result_no
     flat_regime, flat_text, _ = classify_market_regime(
         flat_df, calculate_atr(flat_df), calculate_adx(flat_df), "bull"
@@ -2546,7 +2758,7 @@ def run_self_test():
         (sell_close - 0.1, sell_close + MAX_SL_ABS + 1.2, sell_close - 0.4, sell_close - 0.2),
         (sell_close - 0.2, sell_close + MAX_SL_ABS + 1.0, sell_close - 0.5, sell_close - 0.3),
     ], [80, 80, 90])
-    wicked = build_fib_volume_pa_decision(sell_df, h1_bear, wick_m5, 0)
+    wicked = legacy_decision(sell_df, h1_bear, wick_m5, 0)
     assert wicked.action == "no" and "影线" in wicked.reasoning, wicked
 
     bj = lambda hour: datetime(2026, 10, 6, hour, 0, tzinfo=BEIJING_TZ)
@@ -2567,10 +2779,10 @@ def run_self_test():
     brk_vols[-4] = 190
     brk_df = ohlc_frame(brk_rows, brk_vols)
     brk_m5 = ohlc_frame([(111.7, 112.0, 111.5, 111.8), (111.8, 112.0, 111.6, 111.9), (111.9, 112.0, 111.7, 111.95)], [100] * 3)
-    london = build_fib_volume_pa_decision(brk_df, h1_bull, brk_m5, 70, now=bj(16))
+    london = legacy_decision(brk_df, h1_bull, brk_m5, 70, now=bj(16))
     assert london.action == "buy" and london.details.get("setup") == "breakout", london
     assert 0 < 111.95 - london.stop_loss <= MAX_SL_ABS + 0.02, london
-    asia = build_fib_volume_pa_decision(brk_df, h1_bull, brk_m5, 70, now=bj(9))
+    asia = legacy_decision(brk_df, h1_bull, brk_m5, 70, now=bj(9))
     assert asia.details.get("setup") != "breakout", asia
     chase_rows = brk_rows[:-3] + [(112.2, 113.4, 112.1, 113.2), (113.2, 114.1, 113.1, 114.0), (114.0, 114.9, 113.9, 114.8)]
     chase_score, _, _ = score_breakout("buy", ohlc_frame(chase_rows, brk_vols), calculate_atr(brk_df), "bull", "bull")
@@ -2585,9 +2797,9 @@ def run_self_test():
     for i in range(len(edge_rows) - 5, len(edge_rows) - 1):
         edge_vols[i] = 70
     edge_m5 = ohlc_frame([(100.9, 101.0, 100.6, 100.7), (100.7, 100.9, 100.5, 100.8), (100.8, 101.0, 100.6, 100.85)], [100] * 3)
-    edge = build_fib_volume_pa_decision(ohlc_frame(edge_rows, edge_vols), h1_bull, edge_m5, 70, now=bj(9))
+    edge = legacy_decision(ohlc_frame(edge_rows, edge_vols), h1_bull, edge_m5, 70, now=bj(9))
     assert edge.action == "buy" and edge.details.get("setup") == "range_edge", edge
-    edge_bear = build_fib_volume_pa_decision(ohlc_frame(edge_rows, edge_vols), h1_bear, edge_m5, 70, now=bj(9))
+    edge_bear = legacy_decision(ohlc_frame(edge_rows, edge_vols), h1_bear, edge_m5, 70, now=bj(9))
     assert edge_bear.action == "no", edge_bear
     assert calculate_rsi(h1_bull) > 70 and calculate_rsi(h1_bear) < 30
 

@@ -44,6 +44,7 @@ def evaluate(c):
     }, fib, {"fib_score": fib_score, "volume_score": int(volume["score"]), "pa_score": pa_score, "adx": float(adx)})
 
 STRATEGY = Strategy(
+    enabled=False,  # Retained for compatibility; report candidate is the active demo strategy.
     id="pullback", name="趋势回撤", version="1",
     sessions={"asia": 0, "late_us": 0, "london": 1, "overlap": 1},
     parameters=P, evaluate=evaluate, regime_filter="pullback",

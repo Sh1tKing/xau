@@ -14,7 +14,7 @@ from types import ModuleType
 import copy
 from typing import Any, Callable
 
-VERSION = "strategy-framework-v1"
+VERSION = "strategy-framework-v2"
 SESSIONS = ("asia", "london", "overlap", "late_us")
 
 
@@ -35,6 +35,8 @@ class Context:
     adx: float
     session: str
     api: Any  # Explicit host math helpers, no trader/MT5 object.
+    now: Any = None  # Aware decision clock; plugins must not read the wall clock themselves.
+    server_utc_offset: float | None = None
 
 
 @dataclass(frozen=True)
@@ -61,12 +63,21 @@ class Strategy:
     momentum: Callable | None = None
     regime_filter: str = "none"
     describe: Callable | None = None  # Optional detailed evidence compatibility API.
+    entry_reference: str = "closed_m15"
+    stop_reference: str = "structure"
+    max_hold_minutes: int = 0
+    cooldown_seconds: int = 0
+    one_entry_per_event: bool = False
+    demo_only: bool = False
 
     def manifest(self):
         return copy.deepcopy({"id": self.id, "name": self.name, "version": self.version,
                 "sessions": dict(self.sessions), "parameters": dict(self.parameters),
                 "ai_rules": dict(self.ai_rules), "target_max_reference_r": self.target_r,
-                "regime_filter": self.regime_filter})
+                "regime_filter": self.regime_filter, "entry_reference": self.entry_reference,
+                "stop_reference": self.stop_reference, "max_hold_minutes": self.max_hold_minutes,
+                "cooldown_seconds": self.cooldown_seconds, "one_entry_per_event": self.one_entry_per_event,
+                "demo_only": self.demo_only})
 
     def assess(self, context):
         contract = self.manifest()
@@ -160,6 +171,12 @@ class Registry:
             raise StrategyError(f"{s.id} sessions需指定合法时段及0–100优先级")
         if type(s.target_r) not in (int, float) or not math.isfinite(s.target_r) or not 1.5 <= s.target_r <= 6:
             raise StrategyError(f"{s.id} target_r必须在1.5–6之间")
+        if s.entry_reference not in ("closed_m15", "closed_m5") or s.stop_reference not in ("structure", "m5_extreme"):
+            raise StrategyError(f"{s.id} 入场/止损来源非法")
+        if (type(s.max_hold_minutes) is not int or not 0 <= s.max_hold_minutes <= 2880
+                or type(s.cooldown_seconds) is not int or not 0 <= s.cooldown_seconds <= 86400
+                or type(s.one_entry_per_event) is not bool or type(s.demo_only) is not bool):
+            raise StrategyError(f"{s.id} 生命周期声明非法")
         if (s.regime_filter not in ("none", "pullback") or (s.momentum is not None and not callable(s.momentum))
                 or s.describe is not None and not callable(s.describe)):
             raise StrategyError(f"{s.id} regime_filter/momentum错误")

@@ -1,6 +1,6 @@
 # AGENTS.md — XAUUSD 开发说明
 
-当前主系统是 H1/M15 三策略脚本。账户按 100 美元评估，0.01 手，最多 1 个仓。
+当前主系统默认只启用研究候选session_retest：H1方向、M15风险指标、M5欧美当地窗口首次突破回踩；仅模拟账户。账户按 100 美元评估，0.01 手，最多 1 个仓。
 
 ## 每次开工
 
@@ -30,12 +30,20 @@
 
 - `xauusd_fib_volume_pa_trader.py`：本地策略、下单、虚拟锁盈和单票平仓。
 - `xauusd_fib_volume_pa_ai3.py`：AI-1、AI-2、AI-3。它调用本地策略，不复制一套规则。
-- `strategies/definitions/*.py`：策略定义唯一入口，集中评分、参数、证据及AI三角色规则；`strategies/framework.py`自动发现并按文件内容指纹重载。原三个策略默认行为不变，新实验不自动启用。评分异常/语法错误/重复id/无启用策略阻止新入场，持仓护盘继续。旧AI提案绑定原指纹，定义改变即停止审核/执行；已开仓的策略契约和证据保留给AI-3。回测开始冻结定义，不运行中换策略。新策略硬条件写Assessment.blockers，Python也执行，不只靠提示词。目标倍数可在1.5–6内调整，默认1.8，公共SL8/RR1.5/H1/追价/M5保护限制不能覆盖。模板和说明见docs/strategies，CLI `python -m strategies.check`不连接MT5。部署必须复制完整strategies包，框架首次部署需用户重启，此后定义文件在下一次评估/刷新自动检查；辅助模块/.env仍需重启。不要宣传自动从自然语言推导策略或已验证收益。
+- `strategies/definitions/*.py`：策略定义唯一入口，集中评分、参数、证据及AI三角色规则；`strategies/framework.py`自动发现并按文件内容指纹重载。2026-10-09用户要求使用报告策略，默认只启用session_retest，原三个定义默认关闭，算法保留。评分异常/语法错误/重复id/无启用策略阻止新入场，持仓护盘继续。旧AI提案绑定原指纹，定义改变即停止审核/执行；已开仓的策略契约和证据保留给AI-3。回测开始冻结定义，不运行中换策略。新策略硬条件写Assessment.blockers，Python也执行，不只靠提示词。目标倍数可在1.5–6内调整，旧三策略1.8、新候选3.0，公共SL8/RR1.5/H1/追价/M5保护限制不能覆盖。模板和说明见docs/strategies，CLI `python -m strategies.check`不连接MT5。部署必须复制完整strategies包，框架首次部署需用户重启，此后定义文件在下一次评估/刷新自动检查；辅助模块/.env仍需重启。不要宣传自动从自然语言推导策略或已验证收益。
 - 日志目录：`xau_fib_pa_logs/`。密钥只放 `.env`。
 - `xauusd_fib_pa_backtest.py`：用 MT5 历史 K 线回放本地策略，不调用 AI，不下单。每根已收盘 M5 评估一次，M1 上模拟成交和本地护盘，同一根 M1 同时碰到止损和止盈按止损算。结果写到 `xau_fib_pa_logs/backtest/`。改了本地策略先跑它再上模拟盘。MT5 的 `copy_rates_from_pos` 一次要几十万根会返回 Invalid params，回测按约 2 万根分页，页被拒绝就再缩小。终端图表最大柱数不够时只拿到已有的K线并提示，不把这当成策略拒绝。
 - 回测参数：`--balance` 起始资金（默认 100），`--max-sl` 止损上限（默认读 `.env` 的 `FIB_PA_MAX_SL_ABS`）。`--max-sl` 只改这次回测，不改实盘。报告会写止损上限、单笔最多亏起始资金的比例、资金最低点和是否归零。
 
-周期分工：
+当前候选：
+
+- 伦敦/纽约当地08:00–08:30连续六根M5建箱，宽1–6个M5 ATR；08:30–11:00首个收盘突破0.05ATR，后六根/30分钟内首次回踩0.25ATR并收盘守在外0.05ATR。箱内0.30ATR失效，只取最新确认，按IANA时区处理DST。
+- 确认M5收盘参考价、最近三根M5极值止损，仍使用生产M15ATR缓冲/下限，参考目标3R上限。保留H1同向、SL8、RR1.5、实时触发侧2倍stop_buffer、EMA21追价1.5ATR、0.01手和最多一仓。不能把此局部参考价选择全局套到旧三策略。
+- `strategies/lifecycle.py` 在MT5 order_send前原子保留事件，每当地日期窗口最多一次订单尝试（失败仍消耗），平仓后冷却600秒、最长持仓180分钟。期限及策略契约冻结，重启恢复，账户非模拟/未知或状态写入失败不入场。时段外或无合法事件不付费请求AI。默认状态 `xau_fib_pa_logs/strategy_event_state.json`，迁移保留；只运行一个实例。
+- 实时取80根闭合M5以覆盖完整窗口及ATR预热；新候选不受旧Fib38–62%/旧箱体评分规则约束，AI三角色由同一策略文件声明驱动。研究实验不含生产H1/缓冲/护盘，接入回测必须重新做，不能复用实验收益。
+- 设计见docs/superpowers/specs/2026-10-09-session-retest-integration.md。实际.env门槛、模型、档位、超时和Messages保持用户配置，代理不启动交易。
+
+历史三策略周期分工（默认关闭，公共交易框架继续适用）：
 
 - H1 决定方向。M15 负责斐波那契、tick volume 和价格行为。M5 不单独决定方向，只负责进场时机：每根已收盘 M5 再检查一次，只有最近 3 根 M5 的拒绝极值加缓冲后仍不超过 8 美元，才用该极值做止损。止损必须盖住这个极值，不能用更近的斐波那契或 M15 高点把止损放进影线里面。
 - H4 只作为背景，不是否决条件。
@@ -43,7 +51,7 @@
 - Python 是最后一道门。AI 不能放宽止损，不能突破下面的硬限制。
 - `call_chat()` 所有HTTP请求合计最多5次，配置 `FIB_PA_AI_HTTP_RETRIES`，主备/low恢复/参数兼容共用预算。2026-10-08成本优化后，同通道读超时额外补发默认0（`FIB_PA_AI_READ_TIMEOUT_RETRIES`），因为上游可能仍在计费生成；独立备用可接手，两边都读超时就结束本轮。连接失败/连接超时仍可在总预算内重试。HTTP错误、非JSON或空输出可切备用；无备用时保留一次low恢复。Chat Completions用reasoning_effort，400拒绝可去掉并记住兼容性，token上限字段不兼容时只换字段不取消上限。正常no/REJECT及截断回复不换模型重审，截断明确失败。任务过期/停止不再请求，不把超时说成“没有可见JSON”。开仓接管360秒、AI-3接管220秒保留。
 
-按北京时间分时段，每段都能开仓，但用不同的进场方式（`trading_session()` 和 `SESSION_SETUPS`）：
+旧三策略按北京时间分时段，每段都能开仓，但用不同的进场方式（`trading_session()` 和 `SESSION_SETUPS`）：
 
 - 亚盘 07-15、美盘尾段 01-07：`pullback` 趋势回撤，`range_edge` 区间边缘。
 - 欧盘 15-20、欧美重叠 20-01：`breakout` 突破回踩，`pullback` 趋势回撤。
@@ -67,11 +75,13 @@
 - AI 置信度 `FIB_PA_AI_CONFIDENCE=75`：2026-10-07 用户确认 65 仅用于放单验证流程，现结束该阶段并恢复 75；AI 代码默认值原本就是 75，本次修改本地 `.env`。本地分与 AI 分不能混为一个门槛。最低盈亏比 1.5。
 - 止损绝对值上限 8 美元（`FIB_PA_MAX_SL_ABS=8`，2026-10-06 用户决定，100 美元本金下单笔最多亏 8%）。结构止损放不下时拒绝，禁止把远处止损硬拉进 8 美元里面。最近 3 根 M5 极值加缓冲超过 8 美元时拒绝，也不能把止损放进这 3 根极值的影线里面。最低盈亏比仍是 1.5，不因为止损变宽而降低。
 - 偏离 M15 EMA21 超过 1.5 ATR 不追。
-- 价格贴着极值、没有回到 38.2% 到 61.8% 回撤区，斐波那契结构分为 0。
+- 旧pullback策略价格贴着极值、没有回到 38.2% 到 61.8% 回撤区，斐波那契结构分为 0；新session_retest按自身建箱回踩，不套这条。
 - 不因为某一天多单或空单亏损而给买卖设置不同阈值。
 - 不把仓位改成账户的 1.5%，不把方向过滤抬回 D1/H4。
 
 ## 已知问题
+
+- 2026-10-09 报告候选接入strategy-framework-v2：用户要求用研究报告策略，默认仅session_retest、旧三策略关闭。定义集中P参数/评分/完整候选OHLC与ATR证据/三角色规则；确认M5参考仅新候选，旧策略M15参考不全局改动。Windows安装tzdata，80根M5、明确serverUTC偏移、当地DST窗口；模拟账户、首次事件、SL8/RR1.5/触发侧2倍buffer/EMA1.5ATR/M5保护保持。EventLedger预提交原子保留事件，拒单不释放；初次绑定和加载持仓期限/冷却必须与预留metadata一致，重启未绑定回执从SR标记/原时间恢复。180分钟退出独立普通护盘开关，成功平仓立即记录冷却；持仓查询失败不抹掉期限。AI2每次实际POST前再验事件时效/demo/窗口/冷却，K线停滞也拒绝过期，不付费重审。回放缺失确认对应M1丢弃，不延迟成交。call_id与快照时间戳补UUID防Windows精度碰撞。257回归和2自检通过；缓存100136根M1、本地10笔净+0.30、已平仓DD7.85，后段2笔-3.69、去最好日-10.80；原实验收益不能沿用，未建立稳定优势。未改实际.env模型/档位/门槛/超时/协议，不启动交易，不主动推送。接入设计与验收见docs/superpowers/specs/2026-10-09-session-retest-integration.md和docs/experiments/2026-10-09-session-retest-integration-validation.md。
 
 - 2026-10-09 用户要求三AI主备全面使用Messages：本地和部署 `.env` 的角色URL及共用BASE_URL已改为Messages，空白备用仍继承，模型/密钥/档位/超时/门槛不变。中转站使用 `hapiopen.cc/v1/messages`，DeepSeek官网使用 `api.deepseek.com/anthropic/v1/messages`；官网确实支持Anthropic格式，不要误认为只有Responses/Chat，也不能直接写官网 `/v1/messages`。`xauusd_fib_volume_pa_ai3.py` 默认入口Messages、版本response-contract-v3，增加x-api-key并保留Bearer，所有Messages模型都用max_tokens/output_config.effort。官网兼容文档明确output_config只支持effort，因此该官方完整路径不发format，usage如实标prompt，Python JSON/质量/策略契约严格校验；其它中转仍优先Schema，不按模型名猜协议或能力。保留历史Chat兼容代码但实际主备没有Chat路线，不自动将失败请求改走Chat。6组现有路由小请求均HTTP200/原模型/end_turn/完整JSON；GPT备用首次30秒读超时，另一次40.69秒成功，不能说Messages消除超时或小请求验证了完整生产审核。回归168项与2项自检通过；预算5、每POST刷新、截断/坏JSON拒绝及全部风控未改，不启动/重启交易。记录见docs/superpowers/specs/2026-10-09-messages-route-migration.md；部署需同步代码和私有.env后用户重启。
 

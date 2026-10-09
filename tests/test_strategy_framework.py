@@ -279,10 +279,11 @@ class FrameworkTests(unittest.TestCase):
     def test_builtin_priority_and_disabled_example(self):
         snapshot=DEFAULT_REGISTRY.snapshot()
         self.assertFalse(snapshot.error)
-        self.assertEqual([s.id for s in snapshot.active("asia")],["pullback","range_edge"])
-        self.assertEqual([s.id for s in snapshot.active("overlap")],["breakout","pullback"])
+        self.assertEqual([s.id for s in snapshot.active("asia")],["session_retest"])
+        self.assertEqual([s.id for s in snapshot.active("overlap")],["session_retest"])
         for strategy in snapshot.strategies:
-            self.assertEqual(strategy.target_r,1.8)
+            self.assertEqual(strategy.target_r,3.0 if strategy.id == "session_retest" else 1.8)
+            self.assertEqual(strategy.enabled,strategy.id == "session_retest")
         shutil.copyfile(Path(__file__).resolve().parents[1]/'docs/strategies/strategy_template.py',self.directory/'template.py')
         self.assertFalse(self.registry.snapshot().error)
         self.assertNotIn("my_setup",[s.id for s in self.registry.snapshot().active("asia")])

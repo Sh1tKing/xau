@@ -1,6 +1,6 @@
 # XAUUSD 三AI交易系统
 
-H1判断方向，M15提供斐波那契、量能与价格行为，M5确认进场时机。本地策略粗筛，AI-1自主提出方案，AI-2审核最终价格，AI-3持仓护盘；Python执行止损、盈亏比、追价和持仓限制。
+当前默认只启用研究报告优先候选“欧美时段突破回踩”，仅允许MT5模拟账户。伦敦与纽约当地08:00–08:30建箱，08:30–11:00等待首次突破后的首次M5回踩确认，自动处理夏令时。H1许可方向，M15提供ATR和EMA追价限制。本地策略粗筛，AI-1自主提出方案，AI-2审核最终价格，AI-3持仓护盘；Python执行止损、盈亏比、追价和持仓限制。
 
 - `xauusd_fib_volume_pa_ai3.py`：三AI运行入口。
 - `xauusd_fib_volume_pa_trader.py`：本地策略、下单与护盘。
@@ -8,7 +8,10 @@ H1判断方向，M15提供斐波那契、量能与价格行为，M5确认进场�
 - [策略文件说明](docs/strategies/README.md)：修改 `strategies/definitions/` 的策略内容，框架自动发现并绑定同版本评分、证据与AI规则。
 - [部署说明](docs/deployment/README.md)：Windows、Python 3.12、MT5终端与依赖。
 - [入场契约与边界设计](docs/superpowers/specs/2026-10-09-entry-gate-reliability.md)：最新评分和实时执行规则。
-- [黄金多策略研究与模拟比较](docs/experiments/2026-10-09-gold-strategy-research.md)：短线、中线及激进候选的独立离线实验，不接入交易账户。
+- [接入后的实际回放验证](docs/experiments/2026-10-09-session-retest-integration-validation.md)：本地10笔、净+0.30美元，后段仍亏，研究收益不能沿用。
+- [黄金多策略研究与模拟比较](docs/experiments/2026-10-09-gold-strategy-research.md)：短线、中线及激进候选的独立离线实验；优先候选现已按[接入设计](docs/superpowers/specs/2026-10-09-session-retest-integration.md)加入模拟盘框架。
+
+新候选参考目标上限3R、止损不超过8美元、最多持有180分钟，每个当地日期窗口最多一次下单尝试，平仓后冷却10分钟。旧三策略保留但默认关闭。事件和期限写入 `xau_fib_pa_logs/strategy_event_state.json`，部署迁移同一账户时保留该文件及AI持仓上下文。
 
 将 `.env.example` 复制为本机 `.env` 并填写自己的配置；示例值不代表当前服务器配置。密钥、账户、日志与持仓状态不在公开仓库中。框架代码或配置修改需要自行重启；加载新框架后，策略定义保存将在下一次评估/请求刷新时自动检查。
 

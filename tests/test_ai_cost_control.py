@@ -224,13 +224,23 @@ class CostControlTests(unittest.TestCase):
         self.assertEqual(self.events()[0]["usage"]["output_tokens"], 50)
 
     def test_calls_remain_stateless_and_do_not_replay_prior_output(self):
-        with patch.object(ai.requests, "post", return_value=Response()) as post:
+        with patch.object(ai.time, "time_ns", return_value=123456789), \
+             patch.object(ai.requests, "post", return_value=Response()) as post:
             self.call()
             self.call()
         first, second = [call.kwargs["json"]["messages"] for call in post.call_args_list]
         self.assertEqual(first, second)
         self.assertEqual([message["role"] for message in first], ["system", "user"])
         self.assertNotEqual(self.events()[0]["call_id"], self.events()[1]["call_id"])
+        self.assertTrue(all(event["call_id"].startswith("AI-1-") for event in self.events()))
+
+    def test_snapshot_trace_ids_keep_role_and_decision_prefix_with_stalled_clock(self):
+        with patch.object(ai.time, "time_ns", return_value=123456789):
+            traces = {prefix: [ai.request_trace_id(prefix) for _ in range(2)]
+                      for prefix in ("decision-ai1", "decision-ai2", "ai3")}
+        self.assertEqual(len({trace for values in traces.values() for trace in values}),6)
+        for prefix, values in traces.items():
+            self.assertTrue(all(trace.startswith(prefix+"-") for trace in values))
 
     def test_usage_write_failure_does_not_block_valid_model_response(self):
         with patch.object(ai.os, "makedirs", side_effect=OSError("disk full")), patch.object(ai.requests, "post", return_value=Response()):
@@ -315,7 +325,7 @@ class PromptCompactionTests(unittest.TestCase):
         trader.get_context = Mock(return_value=(None, None, None))
         trader.dispatch_entry = Mock()
         approved = SimpleNamespace(action="buy", confidence=80, stop_loss=97.)
-        with patch.object(ai.base, "build_fib_volume_pa_decision", return_value=approved):
+        with patch.object(trader, "evaluate_context", return_value=approved):
             trader.dispatch_m5_entry(123)
         trader.dispatch_entry.assert_called_once_with(123, trigger="M5")
 

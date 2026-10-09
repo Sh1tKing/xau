@@ -138,6 +138,7 @@ class QualityScorecardTests(unittest.TestCase):
     def test_actual_order_gate_still_blocks_live_rr_below_15(self):
         # No terminal: only exercise the existing pre-order arithmetic with stubs.
         trader = SimpleNamespace(current_position_count=lambda: 0)
+        trader.validate_strategy_entry = lambda result: ""
         trader.validate_order_prices = lambda *args: ai.base.FibVolumePATrader.validate_order_prices(trader, *args)
         result = ai.base.StrategyResult("sell", 96, False, "quality passed", 4125.07, 4110.15, 0, 0, {})
         trader.validate_execution_prices = lambda result, tick: ""

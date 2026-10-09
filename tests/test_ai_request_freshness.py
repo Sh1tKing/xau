@@ -94,7 +94,7 @@ class FreshnessTests(unittest.TestCase):
             return result, None, 2., 100.
         with patch.dict(ai.os.environ, {"AI1_BACKUP_URL": "https://backup.example.test/chat"}), \
              patch.object(self.trader, "get_context", return_value=(frame(), frame(), frame())), \
-             patch.object(ai.base, "build_fib_volume_pa_decision", return_value=local), \
+             patch.object(self.trader, "evaluate_context", return_value=local), \
              patch.object(ai.base.mt5, "symbol_info_tick", side_effect=lambda _: next(ticks)), \
              patch.object(ai, "build_feature_pack", side_effect=build), \
              patch.object(self.trader, "entry_is_current", return_value=True), \

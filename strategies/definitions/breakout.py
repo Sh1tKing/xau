@@ -130,6 +130,7 @@ def evaluate(c):
     return Assessment(max(0, min(100, score)), setup_details(text, volume, pa_score, pa_text, trend_text, retest_score), structure, facts)
 
 STRATEGY = Strategy(
+    enabled=False,  # Retained for compatibility; report candidate is the active demo strategy.
     id="breakout", name="突破回踩", version="1", sessions={"london": 0, "overlap": 0},
     parameters=P, evaluate=evaluate, describe=describe,
     momentum=lambda side, rsi, hist, prev: momentum_bonus(side, rsi, hist, prev, missing_macd=8),

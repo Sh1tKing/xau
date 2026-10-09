@@ -66,6 +66,7 @@ def evaluate(c):
     return Assessment(max(0, min(100, score)), setup_details(box_text, volume, pa_score, pa_text, trend_text, edge_score), structure, facts)
 
 STRATEGY = Strategy(
+    enabled=False,  # Retained for compatibility; report candidate is the active demo strategy.
     id="range_edge", name="区间边缘", version="1", sessions={"asia": 1, "late_us": 1},
     parameters=P, evaluate=evaluate, describe=describe,
     momentum=lambda side, rsi, hist, prev: momentum_bonus(side, rsi, hist, prev, rsi_band=(-float("inf"),40), rsi_bonus=10),
