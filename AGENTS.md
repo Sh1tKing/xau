@@ -81,6 +81,8 @@
 
 ## 已知问题
 
+- 2026-10-10 技术合集9114894代码构思：用户已登录，按最新指示用内置浏览器核对六节页面及作者可见答疑，第一节已显示超过30秒的正文字幕；仍未取得完整字幕列表，不能称完整复现。主题、作者答疑与项目自拟规则必须区分，见docs/experiments/2026-10-10-bilibili-technical-collection-review.md。作者强调实体吞没、位置、首轮/半路区别，第六节否认简单镜像；草案patterns只给几何/位置/顺序/覆盖事实，不把吞没变成硬门或颜色交易指令。代码草案docs/superpowers/specs/2026-10-10-intraday-region-opportunities-draft.md尚未实现/启用：通用entry-event、可复核M15区域与触碰周期、逐候选计划、AI1单轮自主选ID、AI2/3绑定所选契约、持仓执行token。已知接口耦合尚未修：validate_strategy_entry和回放research_signal_error要求retest_bar/windows，不能让新策略假装session_retest；当前本地先取最高分再做风险，不自动改审另一个策略。局部方案失败不等于结构没有可执行自主方案。保留H1/SL8/RR1.5/EMA/M5保护/成本预算，不搬1:8/1:19逆势、D1硬过滤或未知插针算法；本轮仅设计，不声称新策略已经能运行。
+
 - 2026-10-10 用户明确希望较快完成单笔、日内中频多次进出，并提供“交易狠人大白”B站账号供参考；暂不依赖补仓。当前仅启用session_retest仍是低频首次开盘事件，3R并不增加频率。研究取舍见docs/experiments/2026-10-10-intraday-medium-frequency-direction.md：只核对近期目录/公开详情，完整视频受登录或充电限制，不能声称已复现作者算法。优先研究盘中滚动结构突破回踩及关键区域顺势拒绝，尚未实现/回测/启用；不自动恢复旧亏损实验、不搬历史视频价位/固定3美元止损/止损即反手/补仓/1:19目标。保留H1同向、SL8/RR1.5/EMA1.5ATR/M5保护、单仓和AI分工，新事件才能再入场。本轮只改研究说明，实际代码/.env/部署/进程不变。
 
 - 2026-10-09 收盘边界漏检 `closed-entry-clock-v1`：新策略21:55重启后可见69分钟日志有6次线程但无HTTP；5次整点前约1–2秒被unclosed_or_future_m5_evidence挡住。MT5按经纪商换K，本机UTC尚未到边界时严格future检查正确，旧run却提前记为已处理并不重查。两个脚本现共享closed_entry_readiness/entry_clock_ready，未到本机收盘点或tick时差未知时不消费M15/M5标记，后续正常轮询同根重查；护盘/AI3继续，raw latest_bar_time保留给行情新旧判断。M5无动作日志显示双向blockers和原因，等待按bar/原因去重；不加飞书心跳或付费重试。仍严格拒绝未来数据、过期300秒确认、第二次事件和H1逆向，不通过放宽时间/策略去制造成交。日志21:55首个突破与BUY相反、H1=bull是正常阻断，10月9日北京时间窗口15:30–18:00及20:30–23:00（其它日期按DST重新算），23:00后停止新入场。缺少新策略完整原始快照且文件只到23:04，不能说两小时内应成交或证明之后进程状态。回归tests/test_entry_clock_boundary.py，复盘docs/experiments/2026-10-09-session-retest-silence-review.md；实际.env不改，部署替换两脚本并用户自行重启。
