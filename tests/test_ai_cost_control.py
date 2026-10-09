@@ -323,13 +323,13 @@ class PromptCompactionTests(unittest.TestCase):
         frame = ai.base.pd.DataFrame([dict(time=1800000000+i*900, open=100+i*.1,
                                          high=100.5+i*.1, low=99.5+i*.1, close=100.1+i*.1,
                                          tick_volume=100) for i in range(80)])
-        local = ai.base.StrategyResult("buy", 60, False, "local candidate", 106., 113., 60, 0, {"setup": "pullback"})
+        local = ai.base.StrategyResult("no", 43, False, "local below threshold", 0., 0., 43, 0, {"setup": "pullback"})
         proposal = ai.base.StrategyResult("buy", 80, False, "original thesis", 107., 113., 60, 0, {})
         raw = {"action": "buy", "stop_loss": 106., "take_profit": 113., "reasoning": "original thesis",
                "trigger_evidence": "closed M15 trigger", "invalidation": "M15 closed below structure",
                "target_basis": "given pivot", "unknowns": [], "fact_conflicts": [], "wait_basis": [],
-               "quality_assessment": {"direction": "buy", "reservations": [], "dimensions": {
-                   key: {"level": "adequate", "reason": "supported", "evidence_refs": ["/h1_trend"], "reservation_ids": []}
+               "quality_assessment": {"version": "entry-quality-v2", "direction": "buy", "dimensions": {
+                   key: {"level": "adequate", "reason": "supported", "evidence_refs": ["/h1_trend"], "reservations": []}
                     for key in ai.QUALITY_DIMENSIONS}}}
         sent_requests = []
         def refreshed_chat(*args, **kwargs):
@@ -340,7 +340,7 @@ class PromptCompactionTests(unittest.TestCase):
             trader = ai.ThreeAITrader()
             with patch.object(trader, "get_context", return_value=(frame, frame, frame)), \
                  patch.object(ai.base, "build_fib_volume_pa_decision", return_value=local), \
-                 patch.object(ai.base.mt5, "symbol_info_tick", return_value=SimpleNamespace(bid=108., ask=108.1, time=1800009000)), \
+                 patch.object(ai.base.mt5, "symbol_info_tick", return_value=SimpleNamespace(bid=108.3, ask=108.4, time=1800009000)), \
                  patch.object(trader, "entry_is_current", return_value=True), \
                  patch.object(ai, "call_chat", side_effect=refreshed_chat) as chat, \
                  patch.object(ai, "finalize_ai_proposal", return_value=(proposal, "Python final protection")), \

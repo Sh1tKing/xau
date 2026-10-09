@@ -60,7 +60,7 @@ class QualityScorecardTests(unittest.TestCase):
             self.assertEqual(payload["confidence"], 60)  # keep raw model evidence intact
             proposal, reason = ai.finalize_ai_proposal(normalized, 100, 1, pack["h1_trend"], pack["h1_trend"], None, min_confidence=75)
             self.assertIsNotNone(proposal, reason)
-            self.assertEqual(proposal.details["quality_version"], ai.QUALITY_VERSION)
+            self.assertEqual(proposal.details["quality_version"], ai.LEGACY_QUALITY_VERSION)
 
     def test_minor_reservations_cannot_be_scored_weak(self):
         pack, payload = sample()

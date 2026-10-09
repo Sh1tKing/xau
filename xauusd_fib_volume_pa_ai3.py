@@ -84,12 +84,13 @@ _USAGE_LOCK = threading.RLock()
 _CHAT_OPTIONS_LOCK = threading.RLock()
 _CHAT_OPTIONS = {}
 COST_CONTROL_VERSION = "cost-latency-v2"
-MARKET_FRESHNESS_VERSION = "request-freshness-v1"
-RESPONSE_CONTRACT_VERSION = "response-contract-v1"
+MARKET_FRESHNESS_VERSION = "request-freshness-v2"
+RESPONSE_CONTRACT_VERSION = "response-contract-v2"
 QUALITY_LEVEL_POINTS = {"strong": 20, "adequate": 16, "weak": 8, "missing": 0}
 QUALITY_DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_evidence")
 QUALITY_CAUSES = {"volume", "shallow_retrace", "trigger_weakness", "opposing_structure", "stop_vulnerability", "target_uncertainty", "execution_drift", "missing_data", "hard_limit"}
-QUALITY_VERSION = "entry-quality-v1"
+LEGACY_QUALITY_VERSION = "entry-quality-v1"
+QUALITY_VERSION = "entry-quality-v2"
 
 base.MAGIC = AI_MAGIC
 base.ENABLE_TRADING = AI_ENABLE_TRADING
@@ -129,6 +130,8 @@ AI2_INSTRUCTIONS = (
 )
 AI1_INSTRUCTIONS += (
     "live_quote是本次请求重新采集的报价，不是参考K线收盘价；按当前报价核实方案可执行性，不能把止损贴近现价形成的高RR当作质量提升。"
+    "local_plan_feasibility只评价原本地SL/TP，不是否决其他自主方案的全局开关；本地no或该方案不可执行时，仍可提出有证据的其他合法方案。"
+    "Python按rules.price_finalization定稿；先考虑M15参考价下最小止损宽度及1.8R目标上限，再核实实时报价RR，不能按随后会被截短的远目标宣称通过。"
 )
 AI2_INSTRUCTIONS += (
     "ai1_snapshot是原分析报价，market_evidence.live_quote是本次审核新报价；比较变化，按final_plan_feasibility核实当前执行区间、止损触发侧剩余空间及追价。"
@@ -150,11 +153,13 @@ PRICE_ACTION_INSTRUCTIONS = (
 AI1_INSTRUCTIONS += PRICE_ACTION_INSTRUCTIONS
 AI2_INSTRUCTIONS += PRICE_ACTION_INSTRUCTIONS
 AI1_INSTRUCTIONS += (
-    "按quality_rubric评五项，不猜胜率、不复制本地分、不抬分。quality_assessment={direction,dimensions,reservations}；"
-    "dimension={level,reason,evidence_refs,reservation_ids}；reservation={id,cause,event_group,dimension,severity,reason,evidence_refs}。"
-    "direction为buy/sell，dimensions是rubric五项为键的对象；reservations、wait_basis、fact_conflicts、unknowns、evidence_refs、reservation_ids均为数组。"
+    "按quality_rubric评五项，不猜胜率、不复制本地分、不抬分。quality_assessment={version,direction,dimensions}，version=entry-quality-v2。"
+    "dimension={level,reason,evidence_refs,reservations}；reservation={cause,event_group,reason,evidence_refs}，直接放入唯一归属维度，禁止另填id/dimension/severity/reservation_ids。"
+    "level一次声明程度：strong=20且无保留；adequate=16且保留仅轻微；weak=8且保留是重大反证；missing=0且保留是阻断条件。weak/missing必须有保留。"
+    "direction为buy/sell，dimensions是rubric五项为键的对象；reservations、wait_basis、fact_conflicts、unknowns、evidence_refs均为数组。"
     "refs为本次输入真实JSON Pointer。每项reason≤35汉字，refs只列必要证据；同cause/event只扣一项。"
-    "minor最低adequate，weak需material，missing需blocking；Python加总，不输出自由confidence。"
+    "普通量/浅回撤最多轻微，不能评weak/missing；Python据level生成程度并加总，不输出自由confidence。"
+    "执行止损空间问题归protection，实时RR不足归target，不能因报价漂移把已命中的触发评missing。"
     "no仍评允许方向，wait_basis列{code,reason,evidence_refs}，code为hard_limit/missing_structure/missing_trigger/missing_data/target_space/material_counter_evidence。"
     "已有周期触发不写missing_trigger；仅minor且位置/确认/保护/目标成立应提案交审核，不无限等待更漂亮形态。"
     "独立重大反证仍自主判断，不为出单删真障碍；只省重复说明，不能漏独立硬伤或关键证据。"
@@ -619,6 +624,12 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
             "max_stop_abs": base.MAX_SL_ABS,
             "chase_max_atr": base.CHASE_MAX_ATR,
             "min_rr": base.MIN_REWARD_RISK,
+            "price_finalization": {"reference": "previous_closed_m15_close",
+                                   "generation_min_risk": base.entry_risk_limits(atr)[0],
+                                   "target_max_reference_r": 1.8,
+                                   "execution_min_stop_clearance": 2 * base.stop_buffer(atr),
+                                   "execution_clearance_price": "BUY bid / SELL ask",
+                                   "generation_floor_is_not_execution_floor": True},
         },
         "m15_bars": bars_for_prompt(df_m15, 32),
         "evidence_windows": {
@@ -719,25 +730,36 @@ def plan_feasibility(action, reference_entry, stop_loss, take_profit, quote, atr
                    "stop_within_cap": bool(0 < risk <= base.MAX_SL_ABS),
                     "rr_passes": bool(risk > 0 and reward >= base.MIN_REWARD_RISK * risk)})
     if atr is not None:
-        if not base.math.isfinite(float(atr)) or float(atr) <= 0:
-            result["executable"] = False
-            return result
-        min_risk, max_risk = base.entry_risk_limits(atr)
-        rr_edge = (take_profit + base.MIN_REWARD_RISK * stop_loss) / (1 + base.MIN_REWARD_RISK)
-        lower, upper = ((stop_loss + min_risk, min(stop_loss + max_risk, rr_edge)) if action == "buy"
-                        else (max(stop_loss - max_risk, rr_edge), stop_loss - min_risk))
-        trigger_price = quote.get("bid" if action == "buy" else "ask")
         try:
-            trigger_price = float(trigger_price)
-            clearance = sign * (trigger_price - stop_loss)
+            atr = float(atr)
+            bid, ask = float(quote.get("bid")), float(quote.get("ask"))
+            ema21 = float(ema21) if ema21 is not None else None
         except (TypeError, ValueError):
-            clearance = float("nan")
-        min_clearance = base.stop_buffer(atr)
-        chase = abs(live_entry - float(ema21)) / atr if ema21 is not None else None
+            result.update({"executable": False, "input_error": "当前Bid/Ask、ATR或EMA21缺失/无效"})
+            return result
+        if (not base.math.isfinite(atr) or atr <= 0
+                or not all(base.math.isfinite(p) and p > 0 for p in (bid, ask)) or ask < bid
+                or ema21 is not None and not base.math.isfinite(ema21)):
+            result.update({"executable": False, "input_error": "当前Bid/Ask、ATR或EMA21缺失/无效"})
+            return result
+        generation_min_risk, max_risk = base.entry_risk_limits(atr)
+        spread = ask - bid
+        # Generation width is measured at the M15 reference. At execution, use
+        # actual stop-trigger-side clearance, with one additional buffer for drift.
+        min_clearance = 2 * base.stop_buffer(atr)
+        min_execution_risk = min_clearance + spread
+        rr_edge = (take_profit + base.MIN_REWARD_RISK * stop_loss) / (1 + base.MIN_REWARD_RISK)
+        lower, upper = ((stop_loss + min_execution_risk, min(stop_loss + max_risk, rr_edge)) if action == "buy"
+                        else (max(stop_loss - max_risk, rr_edge), stop_loss - min_execution_risk))
+        clearance = sign * ((bid if action == "buy" else ask) - stop_loss)
+        chase = abs(live_entry - ema21) / atr if ema21 is not None else None
         result.update({
             "entry_bounds": {"lower": round(lower, 6), "upper": round(upper, 6),
-                             "source": "fixed_sl_tp_existing_risk_limits"},
-            "min_live_risk": min_risk,
+                             "source": "fixed_sl_tp_stop_clearance_and_rr"},
+            "execution_version": MARKET_FRESHNESS_VERSION,
+            "generation_min_risk": generation_min_risk,
+            "min_execution_risk": min_execution_risk,
+            "spread": round(spread, 6),
             "within_entry_bounds": lower - 1e-6 <= live_entry <= upper + 1e-6,
             "remaining_stop_space": round(clearance, 6) if base.math.isfinite(clearance) else None,
             "min_stop_clearance": min_clearance,
@@ -774,12 +796,19 @@ def closed_context_times(df_m15, df_h1, df_m5):
 def execution_rejection(facts):
     if not facts.get("available") or "executable" not in facts:
         return "当前报价或执行风险数据不足"
-    if not facts.get("within_entry_bounds"):
-        return "现价已离开固定SL/TP和既有风险限制允许的执行区间"
+    if facts.get("input_error"):
+        return facts["input_error"]
     if not facts.get("protection_space_passes"):
-        return "扣除点差后的止损触发侧保护空间不足"
+        return "扣除点差后的止损触发侧保护空间不足（剩余%s，至少%s）" % (
+            facts.get("remaining_stop_space"), facts.get("min_stop_clearance"))
+    if not facts.get("stop_within_cap"):
+        return "当前止损距离无效或超过上限"
+    if not facts.get("rr_passes"):
+        return "当前固定SL/TP的实时盈亏比%s低于%s" % (facts.get("live_rr"), base.MIN_REWARD_RISK)
     if not facts.get("chase_passes"):
         return "当前报价偏离M15 EMA21超过追价上限"
+    if not facts.get("within_entry_bounds"):
+        return "现价已离开固定SL/TP和保护空间允许的执行区间"
     return "" if facts.get("executable") else "当前止损距离或盈亏比不符合硬限制"
 
 
@@ -796,10 +825,14 @@ def quality_rubric():
             "target": "目标有给定依据、重要未克服障碍之前有空间且有效报价RR至少1.5为adequate；刚过1.5无需在其他项重复扣分。",
             "counter_evidence": "没有可核实反向证据为strong；普通量、浅回撤、H1旧影线、未证实过程极值等minor意见为adequate；独立及时的反向结构为material。",
         },
-        "reservations_policy": "一个cause/event仅归一个dimension；minor最多使strong变adequate。weak需material，missing需blocking。已在目标或触发项计入的风险不在反向证据项重复扣分。",
+        "reservations_policy": "保留意见直接嵌在所属维度，一个cause/event仅归一项。level是唯一程度声明：adequate的保留为minor，weak为material，missing为blocking；strong不得有保留，weak/missing必须有保留。普通量/浅回撤不能weak/missing。Python生成ID/归属/程度，不由模型重复声明。",
         "reservation_causes": sorted(QUALITY_CAUSES),
         "proposal_policy": "硬伤或必要证据缺失则no；已成立的候选仅有minor意见时给出提案，最终分数及Python/AI2决定是否放行。不要将不确定未来获利当成必要字段缺失。",
         "quote_policy": "reference_price与live_quote来自不同时间，差异本身不是事实冲突；用live_quote核实当前可行性，AI2/Python还会复核执行。",
+        "reference_paths": ["/h1_trend", "/live_quote", "/local_plan_feasibility",
+                            "/computed_evidence/fib", "/computed_evidence/m5_timing",
+                            "/computed_evidence/price_action", "/computed_evidence/obstacles"],
+        "reference_path_policy": "路径相对本次输入根对象；local_plan_feasibility是顶层，不能放进computed_evidence。引用列表中的实际方向和索引，不照抄示例占位符。",
     }
 
 
@@ -810,6 +843,9 @@ def _evidence_pointer_exists(pack, pointer):
     try:
         for token in pointer[1:].split("/"):
             token = token.replace("~1", "/").replace("~0", "~")
+            if isinstance(value, list) and (not token.isascii() or not token.isdigit()
+                                           or len(token) > 1 and token.startswith("0")):
+                return False
             value = value[int(token)] if isinstance(value, list) else value[token]
         return value is not None
     except (KeyError, IndexError, TypeError, ValueError):
@@ -817,6 +853,68 @@ def _evidence_pointer_exists(pack, pointer):
 
 
 def normalize_ai1_quality(payload, pack):
+    """Decode the declared contract; never repair legacy cards into trades."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("quality_assessment"), dict):
+        return _normalize_ai1_quality_v1(payload, pack)
+    card = payload["quality_assessment"]
+    if "wait_basis" in card:
+        return payload, "AI-1字段层级错误: wait_basis必须位于顶层，不能嵌在quality_assessment内"
+    version = card.get("version", LEGACY_QUALITY_VERSION)
+    if version == LEGACY_QUALITY_VERSION:
+        return _normalize_ai1_quality_v1(payload, pack)
+    if version != QUALITY_VERSION:
+        return payload, "AI-1质量评估版本无效: %s" % version
+    if set(card) != {"version", "direction", "dimensions"}:
+        return payload, "AI-1质量评估v2字段错误: 保留意见只能放入各维度"
+    dimensions = card.get("dimensions")
+    if not isinstance(dimensions, dict) or set(dimensions) != set(QUALITY_DIMENSIONS):
+        return payload, "AI-1质量评估无效: 五项缺失"
+    decoded = copy.deepcopy(payload)
+    decoded_card = {"version": QUALITY_VERSION, "direction": card.get("direction"),
+                    "dimensions": {}, "reservations": []}
+    severity_by_level = {"adequate": "minor", "weak": "material", "missing": "blocking"}
+    for name in QUALITY_DIMENSIONS:
+        item = dimensions[name]
+        if not isinstance(item, dict) or set(item) != {"level", "reason", "evidence_refs", "reservations"}:
+            return payload, "AI-1质量评估v2字段错误: %s" % name
+        level, reservations = item.get("level"), item.get("reservations")
+        if not isinstance(level, str) or level not in QUALITY_LEVEL_POINTS or not isinstance(reservations, list):
+            return payload, "AI-1质量评估无效: %s等级或保留意见" % name
+        if (level == "strong" and reservations or level in ("weak", "missing") and not reservations):
+            return payload, "AI-1质量评估程度不符: %s缺少对应保留意见或strong含保留" % name
+        converted = {"level": level, "reason": item["reason"], "evidence_refs": item["evidence_refs"],
+                     "reservation_ids": []}
+        for index, issue in enumerate(reservations, 1):
+            if not isinstance(issue, dict) or set(issue) != {"cause", "event_group", "reason", "evidence_refs"}:
+                return payload, "AI-1质量评估v2保留意见字段错误: %s/%s" % (name, index)
+            if (not isinstance(issue["cause"], str) or issue["cause"] not in QUALITY_CAUSES
+                    or issue["event_group"] is not None and not isinstance(issue["event_group"], str)
+                    or not isinstance(issue["reason"], str) or not issue["reason"].strip()):
+                return payload, "AI-1质量评估v2保留意见无效: %s/%s" % (name, index)
+            if level in ("weak", "missing") and issue["cause"] in ("volume", "shallow_retrace"):
+                return payload, "AI-1质量评估程度不符: 普通量/浅回撤仅是轻微意见，不能评%s" % level
+            identifier = "%s:%s" % (name, index)
+            converted["reservation_ids"].append(identifier)
+            decoded_card["reservations"].append({**issue, "id": identifier, "dimension": name,
+                                                "severity": severity_by_level[level]})
+        decoded_card["dimensions"][name] = converted
+    # Check paths before the shared validator to expose the precise invalid pointer.
+    for item in list(dimensions.values()) + decoded_card["reservations"]:
+        refs = item.get("evidence_refs")
+        if not isinstance(refs, list) or not refs:
+            return payload, "AI-1质量评估无效: evidence_refs必须是非空数组"
+        invalid = [ref for ref in refs if not _evidence_pointer_exists(pack, ref)]
+        if invalid:
+            return payload, "AI-1质量评估证据路径无效: %s" % invalid
+    decoded["quality_assessment"] = decoded_card
+    normalized, error = _normalize_ai1_quality_v1(decoded, pack)
+    if error:
+        return payload, error
+    normalized["quality_version"] = QUALITY_VERSION
+    return normalized, ""
+
+
+def _normalize_ai1_quality_v1(payload, pack):
     """Validate the AI scorecard without promoting its action or inventing facts."""
     if not isinstance(payload, dict):
         return payload, "AI-1质量评估缺失: 无有效JSON"
@@ -903,8 +1001,16 @@ def normalize_ai1_quality(payload, pack):
     normalized["model_reported_confidence"] = payload.get("confidence")
     normalized["confidence"] = score
     normalized["quality_score"] = score
-    normalized["quality_version"] = QUALITY_VERSION
+    normalized["quality_version"] = LEGACY_QUALITY_VERSION
     return normalized, ""
+
+
+def ai1_result_status(parsed, quality_error, proposal):
+    if quality_error:
+        return "contract_invalid"
+    if isinstance(parsed, dict) and parsed.get("action") == "no":
+        return "watch"
+    return "review_pending" if proposal is not None else "python_rejected"
 def normalize_confidence(value):
     try:
         number = float(value)
@@ -986,14 +1092,13 @@ def response_json_schema(role):
     texts = {"type": "array", "items": text}
     price = {"anyOf": [{"type": "number"}, {"type": "null"}]}
     if role == "AI-1":
-        dimension = _object_schema({"level": {"type": "string", "enum": list(QUALITY_LEVEL_POINTS)},
-                                    "reason": text, "evidence_refs": texts, "reservation_ids": texts})
         reservation = _object_schema({
-            "id": text, "cause": {"type": "string", "enum": sorted(QUALITY_CAUSES)},
+            "cause": {"type": "string", "enum": sorted(QUALITY_CAUSES)},
             "event_group": {"anyOf": [text, {"type": "null"}]},
-            "dimension": {"type": "string", "enum": list(QUALITY_DIMENSIONS)},
-            "severity": {"type": "string", "enum": ["minor", "material", "blocking"]},
             "reason": text, "evidence_refs": texts})
+        dimension = _object_schema({"level": {"type": "string", "enum": list(QUALITY_LEVEL_POINTS)},
+                                    "reason": text, "evidence_refs": texts,
+                                    "reservations": {"type": "array", "items": reservation}})
         wait = _object_schema({"code": {"type": "string", "enum": ["hard_limit", "missing_structure", "missing_trigger",
                                "missing_data", "target_space", "material_counter_evidence"]},
                                "reason": text, "evidence_refs": texts})
@@ -1001,9 +1106,9 @@ def response_json_schema(role):
             "action": {"type": "string", "enum": ["buy", "sell", "no"]}, "stop_loss": price, "take_profit": price,
             "reasoning": text, "trigger_evidence": text, "invalidation": text, "target_basis": text,
             "fact_conflicts": texts, "unknowns": texts,
-            "quality_assessment": _object_schema({"direction": {"type": "string", "enum": ["buy", "sell"]},
-                "dimensions": _object_schema({name: dimension for name in QUALITY_DIMENSIONS}),
-                "reservations": {"type": "array", "items": reservation}}),
+            "quality_assessment": _object_schema({"version": {"type": "string", "enum": [QUALITY_VERSION]},
+                "direction": {"type": "string", "enum": ["buy", "sell"]},
+                "dimensions": _object_schema({name: dimension for name in QUALITY_DIMENSIONS})}),
             "wait_basis": {"type": "array", "items": wait}})
     if role == "AI-2":
         return _object_schema({"decision": {"type": "string", "enum": ["APPROVE", "REJECT"]},
@@ -1018,15 +1123,15 @@ def ai1_json_template():
     return {"action": "no", "stop_loss": None, "take_profit": None,
             "reasoning": "<本次结论>", "trigger_evidence": "<实际触发或缺失>",
             "invalidation": "<失效条件>", "target_basis": "<目标依据>", "fact_conflicts": [], "unknowns": [],
-            "quality_assessment": {"direction": "buy", "dimensions": {
+            "quality_assessment": {"version": QUALITY_VERSION, "direction": "buy", "dimensions": {
                 name: {"level": "adequate", "reason": "<本项证据结论>", "evidence_refs": ["/<本次真实路径>"],
-                       "reservation_ids": []} for name in QUALITY_DIMENSIONS}, "reservations": []},
+                       "reservations": []} for name in QUALITY_DIMENSIONS}},
             "wait_basis": [{"code": "missing_trigger", "reason": "<实际等待条件>", "evidence_refs": ["/<本次真实路径>"]}]}
 
 
 AI1_INSTRUCTIONS += (
     "严格输出一个完整JSON对象，闭合所有括号，不输出Markdown或分析过程。wait_basis必须在顶层，与quality_assessment并列，"
-    "quality_assessment内部只有direction/dimensions/reservations。以下仅示范层级，示例方向/等级/理由/路径不可复用，须按实际证据重填；"
+    "quality_assessment内部只有version/direction/dimensions，保留意见在各维度的reservations内。以下仅示范层级，示例方向/等级/理由/路径不可复用，须按实际证据重填；"
     "有交易提案时wait_basis为空数组。格式模板：" + json.dumps(ai1_json_template(), ensure_ascii=False, separators=(",", ":"))
 )
 
@@ -2156,6 +2261,7 @@ class ThreeAITrader(base.FibVolumePATrader):
             ai_confidence = None
             if isinstance(parsed, dict) and not quality_error:
                 ai_confidence = normalize_confidence(parsed.get("confidence", 0))
+            result_status = ai1_result_status(parsed, quality_error, proposal)
             append_decision_snapshot(
                 decision_id,
                 "ai1_result",
@@ -2164,11 +2270,13 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "parsed": parsed,
                     "quality_error": quality_error,
                     "json_error": json_error or None,
+                    "status": result_status,
+                    "quality_version": parsed.get("quality_version") if isinstance(parsed, dict) else None,
                     "proposal": proposal.to_decision() if proposal is not None else None,
                     "python_reason": reason,
                 },
             )
-            action_line = "AI-1动作: %s" % format_ai_action(parsed)
+            action_line = ("AI-1输出无效（原动作: %s）" if quality_error else "AI-1动作: %s") % format_ai_action(parsed)
             confidence_line = "%s，本地置信度: %s (BUY=%s SELL=%s)，AI-1质量分: %s，门槛: 本地%s / AI%s" % (
                 action_line,
                 local_result.confidence,
@@ -2179,19 +2287,19 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI_CONFIDENCE,
             )
             base.logger.info(
-                "AI-1 结果 decision=%s local_action=%s %s: %s | %s"
-                % (decision_id, local_result.action, action_line, reason, confidence_line)
+                "AI-1 结果 decision=%s status=%s local_action=%s %s: %s | %s"
+                % (decision_id, result_status, local_result.action, action_line, reason, confidence_line)
             )
             if not quality_error:
                 card = parsed["quality_assessment"]
                 base.logger.info("AI-1质量明细 decision=%s version=%s grades=%s reservations=%s wait_basis=%s",
-                                 decision_id, QUALITY_VERSION,
+                                 decision_id, parsed["quality_version"],
                                  {key: item["level"] for key, item in card["dimensions"].items()},
                                  card["reservations"], parsed.get("wait_basis", []))
             if proposal is None:
                 if "观望" not in reason and "未给出" not in reason:
                     self.notify_lines(
-                        "✋ %s AI-1/Python 未放行" % base.SYMBOL,
+                        ("⚠️ %s AI-1输出契约错误" if quality_error else "✋ %s AI-1/Python 未放行") % base.SYMBOL,
                         [confidence_line, reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
                     )
                 return
@@ -2288,8 +2396,10 @@ class ThreeAITrader(base.FibVolumePATrader):
                 },
             )
         except MarketSnapshotError as exc:
+            append_decision_snapshot(decision_id, "entry_stopped", {"reason": str(exc)})
             base.logger.info("行情刷新/执行复核停止本轮: %s", exc)
         except AIRequestError as exc:
+            append_decision_snapshot(decision_id, "ai_request_failed", {"role": exc.role, "reason": exc.detail})
             self.alert_api_failure(exc.role, exc.detail)
         except Exception as exc:
             base.logger.error("AI开仓线程异常: %s: %s" % (type(exc).__name__, exc))

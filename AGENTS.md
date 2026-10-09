@@ -22,6 +22,7 @@
 - 提交说明用一句中文，说明行为变化，不写空泛的 “update”。
 - 不主动推送远程，除非用户明确要求。
 - 不启动实盘或模拟盘进程。正在运行的进程要用户自己重启后才会加载新代码。
+- `https://github.com/Sh1tKing/xau.git` 使用干净的 `codex/publish-master` 快照推送到远程 `master`。本地旧历史含无关脚本的硬编码密钥，禁止直接推送本地master历史；公开快照只含README、AGENTS、.gitignore、.env.example、三个黄金脚本、tests和docs，后续发布以公开分支上次提交为父提交。保留本地master历史，不上传.env、日志、server_deploy、.claude和无关脚本。
 
 ## 当前架构
 
@@ -70,6 +71,8 @@
 - 不把仓位改成账户的 1.5%，不把方向过滤抬回 D1/H4。
 
 ## 已知问题
+
+- 2026-10-09 入场可靠性v2：`xauusd_fib_volume_pa_ai3.py`使用entry-quality-v2，模型保留意见直接嵌入所属维度，不再重复声明ID/归属/severity；level一次声明程度（adequate保留为minor、weak为material、missing为blocking），Python确定生成一致内存卡并汇总。仍严格验证证据路径、同cause/event去重、已有触发和blocking/no规则；普通量/浅回撤不得weak/missing。旧v1有效卡保留兼容标签，历史坏卡不修补、不付费重审、不改no为交易。Schema、模板、提示词和rubric同步，错误明确到路径，JSON Pointer不接受负/前导零列表索引。request-freshness-v2将止损生成下限与实时余量分离：0.6ATR/0.8仍用于M15参考价定稿，实时止损触发侧BUY Bid/SELL Ask至少留2*stop_buffer（当前1.2–2美元），区间考虑点差、SL8和RR1.5，AI2及下单前同函数校验；不再将生成下限作为实时最低距离。归档五份有利报价的区间问题解除，00:56仅余1.01美元和历史秒损仍拒绝，不能说成应成交单。提示词说明本地方案不可执行不剥夺自主提案，并公开Python1.8R目标定稿限制；04:16调整后同快照RR1.495575仍不放行，不给RR加容差。ai1_result.status区分契约错/观望/Python拒绝/待审核。设计与发布范围见docs/superpowers/specs/2026-10-09-entry-gate-reliability.md，回归tests/test_ai_entry_gate_v2.py；未改实际.env/模型/档位/超时/门槛/本地策略。部署需用户自行重启，离线测试不保证供应商永不出错、成交或收益。
 
 - 2026-10-08 双协议与JSON修复 `response-contract-v1`：`xauusd_fib_volume_pa_ai3.py` 按各主备URL路径独立选择Chat或Messages，不能按模型名猜协议。Messages使用顶层system、user消息、anthropic-version、max_tokens、output_config.effort/format，解析text块、stop_reason及缓存独立输入usage；Chat保留reasoning_effort和原token字段转换。Claude主路本地/部署.env改到hapiopen.cc/v1/messages，GPT备用仍Chat，模型/档位/密钥/超时/置信度不改（用户现在自行用AI65临时验证流程，不擅自恢复75，服务器以实际配置为准）。三角色优先严格JSON Schema，明确400不支持才记住并降级；Chat可降JSON object/提示词，Messages保留支持的effort或format，整项output_config不支持才去掉两项，日志及usage记录真实发送模式/档位。所有恢复共用原5次预算、每POST刷新、读超时不重复补发。Messages必填max_tokens拒绝时切独立备用或失败，不能换Chat上限字段/取消上限。AI1补完整JSON模板，wait_basis必须顶层；parse_json_object报告语法行列/字段重复/非有限数值，拒绝数组中挑交易和猜补括号。已确认10:25历史回复HTTP200/stop/output2580却少外层括号且wait_basis嵌错，不是超时/触顶，不能修补后下单。正文格式错误只记录原文和具体诊断、不付费重审，不放宽质量卡或AI2/Python门。三角色截断/非最终结束/回执输出超过发送上限均失败且不重复生成；超限检测不能撤回上游费用，第三方忽略参数或晚到账单仍需服务方核实。回归 `tests/test_ai_response_contract.py`，部署需用户重启；不声称离线测试保证中转schema/effort透传或解决所有长尾。
 

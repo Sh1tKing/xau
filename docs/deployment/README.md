@@ -1,7 +1,9 @@
 # 三AI黄金策略服务器部署
 
-此部署包的代码提交以 `MANIFEST.json` 为准，证据版本 `entry-evidence-v5`，评分版本 `entry-quality-v1`。
+此部署包的代码提交以 `MANIFEST.json` 为准，证据版本 `entry-evidence-v5`，评分版本 `entry-quality-v2`，行情刷新版本 `request-freshness-v2`，JSON契约版本 `response-contract-v2`。
 运行入口是 `xauusd_fib_volume_pa_ai3.py`，它会导入同目录的 `xauusd_fib_volume_pa_trader.py`。
+
+若从GitHub源码部署：将这两个脚本及 `docs/deployment` 下的 `requirements.txt`、`install.cmd`、`start.cmd` 放在同一目录，再将 `.env.example` 复制为 `.env` 并填写自己的账户及接口配置。公开仓库不包含私人 `server_deploy` 目录、实际 `.env`、日志或持仓状态。下述“部署包”指本机生成的私人目录。
 
 ## 服务器环境
 
@@ -16,7 +18,15 @@
 3. 双击 `install.cmd`，安装依赖到该文件夹的 `.venv`。安装脚本不会启动交易。
 4. 打开MT5终端。迁移同一账户前，先在原机器停止旧交易脚本，避免两台机器同时管理同一账户。
 5. 双击 `start.cmd` 启动三AI策略。该操作会按 `.env` 的交易开关运行，可能实际下单；只运行一个实例。
-6. 查看启动输出：证据版本应为 `entry-evidence-v5`、质量评分应为 `entry-quality-v1`，门槛应与 `.env` 一致。AI75现在比较五项质量总分（非胜率），本地55仍是本地评分门槛。日志写入 `xau_fib_pa_logs`，跨日后第一条记录会按服务器本地日期自动创建 `Fib_PA_YYYY-MM-DD.log` 和 `Fib_PA_AI3_YYYY-MM-DD.log`，每次AI结果后可查看质量明细与观望依据。旧版本持续运行时日期固定在启动日，更新代码后需自行重启一次才能加载跨日修复。
+6. 查看启动输出：证据版本应为 `entry-evidence-v5`、质量评分应为 `entry-quality-v2`、行情刷新应为 `request-freshness-v2`。门槛以实际 `.env` 为准，AI分比较五项质量总分（非胜率），本地55仍是本地评分门槛。日志写入 `xau_fib_pa_logs`，跨日后第一条记录会按服务器本地日期创建对应日期日志；每次AI结果可查看质量明细、状态与观望依据。更新后需自行重启加载，旧进程不会自动换代码或配置。
+
+## 2026-10-09 入场可靠性更新
+
+评分卡将保留意见嵌入唯一所属维度，Python按模型声明的等级生成ID、归属与程度，避免重复填写产生矛盾。真实证据引用、同一原因去重、已有触发与阻断条件仍严格校验；坏卡不会自动修成交易，也不会付费重审。日志的 `status` 区分 `contract_invalid`、`watch`、`python_rejected`、`review_pending`，契约错误通知明确为输出无效。
+
+0.6ATR/0.8美元继续用于M15参考价下生成止损；实时成交检查改为止损触发侧BUY Bid/SELL Ask至少剩余 `2*stop_buffer(atr)`（现有参数下1.2–2美元），并考虑点差、止损8美元上限、RR1.5、EMA21追价及旧K线过期。价格向有利方向变化不再仅因低于生成宽度而拒绝，贴近止损仍拒绝。AI-2与实际下单使用同一检查。详见入场可靠性v2设计；本次不修改实际配置和本地策略。
+
+Claude原生接口按URL的 `/v1/messages` 路径选择Messages协议，GPT备用可继续使用 `/v1/chat/completions`，各路线独立适配。三角色优先Schema，接口明确不支持才降级；max_tokens、截断拒绝与5次总请求预算保持。新格式减少冗余声明，仍不能保证中转或模型永不返回无效引用。
 
 退出脚本使用控制台 `Ctrl+C`。此包是前台运行方式，没有注册Windows服务或开机任务。关闭控制台、注销Windows用户或服务器重启会中断运行，需自行重新启动。
 
@@ -50,7 +60,7 @@ FIB_PA_AI2_BACKUP_TIMEOUT=40
 
 ## AI用量与成本控制
 
-启动日志应显示 `AI成本控制=cost-latency-v2`，备用配置行同时显示主路及备用等待秒数。关键证据、完整K线窗口、75质量门槛和Python风控保留；输入只移除与已序列化OHLC计算结果一致的重复candle_parts、完全重复的元数据和AI-2无需重评的评分卡，来源精度更高的影线数值仍保留。规则与评分标准提前排列以便缓存。三角色要求简短JSON解释，不复述全部行情。
+启动日志应显示 `AI成本控制=cost-latency-v2`，备用配置行同时显示主路及备用等待秒数。关键证据、完整K线窗口、实际配置的质量门槛和Python风控保留；输入只移除与已序列化OHLC计算结果一致的重复candle_parts、完全重复的元数据和AI-2无需重评的评分卡，来源精度更高的影线数值仍保留。规则与评分标准提前排列以便缓存。三角色要求简短JSON解释，不复述全部行情。
 
 ```dotenv
 FIB_PA_AI_READ_TIMEOUT_RETRIES=0
