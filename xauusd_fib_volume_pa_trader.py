@@ -23,6 +23,7 @@ import pandas as pd
 
 
 STRATEGIES = DEFAULT_REGISTRY
+ENTRY_CLOCK_VERSION = "closed-entry-clock-v1"
 
 
 def strategy_api():
@@ -58,6 +59,39 @@ def tick_clock_offset(tick, observed_at=None):
         return offset
     except (AttributeError, TypeError, ValueError, OverflowError):
         return None
+
+
+def closed_entry_readiness(m15_marker, m5_marker, tick, observed_at):
+    """Check raw current-bar boundaries against local UTC without advancing its clock."""
+    facts = {"ready": False, "reason": "", "observed_utc": observed_at,
+             "server_utc_offset": None, "raw_m15": m15_marker, "raw_m5": m5_marker,
+             "m15_boundary_utc": None, "m5_boundary_utc": None}
+    try:
+        observed = float(observed_at)
+        if isinstance(observed_at, bool) or not math.isfinite(observed) or observed <= 0:
+            raise ValueError("invalid observed local clock")
+    except (TypeError, ValueError, OverflowError):
+        facts["reason"] = "invalid_observed_clock"
+        return facts
+    offset = tick_clock_offset(tick, observed)
+    facts["server_utc_offset"] = offset
+    if offset is None:
+        facts["reason"] = "unknown_or_stale_tick_clock"
+        return facts
+    try:
+        for name, marker in (("m15", m15_marker), ("m5", m5_marker)):
+            value = float(marker)
+            if isinstance(marker, bool) or not math.isfinite(value) or value <= 0 or value != int(value):
+                raise ValueError("invalid raw current-bar marker")
+            facts[name + "_boundary_utc"] = value - offset * 3600
+    except (TypeError, ValueError, OverflowError):
+        facts["reason"] = "invalid_current_bar_marker"
+        return facts
+    if max(facts["m15_boundary_utc"], facts["m5_boundary_utc"]) > observed:
+        facts["reason"] = "local_clock_before_closed_entry_boundary"
+        return facts
+    facts["ready"] = True
+    return facts
 
 
 def research_execution_error(result, tick):
@@ -1655,6 +1689,24 @@ class FibVolumePATrader:
         state_path = os.getenv("FIB_PA_STRATEGY_STATE_FILE", "").strip() or os.path.join(LOG_DIR, "strategy_event_state.json")
         self.strategy_ledger = EventLedger(state_path)
         self.positions_known = None
+        self._entry_clock_defer_markers = None
+        self._entry_clock_defer_reasons = set()
+
+    def entry_clock_ready(self, m15_marker, m5_marker):
+        observed = time.time()
+        tick = mt5.symbol_info_tick(SYMBOL)
+        facts = closed_entry_readiness(m15_marker, m5_marker, tick, observed)
+        markers = (m15_marker, m5_marker)
+        if markers != self._entry_clock_defer_markers:
+            self._entry_clock_defer_markers = markers
+            self._entry_clock_defer_reasons.clear()
+        if not facts["ready"] and facts["reason"] not in self._entry_clock_defer_reasons:
+            self._entry_clock_defer_reasons.add(facts["reason"])
+            logger.info("入场收盘等待=%s reason=%s raw_M15=%s raw_M5=%s boundary_utc_M15=%s "
+                        "boundary_utc_M5=%s observed_utc=%s offset=%s", ENTRY_CLOCK_VERSION,
+                        facts["reason"], m15_marker, m5_marker, facts["m15_boundary_utc"],
+                        facts["m5_boundary_utc"], observed, facts["server_utc_offset"])
+        return facts["ready"]
 
     def evaluate_context(self, df_m15, df_h1, df_m5):
         observed = time.time()
@@ -2449,6 +2501,7 @@ class FibVolumePATrader:
             f"max_sl={MAX_SL_ABS}, chase={CHASE_MAX_ATR}ATR, trading={'ON' if ENABLE_TRADING else 'DRY-RUN'}"
         )
         logger.info("止损价格=%s BUY向下/SELL向上量化，严格保留M5极值缓冲与止损上限", STOP_PRICE_VERSION)
+        logger.info("入场时钟=%s 本地时钟到达M15/M5收盘边界前等待，同根K线下轮重查，护盘继续", ENTRY_CLOCK_VERSION)
         strategies = STRATEGIES.snapshot()
         logger.info("策略框架=%s fingerprint=%s loaded=%s error=%s", STRATEGY_FRAMEWORK_VERSION,
                     strategies.fingerprint, [s.id for s in strategies.strategies if s.enabled], strategies.error or "无")
@@ -2481,15 +2534,16 @@ class FibVolumePATrader:
                 current_bar_time = int(rates[0]["time"])
                 current_m5_time = int(m5_rates[0]["time"]) if m5_rates is not None and len(m5_rates) else 0
                 if current_bar_time != last_bar_time or current_m5_time != last_m5_time:
-                    last_bar_time = current_bar_time
-                    last_m5_time = current_m5_time
-                    try:
-                        self.evaluate_once()
-                    except Exception as exc:
-                        logger.error(f"策略评估异常: {type(exc).__name__}: {exc}")
+                    if self.entry_clock_ready(current_bar_time, current_m5_time):
+                        last_bar_time = current_bar_time
+                        last_m5_time = current_m5_time
+                        try:
+                            self.evaluate_once()
+                        except Exception as exc:
+                            logger.error(f"策略评估异常: {type(exc).__name__}: {exc}")
 
-                    if once:
-                        return 0
+                        if once:
+                            return 0
 
                 time.sleep(POLL_SECONDS)
         except KeyboardInterrupt:

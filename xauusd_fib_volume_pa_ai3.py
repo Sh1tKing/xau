@@ -2113,14 +2113,19 @@ class ThreeAITrader(base.FibVolumePATrader):
             reject = ""
             if "拒绝:" in (local_result.reasoning or ""):
                 reject = " 拒绝:" + local_result.reasoning.split("拒绝:", 1)[1].strip().replace("\n", " ")[:160]
+            assessments = (local_result.details or {}).get("strategy_assessments", {})
+            blockers = {side: assessments.get(side, {}).get("blockers", []) for side in ("buy", "sell")}
             base.logger.info(
-                "M5时机未到 action=%s confidence=%s BUY=%s SELL=%s%s"
+                "M5时机未到 action=%s confidence=%s BUY=%s SELL=%s%s 策略阻断BUY=%s SELL=%s 理由=%s"
                 % (
                     local_result.action,
                     local_result.confidence,
                     local_result.score_buy,
                     local_result.score_sell,
                     reject,
+                    blockers["buy"],
+                    blockers["sell"],
+                    (local_result.reasoning or "").replace("\n", " ")[:160],
                 )
             )
             return
@@ -2635,6 +2640,7 @@ class ThreeAITrader(base.FibVolumePATrader):
         base.logger.info("止损价格=%s BUY向下/SELL向上量化，严格保留M5极值缓冲与止损上限", base.STOP_PRICE_VERSION)
         base.logger.info("AI行情刷新=%s 每次POST采集新行情，AI-2及下单前复核现价，旧提案不跨收盘K线执行",
                          MARKET_FRESHNESS_VERSION)
+        base.logger.info("入场时钟=%s 本地时钟到达M15/M5收盘边界前等待，同根K线下轮重查，护盘继续", base.ENTRY_CLOCK_VERSION)
         base.logger.info("AI协议与JSON=%s 按主备URL分别适配；支持时优先Schema，DeepSeek官方Messages仅发送effort；格式错误不执行",
                          RESPONSE_CONTRACT_VERSION)
         base.logger.info("AI成本控制=%s token上限=%s 同通道读超时补发=%s 用量目录=%s",
@@ -2691,16 +2697,22 @@ class ThreeAITrader(base.FibVolumePATrader):
                 m15_time = self.latest_bar_time(base.ENTRY_BAR_TIMEFRAME)
                 m5_time = self.latest_bar_time(base.mt5.TIMEFRAME_M5)
                 m1_time = self.latest_bar_time(base.mt5.TIMEFRAME_M1)
-                if m15_time and m15_time != last_m15:
+                entry_ready = False
+                if (m15_time and m15_time != last_m15) or (m5_time and m5_time != last_m5):
+                    with self._mt5_lock:
+                        entry_ready = self.entry_clock_ready(m15_time, m5_time)
+                if entry_ready and m15_time and m15_time != last_m15:
                     trigger = "startup" if not last_m15 else "M15"
                     last_m15 = m15_time
+                    if m5_time == m15_time:
+                        last_m5 = m5_time  # This closed M5 is already covered by the M15 evaluation.
                     if once:
                         seq = self.claim_task("entry", m15_time, ENTRY_TAKEOVER_SEC)
                         if seq is not None:
                             self.entry_task(m15_time, seq, trigger)
                         return 0
                     self.dispatch_entry(m15_time, trigger)
-                if m5_time and m5_time != last_m5 and m5_time != m15_time and not once:
+                if entry_ready and m5_time and m5_time != last_m5 and m5_time != m15_time and not once:
                     last_m5 = m5_time
                     self.dispatch_m5_entry(m5_time)
                 if m1_time and m1_time != last_m1:
