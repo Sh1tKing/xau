@@ -253,6 +253,52 @@ class RegionTests(unittest.TestCase):
         self.assertEqual(f['target_obstacles'][0]['obstacle_price'],99.7)
         self.assertLess(f['target_obstacles'][0]['obstacle_price'],f['trigger_bar']['close'])
 
+    def test_unrelated_opposite_m5_history_does_not_block_support_entry(self):
+        from types import SimpleNamespace
+        df=data(21);df.loc[16,'high']=105.
+        bars=m5_after(df,1,{0:dict(low=98.6,close=100,open=100,high=101)})
+        facts=region_facts('rejection',df,bars,m5_clock(bars),0,'buy',P)
+        self.assertTrue(facts['closed_trigger']['confirmed'],facts)
+        self.assertEqual(facts['blockers'],[])
+        self.assertEqual(facts['target_obstacles'][0]['type'],'resistance')
+        self.assertTrue(facts['target_obstacles'][0]['atr_source_refs'])
+        context=SimpleNamespace(df_m15=df,df_m5=bars,now=m5_clock(bars),server_utc_offset=0,
+            action='buy',h1_trend='bull')
+        self.assertEqual(REJECTION.evaluate(context).score,85)
+        affected=region_facts('rejection',df,bars.iloc[2:],m5_clock(bars),0,'buy',P)
+        self.assertFalse(affected['closed_trigger']['confirmed'])
+        self.assertTrue(affected['blockers'])
+
+    def test_unselected_same_direction_region_gap_is_only_diagnostic(self):
+        df=data(21);df.loc[14,'low']=98.
+        bars=m5_after(df,1,{0:dict(low=98.6,close=100,open=100,high=101)})
+        facts=region_facts('rejection',df,bars,m5_clock(bars),0,'buy',P)
+        self.assertTrue(facts['closed_trigger']['confirmed'],facts)
+        self.assertEqual(facts['blockers'],[])
+        missing=[d for d in facts['candidates'] if d['status']=='missing relevant M5 episode coverage']
+        self.assertEqual(len(missing),1)
+        self.assertTrue(missing[0]['blockers'])
+        self.assertNotEqual(missing[0]['region_id'],facts['region']['region_id'])
+
+    def test_selected_region_missing_prefix_rejects_with_diagnostic(self):
+        df=data(22)
+        bars=m5_after(df,4,{3:dict(low=98.6,close=100,open=100,high=101)})
+        bars=bars.drop(index=1)  # last3 protection intact; missing preconfirmation provenance only
+        facts=region_facts('rejection',df,bars,m5_clock(bars),0,'buy',P)
+        self.assertFalse(facts['closed_trigger']['confirmed'])
+        self.assertIn('missing relevant M5 episode coverage',facts['blockers'])
+        self.assertEqual(facts['candidates'][0]['status'],'missing relevant M5 episode coverage')
+
+    def test_unknown_global_m15_obstacle_source_keeps_selected_unexecutable(self):
+        from unittest.mock import patch
+        df=data(21);bars=m5_after(df,1,{0:dict(low=98.6,close=100,open=100,high=101)})
+        source=confirmed_regions(df,clock(df),0,P)
+        source['blockers'].append('missing relevant M15 pivot/ATR coverage')
+        with patch('strategies.regions.confirmed_regions',return_value=source):
+            facts=region_facts('rejection',df,bars,m5_clock(bars),0,'buy',P)
+        self.assertFalse(facts['closed_trigger']['confirmed'])
+        self.assertIn('missing relevant M15 pivot/ATR coverage',facts['blockers'])
+
     def test_disabled_contract_and_baseline_registry(self):
         for s in [STRATEGY,REJECTION]:
             self.assertFalse(s.enabled);self.assertFalse(s.m5_boost)

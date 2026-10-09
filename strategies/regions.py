@@ -161,22 +161,22 @@ def region_facts(kind, df_m15, df_m5, now, server_offset_hours, action, params):
         for region in found['regions']:
             diagnostic = {'region_id': region['region_id'], 'status': 'no_first_trigger'}
             out['candidates'].append(diagnostic)
+            if kind == 'rejection' and region['type'] != ('support' if action == 'buy' else 'resistance'):
+                diagnostic['status'] = 'opposite region type'
+                continue
             confirm_raw = region['confirmation_bar_time']+900
             sequence = [r for r in m5 if r['time'] >= confirm_raw]
             if (not sequence or sequence[0]['time'] != confirm_raw or not _continuous(sequence, 300)
                     or confirm_raw-300 not in {r['time'] for r in m5}
                     or not _continuous([r for r in m15 if r['time'] >= region['confirmation_bar_time']], 900)):
                 diagnostic['status'] = 'missing relevant M5 episode coverage'
-                out['blockers'].append(diagnostic['status'])
+                diagnostic['blockers'] = [diagnostic['status']]
                 continue
             cycles = _cycles(region, sequence, m15, server_offset_hours, params)
             edge = region['upper'] if action == 'buy' else region['lower']
             atr = region['atr']
             trigger, episode, breakout = None, None, None
             if kind == 'rejection':
-                if region['type'] != ('support' if action == 'buy' else 'resistance'):
-                    diagnostic['status'] = 'opposite region type'
-                    continue
                 invalid, used = set(), set()
                 for bar, ep in cycles:
                     if ep is None:
@@ -267,8 +267,11 @@ def region_facts(kind, df_m15, df_m5, now, server_offset_hours, action, params):
                 out['blockers'].append(error)
                 out['closed_trigger']['confirmed'] = False
         else:
+            out['blockers'].extend(b for d in out['candidates'] for b in d.get('blockers', []))
             out['blockers'].append('no latest first region trigger')
         out['blockers'] = sorted(set(out['blockers']))
+        if out['blockers']:
+            out['closed_trigger']['confirmed'] = False
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         out['blockers'].append(str(exc))
     return out
