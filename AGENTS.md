@@ -22,7 +22,7 @@
 - 提交说明用一句中文，说明行为变化，不写空泛的 “update”。
 - 不主动推送远程，除非用户明确要求。
 - 不启动实盘或模拟盘进程。正在运行的进程要用户自己重启后才会加载新代码。
-- `https://github.com/Sh1tKing/xau.git` 使用干净的 `codex/publish-master` 快照推送到远程 `master`。本地旧历史含无关脚本的硬编码密钥，禁止直接推送本地master历史；公开快照只含README、AGENTS、.gitignore、.env.example、三个黄金脚本、tests和docs，后续发布以公开分支上次提交为父提交。保留本地master历史，不上传.env、日志、server_deploy、.claude和无关脚本。
+- `https://github.com/Sh1tKing/xau.git` 使用干净的 `codex/publish-master` 快照推送到远程 `master`。本地旧历史含无关脚本的硬编码密钥，禁止直接推送本地master历史；公开快照只含README、AGENTS、.gitignore、.env.example、三个黄金脚本、strategies、tests和docs，后续发布以公开分支上次提交为父提交。保留本地master历史，不上传.env、日志、server_deploy、.claude和无关脚本。
 
 ## 当前架构
 
@@ -30,6 +30,7 @@
 
 - `xauusd_fib_volume_pa_trader.py`：本地策略、下单、虚拟锁盈和单票平仓。
 - `xauusd_fib_volume_pa_ai3.py`：AI-1、AI-2、AI-3。它调用本地策略，不复制一套规则。
+- `strategies/definitions/*.py`：策略定义唯一入口，集中评分、参数、证据及AI三角色规则；`strategies/framework.py`自动发现并按文件内容指纹重载。原三个策略默认行为不变，新实验不自动启用。评分异常/语法错误/重复id/无启用策略阻止新入场，持仓护盘继续。旧AI提案绑定原指纹，定义改变即停止审核/执行；已开仓的策略契约和证据保留给AI-3。回测开始冻结定义，不运行中换策略。新策略硬条件写Assessment.blockers，Python也执行，不只靠提示词。目标倍数可在1.5–6内调整，默认1.8，公共SL8/RR1.5/H1/追价/M5保护限制不能覆盖。模板和说明见docs/strategies，CLI `python -m strategies.check`不连接MT5。部署必须复制完整strategies包，框架首次部署需用户重启，此后定义文件在下一次评估/刷新自动检查；辅助模块/.env仍需重启。不要宣传自动从自然语言推导策略或已验证收益。
 - 日志目录：`xau_fib_pa_logs/`。密钥只放 `.env`。
 - `xauusd_fib_pa_backtest.py`：用 MT5 历史 K 线回放本地策略，不调用 AI，不下单。每根已收盘 M5 评估一次，M1 上模拟成交和本地护盘，同一根 M1 同时碰到止损和止盈按止损算。结果写到 `xau_fib_pa_logs/backtest/`。改了本地策略先跑它再上模拟盘。MT5 的 `copy_rates_from_pos` 一次要几十万根会返回 Invalid params，回测按约 2 万根分页，页被拒绝就再缩小。终端图表最大柱数不够时只拿到已有的K线并提示，不把这当成策略拒绝。
 - 回测参数：`--balance` 起始资金（默认 100），`--max-sl` 止损上限（默认读 `.env` 的 `FIB_PA_MAX_SL_ABS`）。`--max-sl` 只改这次回测，不改实盘。报告会写止损上限、单笔最多亏起始资金的比例、资金最低点和是否归零。

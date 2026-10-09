@@ -147,6 +147,9 @@ def reject_key(reasoning):
 
 class Backtest:
     def __init__(self, data, meta, threshold, spread_points=None):
+        self.strategy_snapshot = base.STRATEGIES.snapshot()
+        if self.strategy_snapshot.error:
+            raise base.StrategyError(self.strategy_snapshot.error)
         self.offset = float(meta["server_offset"])
         self.point = float(meta["point"])
         self.lot_value = float(meta["contract_size"]) * base.LOT_SIZE
@@ -192,7 +195,8 @@ class Backtest:
         self.stats["评估次数"] += 1
         try:
             result = base.build_fib_volume_pa_decision(
-                df_m15, df_h1, df_m5, self.threshold, now=beijing(ts, self.offset)
+                df_m15, df_h1, df_m5, self.threshold, now=beijing(ts, self.offset),
+                strategy_snapshot=self.strategy_snapshot
             )
         except Exception as exc:
             self.stats["评估异常"] += 1
@@ -234,6 +238,7 @@ class Backtest:
             "score": result.confidence,
             "session": details.get("session", ""),
             "setup": details.get("setup", ""),
+            "setup_name": details.get("strategy_contract", {}).get("name"),
         }
         self.stats["成交"] += 1
 
@@ -246,7 +251,7 @@ class Backtest:
             "open_bj": beijing(pos["open_ts"], self.offset).strftime("%Y-%m-%d %H:%M"),
             "close_bj": beijing(ts, self.offset).strftime("%Y-%m-%d %H:%M"),
             "session": base.SESSION_TEXT.get(pos["session"], pos["session"]),
-            "setup": base.SETUP_TEXT.get(pos["setup"], pos["setup"]),
+            "setup": pos.get("setup_name") or base.SETUP_TEXT.get(pos["setup"], pos["setup"]),
             "side": pos["side"].upper(),
             "score": pos["score"],
             "entry": round(state.entry_price, 3),
@@ -499,8 +504,12 @@ def main():
     print("回放 %s 到 %s，M1 共 %d 根" % (meta["start_bj"], meta["end_bj"], len(m1)))
 
     test = Backtest(data, meta, args.threshold, args.spread)
+    print("策略框架 %s，定义指纹 %s" % (base.STRATEGY_FRAMEWORK_VERSION, test.strategy_snapshot.fingerprint))
+    meta["strategy_fingerprint"] = test.strategy_snapshot.fingerprint
+    meta["strategy_framework"] = base.STRATEGY_FRAMEWORK_VERSION
     trades = test.run()
     report = summarize(trades, test.stats, test.rejects, meta, args.balance)
+    report += "\n\n策略框架: %s\n定义指纹: %s" % (meta["strategy_framework"], meta["strategy_fingerprint"])
     print()
     print(report)
 

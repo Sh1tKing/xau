@@ -9,6 +9,8 @@ import math
 import os
 import sys
 import time
+from types import SimpleNamespace
+from strategies.framework import Context, DEFAULT_REGISTRY, StrategyError, VERSION as STRATEGY_FRAMEWORK_VERSION
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -17,6 +19,16 @@ from urllib import error, request
 
 import MetaTrader5 as mt5
 import pandas as pd
+
+
+STRATEGIES = DEFAULT_REGISTRY
+
+
+def strategy_api():
+    """Math helpers only; plugins receive no trader or MT5 instance."""
+    names = ('fib_score_for_action', 'classify_volume_state', 'classify_price_action',
+             'trend_score_for_action', 'setup_details', 'FibLevels')
+    return SimpleNamespace(**{name: globals()[name] for name in names})
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1168,7 +1180,7 @@ def guarded_structure_price(action: str, entry_price: float, candidates, protect
     return max(fitting) if fitting else None
 
 
-def reject_inside_m5_wick(action, entry, stop_loss, take_profit, atr, fib, df_m5):
+def reject_inside_m5_wick(action, entry, stop_loss, take_profit, atr, fib, df_m5, target_r=1.8):
     extreme = recent_m5_extreme(df_m5, action)
     if not m5_extreme_on_stop_side(action, entry, extreme):
         return stop_loss, take_profit, ""
@@ -1179,7 +1191,7 @@ def reject_inside_m5_wick(action, entry, stop_loss, take_profit, atr, fib, df_m5
         return 0.0, 0.0, m5_wick_reject_text()
     if stop_covers_m5_extreme(action, stop_loss, extreme, atr):
         return stop_loss, take_profit, ""
-    new_sl, new_tp = calculate_targets(action, entry, atr, fib, extreme, extreme)
+    new_sl, new_tp = calculate_targets(action, entry, atr, fib, extreme, extreme, target_r=target_r)
     if new_sl <= 0:
         boundary = extreme + stop_buffer(atr) if action == "sell" else extreme - stop_buffer(atr)
         safe_sl = round_protective_stop(action, boundary)
@@ -1198,7 +1210,10 @@ def calculate_targets(
     fib: Optional[FibLevels],
     setup_price: Optional[float] = None,
     protect_extreme: Optional[float] = None,
+    target_r: float = 1.8,
 ) -> Tuple[float, float]:
+    if not math.isfinite(target_r) or not MIN_REWARD_RISK <= target_r <= 6:
+        return 0.0, 0.0
     atr = max(atr, 0.01)
     buffer = stop_buffer(atr)
     min_risk, max_risk = entry_risk_limits(atr)
@@ -1225,7 +1240,7 @@ def calculate_targets(
         risk = entry_price - stop_loss
         if risk <= 0 or risk > max_risk + 0.001:
             return 0.0, 0.0
-        rr_target = entry_price + 1.8 * risk
+        rr_target = entry_price + target_r * risk
         structure_target = fib.swing_high if fib and fib.swing_high > entry_price else rr_target
         structure_reward = structure_target - entry_price
         if structure_target < rr_target and risk > 0 and structure_reward >= MIN_REWARD_RISK * risk:
@@ -1255,7 +1270,7 @@ def calculate_targets(
     risk = stop_loss - entry_price
     if risk <= 0 or risk > max_risk + 0.001:
         return 0.0, 0.0
-    rr_target = entry_price - 1.8 * risk
+    rr_target = entry_price - target_r * risk
     structure_target = fib.swing_low if fib and fib.swing_low < entry_price else rr_target
     structure_reward = entry_price - structure_target
     if structure_target > rr_target and risk > 0 and structure_reward >= MIN_REWARD_RISK * risk:
@@ -1312,71 +1327,15 @@ def is_structure_failure(df: pd.DataFrame, action: str, state: GuardianState, at
     return False, "结构未失效"
 
 
-def score_candidate(
-    action: str,
-    df_m15: pd.DataFrame,
-    fib: Optional[FibLevels],
-    atr: float,
-    h1_trend: str,
-    m15_trend: str,
-    adx: float,
-):
-    price = float(df_m15["close"].iloc[-1])
-    fib_score, fib_text = fib_score_for_action(action, fib, price, atr, df_m15)
-    volume = classify_volume_state(df_m15)
-    pa_score, pa_text = classify_price_action(df_m15, action, atr)
-    trend_score, trend_text = trend_score_for_action(action, h1_trend, m15_trend)
-    if adx >= 25:
-        trend_text = f"{trend_text}；ADX={adx:.1f}趋势清楚"
-    elif adx > 0:
-        trend_text = f"{trend_text}；ADX={adx:.1f}"
-
-    core_count = int(fib_score >= 25) + int(volume["score"] >= 15) + int(pa_score >= 18)
-    score = fib_score + int(volume["score"]) + pa_score + trend_score
-    if core_count == 3:
-        score += 5
-    elif core_count <= 1:
-        score -= 12
-    if adx < 14 and core_count < 3:
-        score -= 8
-
-    score = max(0, min(100, score))
-    return score, {
-        "fib": fib_text,
-        "volume": str(volume["summary"]),
-        "price_action": pa_text,
-        "trend": trend_text,
-        "core_count": str(core_count),
-        "pa_score": str(pa_score),
-        "fib_score": str(fib_score),
-    }
+def score_candidate(action, df_m15, fib, atr, h1_trend, m15_trend, adx):
+    result = STRATEGIES.snapshot().get("pullback").assess(Context(action, df_m15, None, None, fib, atr, h1_trend, m15_trend, adx, "", strategy_api()))
+    return result.score, result.details
 
 
 
-def momentum_score(action: str, setup: str, rsi: float, hist: float, prev_hist: float) -> Tuple[int, str]:
-    score = 0
-    notes = []
-    sign = 1 if action == "buy" else -1
-    rsi_dir = rsi if action == "buy" else 100.0 - rsi
-    if rsi_dir >= 75:
-        score -= 12
-        notes.append("RSI已到极端区，不追")
-    elif setup == "range_edge" and rsi_dir <= 40:
-        score += 10
-        notes.append("RSI在区间边缘偏离")
-    elif setup == "pullback" and 35 <= rsi_dir <= 55:
-        score += 5
-        notes.append("RSI回撤降温")
-    if sign * hist > 0 or sign * (hist - prev_hist) > 0:
-        score += 5
-        notes.append("MACD动能同向")
-    elif setup == "breakout":
-        score -= 8
-        notes.append("MACD没跟上突破")
-    text = "RSI=%.1f, MACD柱=%.2f" % (rsi, hist)
-    if notes:
-        text += "，" + "，".join(notes)
-    return score, text
+def momentum_score(action, setup, rsi, hist, prev_hist):
+    strategy = STRATEGIES.snapshot().get(setup)
+    return strategy.momentum(action, rsi, hist, prev_hist) if strategy.momentum else (0, "")
 
 
 def setup_details(fib_text, volume, pa_score, pa_text, trend_text, edge_score):
@@ -1391,40 +1350,18 @@ def setup_details(fib_text, volume, pa_score, pa_text, trend_text, edge_score):
     }
 
 
-def score_range_edge(action: str, df_m15: pd.DataFrame, atr: float, h1_trend: str, m15_trend: str):
-    window = df_m15.tail(RANGE_LOOKBACK)
-    low = float(window["low"].min())
-    high = float(window["high"].max())
-    box = max(high - low, 1e-9)
-    box_atr = box / atr
-    price = float(df_m15["close"].iloc[-1])
-    location = (price - low) / box
-    structure = FibLevels("bull" if action == "buy" else "bear", low, high, {})
-    volume = classify_volume_state(df_m15)
-    pa_score, pa_text = classify_price_action(df_m15, action, atr)
-    trend_score, trend_text = trend_score_for_action(action, h1_trend, m15_trend)
-    edge_loc = location if action == "buy" else 1.0 - location
-    box_text = "24根M15区间 %.2f-%.2f (%.2fATR), location=%.2f" % (low, high, box_atr, location)
-    if box_atr < 2.0:
-        return 0, setup_details(box_text + "，区间太窄", volume, pa_score, pa_text, trend_text, 0), structure
-    if box_atr > 7.0:
-        return 0, setup_details(box_text + "，区间过宽，不按震荡做", volume, pa_score, pa_text, trend_text, 0), structure
-    if edge_loc > 0.3:
-        return 0, setup_details(box_text + "，不在区间边缘", volume, pa_score, pa_text, trend_text, 0), structure
-    edge_score = 30 if edge_loc <= 0.18 else 22
-    score = edge_score + pa_score + int(volume["score"]) + trend_score
-    if pa_score < 12:
-        score = min(score, 50)
-        pa_text += "，边缘缺少拒绝K线"
-    return max(0, min(100, score)), setup_details(box_text, volume, pa_score, pa_text, trend_text, edge_score), structure
+def score_range_edge(action, df_m15, atr, h1_trend, m15_trend):
+    result = STRATEGIES.snapshot().get("range_edge").assess(Context(action, df_m15, None, None, None, atr, h1_trend, m15_trend, 0, "", strategy_api()))
+    return result.score, result.details, result.structure
 
 
-def breakout_retest_facts(recent, broke, edge, atr, action):
+def breakout_retest_facts(recent, broke, edge, atr, action, retest_atr=.35):
+    # Generic geometry helper; the strategy supplies its own tolerance.
     """Shared closed-bar retest facts for local scoring and AI evidence."""
     sign = 1 if action == "buy" else -1
     after = recent.loc[broke.index[0] + 1:] if not broke.empty else recent.iloc[:0]
     field = "low" if action == "buy" else "high"
-    touches = after[sign * (after[field] - edge) <= 0.35 * atr]
+    touches = after[sign * (after[field] - edge) <= retest_atr * atr]
     probe = None if after.empty else float(after[field].min() if action == "buy" else after[field].max())
     holds = bool(not broke.empty and sign * (float(recent.iloc[-1]["close"]) - edge) > 0)
     return {"after": after, "touches": touches, "probe": probe,
@@ -1432,48 +1369,9 @@ def breakout_retest_facts(recent, broke, edge, atr, action):
             "retest_holds": bool(not touches.empty and holds)}
 
 
-def score_breakout(action: str, df_m15: pd.DataFrame, atr: float, h1_trend: str, m15_trend: str):
-    work = df_m15.reset_index(drop=True)
-    direction = "bull" if action == "buy" else "bear"
-    empty_volume = {"score": 0, "summary": "突破样本不足"}
-    if len(work) < BREAKOUT_BOX + 26:
-        return 0, setup_details("突破样本不足", empty_volume, 0, "", "", 0), None
-    box = work.iloc[-(BREAKOUT_BOX + 4):-4]
-    recent = work.iloc[-4:]
-    low = float(box["low"].min())
-    high = float(box["high"].max())
-    box_atr = (high - low) / atr
-    structure = FibLevels(direction, low, high, {})
-    pa_score, pa_text = classify_price_action(df_m15, action, atr)
-    trend_score, trend_text = trend_score_for_action(action, h1_trend, m15_trend)
-    box_text = "突破前16根箱体 %.2f-%.2f (%.2fATR)" % (low, high, box_atr)
-    vol_ma = float(work["tick_volume"].iloc[-24:-4].mean())
-    if box_atr > 3.5 or vol_ma <= 0:
-        return 0, setup_details(box_text + "，突破前没有收敛", empty_volume, pa_score, pa_text, trend_text, 0), structure
-    edge = high if action == "buy" else low
-    sign = 1 if action == "buy" else -1
-    pushes = recent.iloc[:-1]
-    broke = pushes[sign * (pushes["close"] - edge) > 0.1 * atr]
-    last = recent.iloc[-1]
-    if broke.empty:
-        return 0, setup_details(box_text + "，没有收盘突破", empty_volume, pa_score, pa_text, trend_text, 0), structure
-    if sign * (float(last["close"]) - edge) <= 0:
-        return 0, setup_details(box_text + "，回踩收回箱体，突破失败", empty_volume, pa_score, pa_text, trend_text, 0), structure
-    # The retest must happen after the first breakout close; the breakout bar's own wick is still inside the box.
-    retested = breakout_retest_facts(recent, broke, edge, atr, action)["retested"]
-    break_ratio = float(broke["tick_volume"].max()) / vol_ma
-    break_score = 25 if break_ratio >= 1.3 else 15 if break_ratio >= 1.1 else 5
-    volume = {"score": break_score, "summary": "突破K量能 %.2fx" % break_ratio}
-    retest_score = 30 if retested else 0
-    holds = (float(last["close"]) > float(last["open"])) if action == "buy" else (float(last["close"]) < float(last["open"]))
-    if holds and pa_score < 12:
-        pa_score = 12
-        pa_text = (pa_text + "，回踩后收" + ("阳" if action == "buy" else "阴")).strip("，")
-    text = box_text + ("，回踩到箱体边缘后守住" if retested else "，没有回踩，属于追突破")
-    score = break_score + retest_score + pa_score + trend_score
-    if not retested:
-        score = min(score, 45)
-    return max(0, min(100, score)), setup_details(text, volume, pa_score, pa_text, trend_text, retest_score), structure
+def score_breakout(action, df_m15, atr, h1_trend, m15_trend):
+    result = STRATEGIES.snapshot().get("breakout").assess(Context(action, df_m15, None, None, None, atr, h1_trend, m15_trend, 0, "", strategy_api()))
+    return result.score, result.details, result.structure
 
 
 def build_fib_volume_pa_decision(
@@ -1482,7 +1380,15 @@ def build_fib_volume_pa_decision(
     df_m5: pd.DataFrame,
     threshold=80,
     now: Optional[datetime] = None,
+    strategy_snapshot=None,
 ) -> StrategyResult:
+    snapshot = strategy_snapshot if strategy_snapshot is not None else STRATEGIES.snapshot()
+    session = trading_session(now)
+    active = snapshot.active(session)
+    if snapshot.error or not active:
+        reason = snapshot.error or f"时段{session}没有启用策略"
+        return StrategyResult("no", 0, False, reason, 0., 0., 0, 0,
+                              {"strategy_error": reason, "strategy_fingerprint": snapshot.fingerprint})
     atr = calculate_atr(df_m15)
     if atr <= 0:
         return StrategyResult("no", 0, False, "ATR无效，拒绝交易", 0.0, 0.0, 0, 0, {})
@@ -1506,45 +1412,55 @@ def build_fib_volume_pa_decision(
         details["price_action"] = f"{details.get('price_action', '')}；M5拒绝确认: {m5_text}"
         return max(0, min(100, score + m5_pa - old_pa))
 
-    session = trading_session(now)
     rsi = calculate_rsi(df_m15)
     hist, prev_hist = macd_histogram(df_m15)
     picks = {}
-    for side in ("buy", "sell"):
-        best = None
-        for setup in SESSION_SETUPS[session]:
-            if setup == "pullback":
-                score, details = score_candidate(side, df_m15, fib, atr, h1_trend, m15_trend, adx)
-                structure = fib
-            elif setup == "range_edge":
-                score, details, structure = score_range_edge(side, df_m15, atr, h1_trend, m15_trend)
-            else:
-                score, details, structure = score_breakout(side, df_m15, atr, h1_trend, m15_trend)
-            bonus, momentum_text = momentum_score(side, setup, rsi, hist, prev_hist)
-            if score > 0:
-                score = boost_m5(side, score, details)
-                score = max(0, min(100, score + bonus))
-            details["momentum"] = momentum_text
-            details["regime"] = regime
-            details["regime_text"] = regime_text
-            details["location"] = str(regime_meta.get("location", 0.5))
-            details["session"] = session
-            details["setup"] = setup
-            if best is None or score > best[0]:
-                best = (score, details, structure)
-        picks[side] = best
+    assessments = {}
+    try:
+        for side in ("buy", "sell"):
+            best = None
+            for strategy in active:
+                context = Context(side, df_m15, df_h1, df_m5, fib, atr, h1_trend, m15_trend, adx, session, strategy_api())
+                result = strategy.assess(context)
+                score, details, structure = result.score, dict(result.details), result.structure
+                # Keep generic fields available for custom strategies, without fabricating facts.
+                for key in ("fib", "volume", "price_action", "trend"):
+                    details.setdefault(key, "")
+                bonus, momentum_text = strategy.momentum(side, rsi, hist, prev_hist) if strategy.momentum else (0, "")
+                if type(bonus) is not int or not isinstance(momentum_text, str):
+                    raise StrategyError(f"{strategy.id} momentum返回类型错误")
+                if score > 0:
+                    if strategy.m5_boost:
+                        score = boost_m5(side, score, details)
+                    score = max(0, min(100, score + bonus))
+                details.update(momentum=momentum_text, regime=regime, regime_text=regime_text,
+                               location=str(regime_meta.get("location", .5)), session=session, setup=strategy.id,
+                               strategy_contract=strategy.manifest(), strategy_fingerprint=snapshot.fingerprint,
+                               strategy_blockers=list(result.blockers))
+                assessments.setdefault(strategy.id, {})[side] = {
+                    "score": score, "evidence": result.evidence, "blockers": list(result.blockers)}
+                if best is None or score > best[0]:
+                    best = (score, details, structure)
+            picks[side] = best
+    except Exception as exc:
+        reason = f"策略评估失败: {type(exc).__name__}: {exc}"
+        return StrategyResult("no", 0, False, reason, 0., 0., 0, 0,
+                              {"strategy_error": reason, "strategy_fingerprint": snapshot.fingerprint})
+    for _, details, _ in picks.values():
+        details["strategy_assessments"] = assessments[details["setup"]]
     buy_score, buy_details, buy_structure = picks["buy"]
     sell_score, sell_details, sell_structure = picks["sell"]
 
     def label(details: dict) -> str:
         return "[%s/%s] " % (
             SESSION_TEXT.get(details.get("session", session), session),
-            SETUP_TEXT.get(details.get("setup", ""), details.get("setup", "")),
+            details.get("strategy_contract", {}).get("name", details.get("setup", "")),
         )
 
     def finish(action: str, score: int, details: dict, fib: Optional[FibLevels]) -> StrategyResult:
-        blocks = []
-        if details.get("setup") == "pullback":
+        blocks = list(details.get("strategy_blockers", []))
+        target_r = details["strategy_contract"]["target_max_reference_r"]
+        if details["strategy_contract"].get("regime_filter") == "pullback":
             regime_block = regime_blocks_entry(
                 action, regime, regime_text, regime_meta, int(details.get("pa_score", 0))
             )
@@ -1565,7 +1481,7 @@ def build_fib_volume_pa_decision(
         if protect is not None and m5_extreme_risk(action, entry_price, protect, atr) > MAX_SL_ABS:
             blocks.append(m5_wick_reject_text())
         else:
-            stop_loss, take_profit = calculate_targets(action, entry_price, atr, fib, setup_price, protect)
+            stop_loss, take_profit = calculate_targets(action, entry_price, atr, fib, setup_price, protect, target_r=target_r)
             if stop_loss <= 0 and not blocked:
                 timed = m5_rejection_anchor(df_m5, action, atr)
                 if timed is not None:
@@ -1576,11 +1492,11 @@ def build_fib_volume_pa_decision(
                         blocks.append(m5_wick_reject_text())
                         stop_loss, take_profit = 0.0, 0.0
                     else:
-                        stop_loss, take_profit = calculate_targets(action, entry_price, atr, fib, setup_price, protect)
+                        stop_loss, take_profit = calculate_targets(action, entry_price, atr, fib, setup_price, protect, target_r=target_r)
                         details["entry_note"] = f"M5极值仍在{MAX_SL_ABS:g}美元内"
             if stop_loss > 0 and protect is not None and not stop_covers_m5_extreme(action, stop_loss, protect, atr):
                 guarded_sl, guarded_tp, guard_note = reject_inside_m5_wick(
-                    action, entry_price, stop_loss, take_profit, atr, fib, df_m5
+                    action, entry_price, stop_loss, take_profit, atr, fib, df_m5, target_r=target_r
                 )
                 if guarded_sl <= 0:
                     blocks.append(guard_note or m5_wick_reject_text())
@@ -1624,7 +1540,10 @@ def build_fib_volume_pa_decision(
 
     if buy_score >= threshold and sell_score >= threshold and abs(buy_score - sell_score) <= 5:
         reasoning = f"多空评分接近，拒绝追单。BUY={buy_score}, SELL={sell_score}"
-        return StrategyResult("no", max(buy_score, sell_score), False, reasoning, 0.0, 0.0, buy_score, sell_score, {})
+        chosen = sell_details if h1_trend == "bear" else buy_details
+        metadata = {key: value for key, value in chosen.items() if key.startswith("strategy_")}
+        metadata.update(setup=chosen["setup"], session=session)
+        return StrategyResult("no", max(buy_score, sell_score), False, reasoning, 0.0, 0.0, buy_score, sell_score, metadata)
 
     if buy_score >= threshold and buy_score > sell_score:
         return finish("buy", buy_score, buy_details, buy_structure)
@@ -2142,6 +2061,13 @@ class FibVolumePATrader:
         action = result.action
         if action not in ("buy", "sell"):
             return False
+        fingerprint = (result.details or {}).get("strategy_fingerprint")
+        if fingerprint:
+            try:
+                STRATEGIES.require_current(fingerprint)
+            except StrategyError as exc:
+                logger.warning("拒绝旧策略下单: %s", exc)
+                return False
 
         self.last_order_ticket = 0
 
@@ -2227,6 +2153,12 @@ class FibVolumePATrader:
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
 
+        if fingerprint:
+            try:
+                STRATEGIES.require_current(fingerprint)
+            except StrategyError as exc:
+                logger.warning("提交前策略已改变: %s", exc)
+                return False
         order_result = mt5.order_send(request_body)
         if order_result is None:
             logger.error("❌ 订单发送失败: 返回 None")
@@ -2315,6 +2247,9 @@ class FibVolumePATrader:
             f"max_sl={MAX_SL_ABS}, chase={CHASE_MAX_ATR}ATR, trading={'ON' if ENABLE_TRADING else 'DRY-RUN'}"
         )
         logger.info("止损价格=%s BUY向下/SELL向上量化，严格保留M5极值缓冲与止损上限", STOP_PRICE_VERSION)
+        strategies = STRATEGIES.snapshot()
+        logger.info("策略框架=%s fingerprint=%s loaded=%s error=%s", STRATEGY_FRAMEWORK_VERSION,
+                    strategies.fingerprint, [s.id for s in strategies.strategies if s.enabled], strategies.error or "无")
 
         last_bar_time = 0
         last_m5_time = 0

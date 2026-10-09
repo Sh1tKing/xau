@@ -1,9 +1,9 @@
 # 三AI黄金策略服务器部署
 
 此部署包的代码提交以 `MANIFEST.json` 为准，证据版本 `entry-evidence-v5`，评分版本 `entry-quality-v2`，行情刷新版本 `request-freshness-v2`，JSON契约版本 `response-contract-v2`。
-运行入口是 `xauusd_fib_volume_pa_ai3.py`，它会导入同目录的 `xauusd_fib_volume_pa_trader.py`。
+运行入口是 `xauusd_fib_volume_pa_ai3.py`，它会导入同目录的 `xauusd_fib_volume_pa_trader.py` 和完整 `strategies/` 包。
 
-若从GitHub源码部署：将这两个脚本及 `docs/deployment` 下的 `requirements.txt`、`install.cmd`、`start.cmd` 放在同一目录，再将 `.env.example` 复制为 `.env` 并填写自己的账户及接口配置。公开仓库不包含私人 `server_deploy` 目录、实际 `.env`、日志或持仓状态。下述“部署包”指本机生成的私人目录。
+若从GitHub源码部署：将这两个脚本、完整 `strategies/` 文件夹及 `docs/deployment` 下的 `requirements.txt`、`install.cmd`、`start.cmd` 放在同一目录，再将 `.env.example` 复制为 `.env` 并填写自己的账户及接口配置。公开仓库不包含私人 `server_deploy` 目录、实际 `.env`、日志或持仓状态。下述“部署包”指本机生成的私人目录。
 
 ## 服务器环境
 
@@ -84,6 +84,7 @@ Chat Completions使用 `reasoning_effort`。GPT/o系列用 `max_completion_token
 ## 文件说明
 
 - 两个 `.py`：三AI与本地策略/交易/护盘模块。
+- `strategies/`：必需的框架、公共证据工具和策略定义，保留文件夹结构。更新策略只改 `definitions/*.py`；部署新框架第一次仍需自行重启。参见策略文件说明。
 - `.env`：当前实际配置，含密钥和账户信息，仅私下传输保存，不提交Git或公开上传。
 - `requirements.txt`：当前已安装的三个直接依赖版本。
 - `install.cmd` / `start.cmd`：安装与启动入口。
