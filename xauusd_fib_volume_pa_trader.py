@@ -1,3 +1,4 @@
+import copy
 import argparse
 import atexit
 import base64
@@ -11,7 +12,9 @@ import sys
 import time
 from types import SimpleNamespace
 from strategies.framework import Context, DEFAULT_REGISTRY, StrategyError, VERSION as STRATEGY_FRAMEWORK_VERSION
-from strategies.lifecycle import EventLedger
+from strategies.lifecycle import EventLedger, execution_token, recovery_event
+from strategies.events import validate_entry_event
+from strategies.regions import region_facts
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -46,6 +49,79 @@ def strategy_reference(df_m15, df_m5, contract):
     return (float(frame["close"].iloc[-1]),
             "confirmed_closed_m5_close" if use_m5 else "previous_closed_m15_close",
             int(frame["time"].iloc[-1]) if "time" in frame else 0)
+
+
+def opportunity_eligible(opportunity):
+    """Structural permission is independent of the locally generated SL/TP."""
+    return not opportunity.get("structural_blockers")
+
+
+def verified_region_evidence(action, df_m15, df_m5, now, offset, evidence, parameters, kind):
+    """Reconstruct complete source facts before freezing any region risk limits."""
+    actual = region_facts(kind, df_m15, df_m5, now, offset, action, parameters)
+    if actual.get("blockers") or not actual.get("closed_trigger", {}).get("confirmed"):
+        raise StrategyError("区域源数据没有可验证首次事件")
+    for key in ("region", "entry_event", "event_id", "risk_anchor", "target_obstacles",
+                "active_window", "protection_bars", "trigger_bar", "breakout_bar", "closed_trigger"):
+        if evidence.get(key) != actual.get(key):
+            raise StrategyError("区域证据与原始行情不一致: " + key)
+    frozen = copy.deepcopy(evidence)
+    frozen["host_verified_region"] = {
+        "action": action, "risk_anchor": actual["risk_anchor"],
+        "target_obstacles": actual["target_obstacles"], "region": actual["region"],
+        "active_window": actual["active_window"], "entry_event": actual["entry_event"],
+        "protection_bars": actual["protection_bars"], "parameters": copy.deepcopy(parameters)}
+    return frozen
+
+
+def required_region_stop(action, entry, atr, df_m5, evidence, parameters=None):
+    facts = evidence.get("host_verified_region", {})
+    if facts.get("action") != action or parameters is not None and facts.get("parameters") != parameters:
+        raise StrategyError("区域止损缺少已验证来源")
+    anchor = float(facts["risk_anchor"]["price"])
+    bars = facts["protection_bars"]
+    if df_m5 is not None and df_m5[["time", "open", "high", "low", "close"]].tail(3).to_dict("records") != bars:
+        raise StrategyError("区域保护K线与已验证来源不一致")
+    extreme = min(b["low"] for b in bars) if action == "buy" else max(b["high"] for b in bars)
+    sign = 1 if action == "buy" else -1
+    floor, cap = entry_risk_limits(atr)
+    raw = min(anchor, extreme)-stop_buffer(atr) if action == "buy" else max(anchor, extreme)+stop_buffer(atr)
+    raw = min(raw, entry-floor) if action == "buy" else max(raw, entry+floor)
+    sl = round_protective_stop(action, raw)
+    risk = sign*(entry-sl)
+    if not math.isfinite(risk) or not 0 < risk <= cap:
+        raise StrategyError("区域及M5保护止损超过8美元或无效")
+    return sl
+
+
+def region_target_limit(action, entry, atr, evidence):
+    facts = evidence.get("host_verified_region", {})
+    if facts.get("action") != action:
+        raise StrategyError("区域目标缺少已验证来源")
+    sign = 1 if action == "buy" else -1
+    obstacles = facts["target_obstacles"]
+    if not obstacles:
+        return None
+    first = min(obstacles, key=lambda r: sign*(r["obstacle_price"]-entry))
+    return first["obstacle_price"]-sign*stop_buffer(atr)
+
+
+def region_plan_error(action, entry, sl, tp, atr, evidence):
+    try:
+        needed = required_region_stop(action, entry, atr, None, evidence)
+        sign = 1 if action == "buy" else -1
+        if sign*(sl-needed) > 0 or not 0 < sign*(entry-sl) <= MAX_SL_ABS:
+            return "区域止损未覆盖来源或超过上限"
+        limit = region_target_limit(action, entry, atr, evidence)
+        if limit is not None and sign*(tp-limit) > 0:
+            return "区域目标越过最近反向区域"
+        if sign*(tp-entry) > evidence["host_verified_region"].get("target_max_reference_r", evidence["host_verified_region"]["parameters"]["target_r"])*sign*(entry-sl):
+            return "区域目标超过契约R上限"
+        if reward_risk_ratio(action, entry, sl, tp) < MIN_REWARD_RISK:
+            return "区域目标空间不足"
+    except (StrategyError, KeyError, TypeError, ValueError):
+        return "区域保护来源缺失或无效"
+    return ""
 
 
 def tick_clock_offset(tick, observed_at=None):
@@ -114,7 +190,8 @@ def research_execution_error(result, tick):
     trigger_price = bid if action == "buy" else ask
     risk = directional_stop_distance(action, entry, sl)
     clearance = directional_stop_distance(action, trigger_price, sl)
-    if risk <= 0 or risk > MAX_SL_ABS + .001:
+    cap_tolerance = 0 if details.get("strategy_contract", {}).get("stop_reference") == "region" else .001
+    if risk <= 0 or risk > MAX_SL_ABS + cap_tolerance:
         return "研究策略实时止损距离超出上限"
     if clearance < 2 * stop_buffer(atr):
         return "研究策略实时止损触发侧余量不足"
@@ -122,6 +199,9 @@ def research_execution_error(result, tick):
         return "研究策略实时盈亏比不足"
     if abs(entry - ema) > CHASE_MAX_ATR * atr:
         return "研究策略实时EMA21偏离过大，不追价"
+    if details.get("strategy_contract", {}).get("stop_reference") == "region":
+        evidence = details.get("strategy_evidence", details.get("strategy_assessments", {})).get(action, {}).get("evidence", {})
+        return region_plan_error(action, float(details.get("reference_price", details["entry_price"])), sl, tp, atr, evidence)
     return ""
 
 
@@ -1510,6 +1590,7 @@ def build_fib_volume_pa_decision(
     hist, prev_hist = macd_histogram(df_m15)
     picks = {}
     assessments = {}
+    candidates = []
     try:
         for side in ("buy", "sell"):
             best = None
@@ -1518,7 +1599,35 @@ def build_fib_volume_pa_decision(
                                   decision_clock, server_utc_offset)
                 result = strategy.assess(context)
                 blockers = list(result.blockers)
-                event_id = result.evidence.get("event_id")
+                evidence = copy.deepcopy(result.evidence)
+                evidence.pop("host_verified_region", None)
+                evidence.pop("host_verified_entry_event", None)
+                if evidence.get("closed_trigger", {}).get("confirmed") and strategy.one_entry_per_event:
+                    error = validate_entry_event(evidence, decision_clock, server_utc_offset, df_m5, df_m15,
+                                                 legacy_session=strategy.id == "session_retest")
+                    event = evidence.get("entry_event")
+                    if event and event.get("action") != side:
+                        error = "策略候选方向与首次事件不一致"
+                    if error:
+                        blockers.append(error)
+                    else:
+                        evidence["host_verified_entry_event"] = {
+                            "entry_event": copy.deepcopy(evidence.get("entry_event")),
+                            "event_id": evidence.get("event_id"), "action": side,
+                            "server_offset_hours": server_utc_offset}
+                    if strategy.stop_reference == "region":
+                        try:
+                            kind = strategy.parameters.get("region_event_kind")
+                            if kind not in ("retest", "rejection"):
+                                raise StrategyError("未知区域事实类型")
+                            evidence = verified_region_evidence(side, df_m15, df_m5, decision_clock,
+                                      server_utc_offset, evidence, strategy.parameters, kind)
+                            evidence["host_verified_region"]["target_max_reference_r"] = strategy.target_r
+                        except StrategyError as exc:
+                            blockers.append(str(exc))
+                if strategy.one_entry_per_event and not evidence.get("closed_trigger", {}).get("confirmed"):
+                    blockers.append("策略没有确认首次收盘事件")
+                event_id = evidence.get("event_id")
                 if strategy.one_entry_per_event and result.evidence.get("closed_trigger", {}).get("confirmed"):
                     if not isinstance(event_id, str) or not event_id.strip():
                         blockers.append("策略事件标识缺失")
@@ -1542,7 +1651,8 @@ def build_fib_volume_pa_decision(
                                strategy_contract=strategy.manifest(), strategy_fingerprint=snapshot.fingerprint,
                                strategy_blockers=blockers, strategy_event_id=event_id)
                 assessments.setdefault(strategy.id, {})[side] = {
-                    "score": score, "evidence": result.evidence, "blockers": blockers}
+                    "score": score, "evidence": evidence, "blockers": blockers}
+                candidates.append((side, score, details, structure))
                 if best is None or score > best[0]:
                     best = (score, details, structure)
             picks[side] = best
@@ -1550,7 +1660,7 @@ def build_fib_volume_pa_decision(
         reason = f"策略评估失败: {type(exc).__name__}: {exc}"
         return StrategyResult("no", 0, False, reason, 0., 0., 0, 0,
                               {"strategy_error": reason, "strategy_fingerprint": snapshot.fingerprint})
-    for _, details, _ in picks.values():
+    for _, _, details, _ in candidates:
         details["strategy_assessments"] = assessments[details["setup"]]
     buy_score, buy_details, buy_structure = picks["buy"]
     sell_score, sell_details, sell_structure = picks["sell"]
@@ -1575,6 +1685,7 @@ def build_fib_volume_pa_decision(
         blocked, m5_text = m5_blocks_entry(df_m5, action)
         if blocked:
             blocks.append(m5_text)
+        structural = list(blocks)
         setup_price = float(df_m15["low"].tail(3).min() if action == "buy" else df_m15["high"].tail(3).max())
         # Legacy definitions retain their M15 reference; only an explicit research
         # contract selects the confirming M5. Do not globally revert the old experiment.
@@ -1591,7 +1702,25 @@ def build_fib_volume_pa_decision(
                 blocks.append("研究策略缺少参考价外侧的最近三根M5保护极值")
         protect = extreme if m5_extreme_on_stop_side(action, entry_price, extreme) else None
         stop_loss, take_profit = 0.0, 0.0
-        if protect is not None and m5_extreme_risk(action, entry_price, protect, atr) > MAX_SL_ABS:
+        if details["strategy_contract"].get("stop_reference") == "region":
+            evidence = details["strategy_assessments"][action]["evidence"]
+            try:
+                stop_loss = required_region_stop(action, entry_price, atr, df_m5, evidence,
+                                                details["strategy_contract"]["parameters"])
+                risk = abs(entry_price-stop_loss)
+                sign = 1 if action == "buy" else -1
+                take_profit = entry_price+sign*target_r*risk
+                limit = region_target_limit(action, entry_price, atr, evidence)
+                if limit is not None:
+                    take_profit = min(take_profit, limit) if action == "buy" else max(take_profit, limit)
+                # Round toward entry so obstacle and reference R limits are never exceeded.
+                take_profit = round_protective_stop(action, take_profit)
+                error = region_plan_error(action, entry_price, stop_loss, take_profit, atr, evidence)
+                if error:
+                    blocks.append(error)
+            except StrategyError as exc:
+                blocks.append(str(exc))
+        elif protect is not None and m5_extreme_risk(action, entry_price, protect, atr) > MAX_SL_ABS:
             blocks.append(m5_wick_reject_text())
         else:
             stop_loss, take_profit = calculate_targets(action, entry_price, atr, fib, setup_price, protect, target_r=target_r)
@@ -1599,6 +1728,8 @@ def build_fib_volume_pa_decision(
                 timed = m5_rejection_anchor(df_m5, action, atr)
                 if timed is not None:
                     entry_price, setup_price = timed
+                    details["reference_price_source"] = "confirmed_closed_m5_rejection_close"
+                    details["reference_bar_time"] = int(df_m5["time"].iloc[-1]) if "time" in df_m5 else 0
                     extreme = recent_m5_extreme(df_m5, action)
                     protect = extreme if m5_extreme_on_stop_side(action, entry_price, extreme) else None
                     if protect is not None and m5_extreme_risk(action, entry_price, protect, atr) > MAX_SL_ABS:
@@ -1621,6 +1752,8 @@ def build_fib_volume_pa_decision(
         chased, chase_text = chase_blocks_at(df_m15, entry_price, action, atr)
         if chased:
             blocks.append(chase_text)
+        details["structural_blockers"] = structural
+        details["reference_price"] = entry_price
         details["entry_price"] = f"{entry_price:.2f}"
         prices_ok = (
             action == "buy" and stop_loss > 0 and stop_loss < entry_price and take_profit > entry_price
@@ -1651,31 +1784,51 @@ def build_fib_volume_pa_decision(
         reasoning += review_text
         return StrategyResult(action, score, False, reasoning, stop_loss, take_profit, buy_score, sell_score, details)
 
-    if buy_score >= threshold and sell_score >= threshold and abs(buy_score - sell_score) <= 5:
-        reasoning = f"多空评分接近，拒绝追单。BUY={buy_score}, SELL={sell_score}"
-        chosen = sell_details if h1_trend == "bear" else buy_details
-        metadata = {key: value for key, value in chosen.items() if key.startswith("strategy_")}
-        metadata.update(setup=chosen["setup"], session=session)
-        return StrategyResult("no", max(buy_score, sell_score), False, reasoning, 0.0, 0.0, buy_score, sell_score, metadata)
-
-    if buy_score >= threshold and buy_score > sell_score:
-        return finish("buy", buy_score, buy_details, buy_structure)
-    if sell_score >= threshold and sell_score > buy_score:
-        return finish("sell", sell_score, sell_details, sell_structure)
-
-    best_score = max(buy_score, sell_score)
-    best_side = "BUY" if buy_score >= sell_score else "SELL"
-    details = buy_details if buy_score >= sell_score else sell_details
-    reasoning = label(details) + (
-        f"未达到交易阈值。最佳方向={best_side}, score={best_score}, "
-        f"BUY={buy_score}, SELL={sell_score}。"
-        f"{regime_text}。H1={h1_trend}, M15={m15_trend}。"
-        f"{details.get('fib', '')}；{details.get('volume', '')}；"
-        f"{details.get('price_action', '')}；{details.get('trend', '')}"
-    )
-    if details.get("strategy_blockers"):
-        reasoning += "；策略条件未满足: " + "；".join(details["strategy_blockers"])
-    return StrategyResult("no", best_score, False, reasoning, 0.0, 0.0, buy_score, sell_score, details)
+    finished = []
+    opportunities = []
+    for side, score, details, structure in candidates:
+        plan = finish(side, score, details, structure)
+        finished.append(plan)
+        facts = details["strategy_assessments"][side]["evidence"]
+        trigger = facts.get("event_id") or facts.get("closed_trigger", {}).get("bar_time") or details["reference_bar_time"]
+        identity = f"{details['setup']}/{side}/{trigger}/{snapshot.fingerprint}"
+        opportunity = {
+            "opportunity_id": hashlib.sha256(identity.encode()).hexdigest()[:24],
+            "action": side, "local_score": score, "strategy_contract": copy.deepcopy(details["strategy_contract"]),
+            "strategy_fingerprint": snapshot.fingerprint,
+            "strategy_evidence": copy.deepcopy(details["strategy_assessments"]),
+            "structural_blockers": copy.deepcopy(details["structural_blockers"]),
+            "local_plan_status": {"valid": plan.action == side, "reason": plan.reasoning},
+            "reference_price": {"price": details["reference_price"], "source": details["reference_price_source"],
+                                "bar_time": details["reference_bar_time"]},
+            "local_plan": {"action": plan.action, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit,
+                           "reasoning": plan.reasoning, "details": copy.deepcopy(plan.details)},
+            "event_id": facts.get("event_id"), "entry_event": copy.deepcopy(facts.get("entry_event"))}
+        opportunities.append(opportunity)
+    executable = [p for p in finished if p.action != "no" and p.confidence >= threshold]
+    executable.sort(key=lambda p: -p.confidence)  # Stable: session priority, then BUY before SELL.
+    if executable:
+        chosen = executable[0]
+        opposing = next((p for p in executable if p.action != chosen.action), None)
+        if opposing is not None and abs(chosen.confidence-opposing.confidence) <= 5:
+            chosen = copy.deepcopy(chosen)
+            chosen.action = "no"
+            chosen.stop_loss = chosen.take_profit = 0.
+            chosen.reasoning = f"多空评分接近，拒绝追单。BUY={buy_score}, SELL={sell_score}"
+    else:
+        indices = [i for i, o in enumerate(opportunities) if opportunity_eligible(o)]
+        pool = indices or list(range(len(finished)))
+        chosen = copy.deepcopy(finished[max(pool, key=lambda i: opportunities[i]["local_score"])])
+        if chosen.action != "no":
+            chosen.action = "no"
+            chosen.stop_loss = chosen.take_profit = 0.
+            chosen.reasoning = label(chosen.details) + f"未达到交易阈值，score={chosen.confidence}"
+    if not executable:
+        reasons = list(dict.fromkeys(block for o in opportunities for block in o["structural_blockers"]))
+        if reasons:
+            chosen.reasoning += "；候选硬条件: " + "；".join(reasons)
+    chosen.details["opportunities"] = copy.deepcopy(opportunities)
+    return chosen
 
 class FibVolumePATrader:
     def __init__(self):
@@ -1731,15 +1884,25 @@ class FibVolumePATrader:
                 return "策略缺少真实首次收盘事件，拒绝下单"
             if event_id != evidence.get("event_id"):
                 return "策略事件与收盘证据不一致，拒绝下单"
-            try:
-                now = time.time()
-                closed = float(evidence["retest_bar"]["close_utc"])
-                window = next(w for w in evidence["windows"] if w["active"])
-                ends = datetime.fromisoformat(window["entry_end_utc"]).timestamp()
-                if not closed <= now < min(closed + 300, ends):
-                    return "策略首次确认或入场窗口已过期，拒绝下单"
-            except (KeyError, TypeError, ValueError, StopIteration):
-                return "策略确认时间或窗口证据缺失，拒绝下单"
+            error = validate_entry_event(evidence, time.time(), evidence.get("server_offset_hours"),
+                                         legacy_session=contract.get("id") == "session_retest")
+            if error:
+                return "策略确认或窗口已过期: " + error if "expired" in error or "outside original" in error else error
+            event = evidence.get("entry_event")
+            if contract.get("id") != "session_retest":
+                original = evidence.get("host_verified_entry_event", {})
+                if (original.get("entry_event") != event or original.get("action") != result.action
+                        or original.get("event_id") != event_id
+                        or original.get("server_offset_hours") != evidence.get("server_offset_hours")):
+                    return "策略首次事件缺少原始来源绑定"
+            if event and (event.get("action") != result.action or event.get("event_id") != event_id):
+                return "策略事件方向或标识不一致"
+            if contract.get("stop_reference") == "region":
+                verified = evidence.get("host_verified_region", {})
+                if (verified.get("entry_event") != event or verified.get("action") != result.action
+                        or time.time() >= min(verified.get("active_window", {}).get("end_utc", 0),
+                                              verified.get("region", {}).get("expiry_utc", 0))):
+                    return "区域首次事件来源或期限无效"
             if assessments.get(result.action, {}).get("blockers"):
                 return "策略硬条件已拒绝，不能提交订单"
             return self.strategy_ledger.entry_error(event_id, time.time())
@@ -1758,25 +1921,15 @@ class FibVolumePATrader:
         # order_send and ticket binding, using persisted pre-order clock/contract.
         for position in positions:
             ticket = int(position.ticket)
-            if (int(getattr(position, "magic", 0) or 0) != MAGIC
-                    or getattr(position, "symbol", SYMBOL) != SYMBOL
-                    or str(ticket) in saved.get("positions", {})
-                    or "_SR_" not in str(getattr(position, "comment", ""))):
+            if str(ticket) in saved.get("positions", {}):
                 continue
-            candidates = []
-            for event_id, event in saved.get("events", {}).items():
-                meta = event.get("metadata", {})
-                offset = meta.get("server_utc_offset")
-                if offset is None or not meta.get("max_hold_minutes"):
-                    continue
-                opened = float(getattr(position, "time", 0)) - float(offset) * 3600
-                if abs(opened - event["reserved_at_utc"]) <= 120:
-                    candidates.append((abs(opened - event["reserved_at_utc"]), event_id, opened, meta))
-            if candidates:
-                _, event_id, opened, meta = min(candidates, key=lambda value: value[0])
-                self.strategy_ledger.record_position(ticket, event_id, opened, meta["max_hold_minutes"], meta["cooldown_seconds"])
-                if now >= opened + meta["max_hold_minutes"] * 60:
-                    recovered_due.add(ticket)
+            recovered = recovery_event(position, saved, SYMBOL, MAGIC)
+            if recovered:
+                event_id, opened, meta = recovered
+                if self.strategy_ledger.record_position(ticket, event_id, opened, meta["max_hold_minutes"], meta["cooldown_seconds"]):
+                    saved = self.strategy_ledger.snapshot()
+                    if now >= opened + meta["max_hold_minutes"] * 60:
+                        recovered_due.add(ticket)
         if self.positions_known is True:
             # Allow an opening acknowledgement a short propagation interval.
             active = {int(p.ticket) for p in positions}
@@ -2403,12 +2556,17 @@ class FibVolumePATrader:
             event_id = result.details.get("strategy_event_id") or assessments.get(action, {}).get("evidence", {}).get("event_id")
             observed = time.time()
             offset = tick_clock_offset(tick, observed)
-            if offset is None or not self.strategy_ledger.reserve(event_id, observed, {
+            token = execution_token(event_id, SYMBOL, MAGIC, action)
+            original_evidence = assessments.get(action, {}).get("evidence", {})
+            if offset is None or offset != original_evidence.get("server_offset_hours") or not self.strategy_ledger.reserve(event_id, observed, {
+                    "execution_token": token, "symbol": SYMBOL, "magic": MAGIC, "action": action,
+                    "event_id": event_id, "evidence": copy.deepcopy(original_evidence),
                     "server_utc_offset": offset, "contract": contract,
                     "max_hold_minutes": contract.get("max_hold_minutes", 0),
                     "cooldown_seconds": contract.get("cooldown_seconds", 0)}):
                 logger.info("策略事件无法持久保留或行情时差不明，停止提交订单")
                 return False
+            request_body["comment"] = "_SR_" + token if contract.get("id") == "session_retest" else token
         order_result = mt5.order_send(request_body)
         if order_result is None:
             logger.error("❌ 订单发送失败: 返回 None")

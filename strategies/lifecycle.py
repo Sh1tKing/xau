@@ -3,6 +3,7 @@
 Use one ledger instance per process. The lock serializes threads, not independent
 processes. An event is consumed before order submission and is never released.
 """
+import hashlib
 import copy
 import json
 import math
@@ -10,6 +11,42 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+
+
+def execution_token(event_id, symbol, magic, action):
+    """Compact deterministic key; the ledger also rejects hash collisions."""
+    key = json.dumps([event_id, symbol, magic, action], separators=(",", ":"))
+    return "EV" + hashlib.sha256(key.encode()).hexdigest()[:20] + ("B" if action == "buy" else "S")
+
+
+def recovery_event(position, state, symbol, magic):
+    """Return only an exact token match or one unambiguous original SR receipt."""
+    if getattr(position, "symbol", None) != symbol or getattr(position, "magic", None) != magic:
+        return None
+    action = "buy" if getattr(position, "type", None) == 0 else "sell" if getattr(position, "type", None) == 1 else None
+    if action is None:
+        return None
+    comment = str(getattr(position, "comment", ""))
+    bound = {p["event_id"] for p in state.get("positions", {}).values()}
+    candidates = []
+    for event_id, event in state.get("events", {}).items():
+        meta = event["metadata"]
+        if event_id in bound or not meta.get("max_hold_minutes") or meta.get("server_utc_offset") is None:
+            continue
+        opened = float(getattr(position, "time", 0))-meta["server_utc_offset"]*3600
+        token = meta.get("execution_token")
+        if token:
+            if (comment in (token, "_SR_"+token) and meta.get("symbol") == symbol and meta.get("magic") == magic
+                    and meta.get("action") == action):
+                candidates.append((event_id, opened, meta))
+        elif "_SR_" in comment and comment.endswith(action.upper()):
+            original_action = meta.get("action") or (event_id.rsplit("/", 1)[-1] if event_id.endswith(("/buy", "/sell")) else None)
+            # Historical session IDs omit direction: the original evidence must prove it.
+            evidence = meta.get("evidence", {})
+            original_action = original_action or evidence.get("closed_trigger", {}).get("action")
+            if original_action == action and abs(opened-event["reserved_at_utc"]) <= 120:
+                candidates.append((event_id, opened, meta))
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _empty_state():
@@ -52,6 +89,15 @@ def _metadata(value):
         return False
     if "cooldown_seconds" in value and not _integer(value["cooldown_seconds"], 0, 604800):
         return False
+    if "execution_token" in value:
+        token = value["execution_token"]
+        if (type(token) is not str or len(token) != 23 or not token.startswith("EV")
+                or token[-1] not in "BS" or any(c not in "0123456789abcdef" for c in token[2:-1])
+                or value.get("action") not in ("buy", "sell")
+                or token[-1] != ("B" if value.get("action") == "buy" else "S")
+                or type(value.get("symbol")) is not str
+                or type(value.get("magic")) is not int):
+            return False
     return True
 
 
@@ -75,11 +121,20 @@ def _validate(state):
             or type(state["events"]) is not dict or type(state["positions"]) is not dict
             or not _time(state["cooldown_until"], zero=True)):
         raise ValueError("invalid lifecycle state header or cooldown")
+    tokens = set()
     for event_id, event in state["events"].items():
         if (not _event_id(event_id) or type(event) is not dict
                 or set(event) != {"reserved_at_utc", "metadata"}
                 or not _time(event["reserved_at_utc"]) or not _metadata(event["metadata"])):
             raise ValueError(f"invalid saved event: {event_id!r}")
+        meta = event["metadata"]
+        token = meta.get("execution_token")
+        if token:
+            if token in tokens or token != execution_token(event_id, meta["symbol"], meta["magic"], meta["action"]):
+                raise ValueError("duplicate or mismatched execution token")
+            if meta.get("event_id", event_id) != event_id:
+                raise ValueError("execution metadata event identity mismatch")
+            tokens.add(token)
     for ticket, position in state["positions"].items():
         if (type(ticket) is not str or not ticket.isascii() or not ticket.isdecimal()
                 or len(ticket) > 20 or str(int(ticket)) != ticket
@@ -175,6 +230,9 @@ class EventLedger:
                     return False
                 frozen_metadata = copy.deepcopy(metadata)
             except (RecursionError, TypeError, ValueError):
+                return False
+            token = frozen_metadata.get("execution_token")
+            if token and any(e["metadata"].get("execution_token") == token for e in self._state["events"].values()):
                 return False
             state = copy.deepcopy(self._state)
             state["events"][event_id] = {"reserved_at_utc": now, "metadata": frozen_metadata}

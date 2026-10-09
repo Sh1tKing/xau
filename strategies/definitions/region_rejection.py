@@ -2,7 +2,7 @@
 from strategies.framework import Strategy, Assessment
 from strategies.regions import region_facts
 
-P = dict(pivot_lookback=48, pivot_left=2, pivot_right=2, atr_period=14,
+P = dict(region_event_kind='rejection', pivot_lookback=48, pivot_left=2, pivot_right=2, atr_period=14,
          halfwidth_atr=.10, region_valid_bars=16, break_atr=.05, retest_atr=.25,
          hold_atr=.05, invalidation_atr=.30, reset_atr=.50, max_retest_bars=6,
          max_retest_seconds=1800, target_r=2.5, max_hold_minutes=120, cooldown_seconds=600)

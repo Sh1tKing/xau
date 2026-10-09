@@ -208,8 +208,8 @@ class ResearchIntegrationTests(unittest.TestCase):
     def test_restart_recovers_uncertain_ack_using_reserved_order_time(self):
         trader=self.trader();trader.positions_known=True
         trader.strategy_ledger.reserve("event",self.now-10800,
-            {"server_utc_offset":3,"max_hold_minutes":180,"cooldown_seconds":600})
-        position=SimpleNamespace(ticket=432,magic=base.MAGIC,symbol=base.SYMBOL,comment="FIB_SR_BUY",
+            {"server_utc_offset":3,"max_hold_minutes":180,"cooldown_seconds":600,"action":"buy"})
+        position=SimpleNamespace(ticket=432,magic=base.MAGIC,symbol=base.SYMBOL,comment="FIB_SR_BUY",type=base.mt5.POSITION_TYPE_BUY,
                                  time=int(self.now))
         with patch.object(trader,"close_position_by_ticket",return_value=True) as close:
             trader.guard_strategy_lifecycle([position])
