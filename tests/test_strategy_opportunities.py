@@ -179,4 +179,29 @@ class OpportunityTests(unittest.TestCase):
         result.stop_loss=91.7995
         self.assertIn('上限',base.research_execution_error(result,SimpleNamespace(bid=99.7,ask=99.8)))
 
+    def test_region_shared_helpers_reject_nonfinite_bool_text_and_bad_action(self):
+        import numpy as np
+        m15,m5,now,evidence=self.region()
+        frozen=base.verified_region_evidence('buy',m15,m5,now,0,evidence,P,'rejection')
+        sl=base.required_region_stop('buy',100.,2.,m5,frozen,P)
+        self.assertEqual(base.region_plan_error('buy',np.float64(100.),np.float64(sl),np.float64(104.),np.float64(2.),frozen),'')
+        invalid=(float('nan'),float('inf'),float('-inf'),True,False,'100',None,0.,-1.)
+        for action in ('buy','sell'):
+            for index in range(4):
+                for value in invalid:
+                    prices=[100.,sl,104.,2.];prices[index]=value
+                    with self.subTest(action=action,index=index,value=value):
+                        self.assertTrue(base.region_plan_error(action,*prices,frozen))
+            for index in (0,1):
+                for value in invalid:
+                    args=[100.,2.];args[index]=value
+                    with self.subTest(action=action,index=index,value=value):
+                        with self.assertRaises(StrategyError):base.required_region_stop(action,*args,m5,frozen,P)
+                        with self.assertRaises(StrategyError):base.region_target_limit(action,*args,frozen)
+        for action in ('no','BUY','',None,True):
+            self.assertTrue(base.region_plan_error(action,100.,sl,104.,2.,frozen))
+            with self.assertRaises(StrategyError):base.required_region_stop(action,100.,2.,m5,frozen,P)
+            with self.assertRaises(StrategyError):base.region_target_limit(action,100.,2.,frozen)
+        self.assertEqual(base.region_target_limit('buy',100.,2.,frozen),None)
+
 if __name__=='__main__':unittest.main()

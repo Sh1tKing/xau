@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import math
+from numbers import Real
 import os
 import sys
 import time
@@ -74,7 +75,19 @@ def verified_region_evidence(action, df_m15, df_m5, now, offset, evidence, param
     return frozen
 
 
+def _valid_region_math(action, *values):
+    """Accept real numeric inputs, never coercible text/bools or nonfinite prices."""
+    try:
+        return (action in ("buy", "sell") and all(
+            isinstance(value, Real) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0 for value in values))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def required_region_stop(action, entry, atr, df_m5, evidence, parameters=None):
+    if not _valid_region_math(action, entry, atr):
+        raise StrategyError("区域止损方向或价格指标无效")
     facts = evidence.get("host_verified_region", {})
     if facts.get("action") != action or parameters is not None and facts.get("parameters") != parameters:
         raise StrategyError("区域止损缺少已验证来源")
@@ -95,6 +108,8 @@ def required_region_stop(action, entry, atr, df_m5, evidence, parameters=None):
 
 
 def region_target_limit(action, entry, atr, evidence):
+    if not _valid_region_math(action, entry, atr):
+        raise StrategyError("区域目标方向或价格指标无效")
     facts = evidence.get("host_verified_region", {})
     if facts.get("action") != action:
         raise StrategyError("区域目标缺少已验证来源")
@@ -107,6 +122,8 @@ def region_target_limit(action, entry, atr, evidence):
 
 
 def region_plan_error(action, entry, sl, tp, atr, evidence):
+    if not _valid_region_math(action, entry, sl, tp, atr):
+        return "区域计划方向或价格指标无效"
     try:
         needed = required_region_stop(action, entry, atr, None, evidence)
         sign = 1 if action == "buy" else -1
