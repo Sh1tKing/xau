@@ -7,6 +7,11 @@ failure, real SL/TP) are simulated on M1 bars. AI-1/2/3 are not called.
 """
 
 import argparse
+import copy
+import math
+import uuid
+from dataclasses import replace
+from strategies.events import validate_entry_event
 import bisect
 import csv
 import json
@@ -147,10 +152,30 @@ def reject_key(reasoning):
 
 
 class Backtest:
-    def __init__(self, data, meta, threshold, spread_points=None):
+    def __init__(self, data, meta, threshold, spread_points=None, *, strategies=None,
+                 entry_delay_seconds=0, spread_multiplier=1.0):
         self.strategy_snapshot = base.STRATEGIES.snapshot()
         if self.strategy_snapshot.error:
             raise base.StrategyError(self.strategy_snapshot.error)
+        if type(entry_delay_seconds) is not int or entry_delay_seconds < 0 or entry_delay_seconds % 60:
+            raise ValueError("entry delay must be nonnegative whole minutes")
+        if isinstance(spread_multiplier, bool) or not math.isfinite(spread_multiplier) or spread_multiplier <= 0:
+            raise ValueError("spread multiplier must be finite and positive")
+        self.entry_delay_seconds = entry_delay_seconds
+        self.spread_multiplier = float(spread_multiplier)
+        self.original_fingerprint = self.strategy_snapshot.fingerprint
+        self.override = strategies
+        if strategies is not None:
+            ids = strategies.split(',') if isinstance(strategies, str) else list(strategies)
+            if not ids or any(not value or value != value.strip() for value in ids) or len(set(ids)) != len(ids):
+                raise ValueError("strategy override must contain unique IDs")
+            unknown = set(ids) - {s.id for s in self.strategy_snapshot.strategies}
+            if unknown:
+                raise ValueError("unknown strategy IDs: " + ','.join(sorted(unknown)))
+            self.strategy_snapshot = replace(self.strategy_snapshot, strategies=tuple(
+                replace(copy.deepcopy(strategy), enabled=strategy.id in ids)
+                for strategy in self.strategy_snapshot.strategies))
+        self.market_days = set()
         self.offset = float(meta["server_offset"])
         self.point = float(meta["point"])
         self.lot_value = float(meta["contract_size"]) * base.LOT_SIZE
@@ -168,8 +193,10 @@ class Backtest:
         else:
             raw = m1["spread"].astype(float).tolist() if "spread" in m1.columns else [0.0] * len(m1)
             self.spreads = [(value or fallback) * self.point for value in raw]
+        self.spreads = [value * self.spread_multiplier for value in self.spreads]
         self.trades = []
         self.rejects = Counter()
+        self.candidate_rejects = Counter()
         self.stats = Counter()
         self.position = None
         self.pending = None
@@ -208,6 +235,7 @@ class Backtest:
         if len(df_m15) < 80 or len(df_h1) < 60 or len(df_m5) < 10:
             self.stats["数据不足跳过"] += 1
             return None
+        self.market_days.add(beijing(ts, self.offset).date().isoformat())
         self.stats["评估次数"] += 1
         try:
             result = base.build_fib_volume_pa_decision(
@@ -219,6 +247,14 @@ class Backtest:
             self.stats["评估异常"] += 1
             self.rejects["评估异常 %s" % type(exc).__name__] += 1
             return None
+        for opportunity in (result.details or {}).get("opportunities", []):
+            self.stats["候选总数"] += 1
+            for blocker in opportunity.get("structural_blockers", []):
+                self.candidate_rejects[opportunity.get('strategy_contract', {}).get('id', 'unknown') + ': ' + blocker] += 1
+            if not opportunity.get("structural_blockers"):
+                self.stats["结构候选"] += 1
+            if opportunity.get("local_plan_status", {}).get("valid"):
+                self.stats["参考计划有效"] += 1
         if result.action in ("buy", "sell") and result.confidence >= self.threshold:
             self.stats["本地信号"] += 1
             return result
@@ -226,41 +262,73 @@ class Backtest:
         return None
 
     def research_signal_error(self, result, i, signal_ts):
-        """Keep the frozen confirmation valid at the sole, zero-delay replay fill."""
+        """Validate the original event and source; never rebuild a delayed plan."""
         details = result.details or {}
-        if not details.get("strategy_contract", {}).get("demo_only"):
-            return ""
+        contract = details.get("strategy_contract", {})
+        if (not self.entry_delay_seconds and not contract.get("demo_only")
+                and not contract.get("one_entry_per_event")):
+            return ""  # Preserve disabled legacy zero-delay replay semantics.
         fill_ts = self.t[i]
-        if fill_ts != signal_ts:
+        if fill_ts != signal_ts + self.entry_delay_seconds:
             return "研究策略确认后的对应M1开盘缺失，不延迟成交"
-        try:
-            evidence = details["strategy_assessments"][result.action]["evidence"]
-            trigger = evidence["closed_trigger"]
-            stamp = trigger["bar_time"]
-            latest_m5 = self.windows["M5"].upto(fill_ts, 1)
-            if (trigger["confirmed"] is not True or trigger["timeframe"] != "M5"
-                    or type(stamp) is not int or latest_m5.empty
-                    or int(latest_m5["time"].iloc[-1]) != stamp
-                    or details["reference_bar_time"] != stamp
-                    or not stamp + 300 <= fill_ts < stamp + 600):
-                return "研究策略原M5确认已过期或不再是最新闭合K线"
-            own_window = [window for window in evidence["windows"]
-                          if window["zone"] == evidence["zone"]
-                          and window["local_date"] == evidence["local_date"]]
-            if len(own_window) != 1 or own_window[0]["active"] is not True:
-                return "研究策略原事件窗口不再有效"
-            start = datetime.fromisoformat(own_window[0]["entry_start_utc"])
-            end = datetime.fromisoformat(own_window[0]["entry_end_utc"])
-            if (start.utcoffset() is None or end.utcoffset() is None
-                    or not start.timestamp() <= self.utc_timestamp(fill_ts) < end.timestamp()):
-                return "研究策略原事件时段已过期"
-            if evidence["event_id"] != details["strategy_event_id"]:
-                return "研究策略原事件标识不一致"
-        except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
-            return "研究策略原确认或时段证据缺失"
+        for name in ("M5", "M15", "H1"):
+            original = self.windows[name].upto(signal_ts, 1)
+            current = self.windows[name].upto(fill_ts, 1)
+            if original.empty or current.empty or int(original['time'].iloc[-1]) != int(current['time'].iloc[-1]):
+                return "研究策略原确认已过期：新闭合" + name
+        if not contract.get("demo_only") and not contract.get("one_entry_per_event"):
+            return ""
+        assessments = details.get("strategy_evidence", details.get("strategy_assessments", {}))
+        evidence = assessments.get(result.action, {}).get("evidence", {})
+        event_id = details.get("strategy_event_id")
+        if event_id != evidence.get("event_id"):
+            return "研究策略原事件标识不一致"
+        trigger = evidence.get('closed_trigger', {})
+        latest = self.windows.get(trigger.get('timeframe'))
+        latest = latest.upto(fill_ts, 1) if latest is not None else None
+        if latest is None or latest.empty or trigger.get('bar_time') != int(latest['time'].iloc[-1]):
+            return "研究策略原确认不再是最新闭合K线"
+        event = evidence.get("entry_event")
+        legacy = contract.get("id") == "session_retest"
+        if legacy:
+            try:
+                own = [w for w in evidence['windows'] if w.get('active') is True]
+                if len(own) == 1 and self.utc_timestamp(fill_ts) >= datetime.fromisoformat(own[0]['entry_end_utc']).timestamp():
+                    return "研究策略原事件时段已过期"
+            except (KeyError, TypeError, ValueError):
+                pass
+        if not legacy:
+            bound = evidence.get("host_verified_entry_event", {})
+            if (bound.get("entry_event") != event or bound.get("action") != result.action
+                    or bound.get("event_id") != event_id or bound.get("server_offset_hours") != self.offset):
+                return "研究策略首次事件缺少原始来源绑定"
+        if evidence.get("server_offset_hours", self.offset) != self.offset:
+            return "研究策略原来源UTC偏移不一致"
+        if event and event.get("action") != result.action:
+            return "研究策略原事件方向不一致"
+        # Old archived session receipts have no complete source list. Only the
+        # explicit session adapter may read them; new events prove actual frames.
+        frame_args = {} if legacy and event is None else dict(
+            df_m5=self.windows['M5'].upto(signal_ts, 80),
+            df_m15=self.windows['M15'].upto(signal_ts, 160))
+        error = validate_entry_event(evidence, self.utc_timestamp(fill_ts), self.offset,
+                                     legacy_session=legacy, **frame_args)
+        if error:
+            return "研究策略原确认或时段已过期/无效: " + error
+        if details.get("reference_bar_time") != evidence.get("closed_trigger", {}).get("bar_time"):
+            return "研究策略原确认参考时间不一致"
+        if contract.get("stop_reference") == "region":
+            verified = evidence.get("host_verified_region", {})
+            if (verified.get("entry_event") != event or verified.get("action") != result.action
+                    or self.utc_timestamp(fill_ts) >= min(verified.get("active_window", {}).get("end_utc", 0),
+                                                         verified.get("region", {}).get("expiry_utc", 0))):
+                return "研究策略区域原来源或期限无效"
         return ""
 
     def open_position(self, result, i, signal_ts):
+        if self.position is not None:
+            self.stats["单仓阻止成交"] += 1
+            return
         side = result.action
         bid = self.o[i]
         entry = bid + self.spreads[i] if side == "buy" else bid
@@ -313,6 +381,7 @@ class Backtest:
             "session": details.get("session", ""),
             "setup": details.get("setup", ""),
             "setup_name": contract.get("name"),
+            "strategy_id": contract.get("id", details.get("setup", "")),
             "event_id": event_id,
             "max_hold_minutes": int(contract.get("max_hold_minutes", 0)),
             "cooldown_seconds": int(contract.get("cooldown_seconds", 0)),
@@ -340,6 +409,11 @@ class Backtest:
             "r": round(pnl / (state.risk * self.lot_value), 2),
             "hold_min": int((ts - pos["open_ts"]) / 60),
             "event_id": pos.get("event_id") or "",
+            "strategy_id": pos.get("strategy_id", ""),
+            "signal_bj": beijing(pos["signal_ts"], self.offset).strftime("%Y-%m-%d %H:%M"),
+            "signal_server_ts": pos["signal_ts"],
+            "fill_server_ts": pos["open_ts"],
+            "entry_delay_seconds": self.entry_delay_seconds,
         })
         self.cooldown_until_utc = max(
             self.cooldown_until_utc, self.utc_timestamp(ts) + pos.get("cooldown_seconds", 0))
@@ -445,8 +519,9 @@ class Backtest:
                 print("  进度 %d%%，已成交 %d 笔，用时 %.0fs" % (100 * i // total, len(self.trades), time.time() - started))
             if self.pending is not None and self.position is None:
                 result, signal_ts = self.pending
-                self.pending = None
-                self.open_position(result, i, signal_ts)
+                if self.t[i] >= signal_ts + self.entry_delay_seconds:
+                    self.pending = None
+                    self.open_position(result, i, signal_ts)
             if self.position is not None:
                 reason = self.position.pop("exit_next", None)
                 if reason and not self.time_exit_due(i):
@@ -458,18 +533,74 @@ class Backtest:
             close_ts = self.t[i] + 60
             if close_ts not in m5_closes:
                 continue
+            # Denominator is independent of whether a position or pending fill
+            # suppresses evaluation. Do not pad absent weekends/market days.
+            if all(bisect.bisect_right(self.windows[name].close_times, close_ts) >= minimum
+                   for name, minimum in (("M15", 80), ("H1", 60), ("M5", 10))):
+                self.market_days.add(beijing(close_ts, self.offset).date().isoformat())
             if self.position is not None:
                 self.check_structure(close_ts)
             elif self.pending is None:
                 result = self.evaluate(close_ts)
                 if result is not None:
-                    self.pending = (result, close_ts)
+                    self.pending = (copy.deepcopy(result), close_ts)
+        if self.pending is not None:
+            self.stats["缓存结束待成交丢弃"] += 1
+            self.rejects["缓存结束无对应延迟成交分钟"] += 1
+            self.pending = None
         if self.position is not None:
             last = total - 1
             bid = self.c[last]
             price = bid if self.position["side"] == "buy" else bid + self.spreads[last]
             self.close(self.t[last] + 60, price, "回测结束平仓")
         return self.trades
+
+
+def replay_metrics(trades, market_days, start_balance, split_date="2026-09-15"):
+    """Market days have sufficient closed context; dates/counts use Asia/Shanghai.
+
+    Profit days use close date; frequency uses entry date. The fixed temporal
+    split reuses the research cache and is not independent out-of-sample data.
+    Drawdown follows realized, rounded cash PnL, with no margin model.
+    """
+    datetime.strptime(split_date, "%Y-%m-%d")
+    daily = {day: {"entries": 0, "net": 0.0} for day in sorted(market_days)}
+    equity = peak = low = float(start_balance)
+    dd = 0.0
+    split = {key: {"trades": 0, "net": 0.0} for key in ("early", "later")}
+    groups = {key: Counter() for key in ("session", "strategy_id", "side")}
+    session_days = defaultdict(set)
+    for trade in trades:
+        day = trade['open_bj'][:10]
+        daily.setdefault(day, {"entries": 0, "net": 0.0})['entries'] += 1
+        close_day = trade['close_bj'][:10]
+        daily.setdefault(close_day, {"entries": 0, "net": 0.0})['net'] += trade['pnl']
+        equity += trade['pnl']; peak = max(peak, equity); low = min(low, equity)
+        dd = max(dd, peak-equity)
+        bucket = split['early' if day < split_date else 'later']
+        bucket['trades'] += 1; bucket['net'] += trade['pnl']
+        for key in groups:
+            groups[key][trade.get(key, trade.get('setup','') if key == 'strategy_id' else '')] += 1
+        session_days[trade.get('session','')].add(day)
+    holds = sorted(float(t['hold_min']) for t in trades)
+    def percentile(q):
+        if not holds: return None
+        point = (len(holds)-1)*q
+        lower = int(point); upper = min(lower+1,len(holds)-1)
+        return holds[lower] + (holds[upper]-holds[lower])*(point-lower)
+    net = sum(t['pnl'] for t in trades)
+    best = max((v['net'] for v in daily.values()), default=0.0)
+    return dict(timezone='Asia/Shanghai', market_day_definition='cache M5 evaluation with sufficient H1/M15/M5 closed context; no missing-market/weekend padding',
+                market_days=len(market_days), zero_trade_days=sum(daily[d]['entries']==0 for d in market_days),
+                daily=daily, trades=len(trades), net=round(net,2), ending_balance=round(equity,2),
+                closed_drawdown=round(dd,2), equity_low=round(low,2),
+                best_day_removed_net=round(net-best,2),
+                hold_minutes=dict(median=percentile(.5),p90=percentile(.9),max=max(holds) if holds else None),
+                longest_trade=max(trades,key=lambda t:t['hold_min']) if trades else None,
+                groups={k:dict(v) for k,v in groups.items()},
+                active_session_days={k:len(v) for k,v in session_days.items()},
+                split_date=split_date,split=split, split_limitation='reused research cache, not independent OOS',
+                ai_quality=None,ai2_approvals=None,model='local Python fixed proposal, M1 Bid/Ask and guardian; no margin/forced-liquidation/tick path')
 
 
 def summarize(trades, stats, rejects, meta, start_balance):
@@ -547,14 +678,31 @@ def main():
     parser.add_argument("--spread", type=float, default=None, help="固定点差(points)，默认用每根K线自带的点差")
     parser.add_argument("--server-offset", type=float, default=None, help="MT5 服务器相对 UTC 的小时数，默认自动检测")
     parser.add_argument("--offline", action="store_true", help="不连 MT5，直接用上次保存的 CSV")
+    parser.add_argument("--strategies", default=None, help="离线启用ID列表，不修改定义或.env")
+    parser.add_argument("--entry-delay-seconds", type=int, default=0, help="冻结方案延迟，非负整分钟秒数")
+    parser.add_argument("--spread-multiplier", type=float, default=1.0, help="统一成交/护盘/出场点差倍数")
+    parser.add_argument("--split-date", default="2026-09-15", help="重复研究缓存分段日期(北京时间)")
+    parser.add_argument("--output-label", default=None, help="安全场景标识，仅字母数字下划线短横线")
     args = parser.parse_args()
+    if args.strategies is not None and not args.offline:
+        parser.error("--strategies requires --offline; broker history startup is forbidden for overrides")
+    if args.entry_delay_seconds < 0 or args.entry_delay_seconds % 60:
+        parser.error("--entry-delay-seconds must be nonnegative whole-minute seconds")
+    if not math.isfinite(args.spread_multiplier) or args.spread_multiplier <= 0:
+        parser.error("--spread-multiplier must be finite and positive")
+    if args.output_label is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", args.output_label):
+        parser.error("invalid --output-label")
+    try:
+        datetime.strptime(args.split_date, "%Y-%m-%d")
+    except ValueError:
+        parser.error("--split-date must be YYYY-MM-DD")
     if args.max_sl is not None:
-        if args.max_sl <= 0:
+        if not math.isfinite(args.max_sl) or args.max_sl <= 0:
             print("--max-sl 必须大于 0")
             return 1
         # Strategy helpers read the module global at call time, so this covers every stop check.
         base.MAX_SL_ABS = float(args.max_sl)
-    if args.balance <= 0:
+    if not math.isfinite(args.balance) or args.balance <= 0:
         print("--balance 必须大于 0")
         return 1
 
@@ -591,18 +739,37 @@ def main():
     meta["spread_note"] = "固定 %s points" % args.spread if args.spread is not None else "K线自带点差"
     print("回放 %s 到 %s，M1 共 %d 根" % (meta["start_bj"], meta["end_bj"], len(m1)))
 
-    test = Backtest(data, meta, args.threshold, args.spread)
+    test = Backtest(data, meta, args.threshold, args.spread, strategies=args.strategies,
+                    entry_delay_seconds=args.entry_delay_seconds, spread_multiplier=args.spread_multiplier)
+    meta['selected_strategies'] = [s.id for s in test.strategy_snapshot.strategies if s.enabled]
+    meta['offline_strategy_override'] = args.strategies
+    meta['entry_delay_seconds'] = args.entry_delay_seconds
+    meta['spread_multiplier'] = args.spread_multiplier
+    meta['max_sl'] = base.MAX_SL_ABS
+    meta['balance'] = args.balance
+    meta['split_date'] = args.split_date
     print("策略框架 %s，定义指纹 %s" % (base.STRATEGY_FRAMEWORK_VERSION, test.strategy_snapshot.fingerprint))
     meta["strategy_fingerprint"] = test.strategy_snapshot.fingerprint
     meta["strategy_framework"] = base.STRATEGY_FRAMEWORK_VERSION
     trades = test.run()
     report = summarize(trades, test.stats, test.rejects, meta, args.balance)
     report += "\n\n策略框架: %s\n定义指纹: %s" % (meta["strategy_framework"], meta["strategy_fingerprint"])
+    metrics = replay_metrics(trades, test.market_days, args.balance, args.split_date)
+    metrics.update(metadata=meta, funnel=dict(test.stats), rejection_counts=dict(test.rejects),
+                   candidate_blocker_counts=dict(test.candidate_rejects))
+    report += "\n\n离线启用策略: " + ','.join(meta['selected_strategies'])
+    report += "\n冻结方案延迟: %ds，统一点差倍数: %g" % (args.entry_delay_seconds, args.spread_multiplier)
+    report += "\n市场日 %d，零成交日 %d，去最佳日净盈亏 %.2f" % (metrics['market_days'], metrics['zero_trade_days'], metrics['best_day_removed_net'])
+    report += "\n持仓分钟(中位/p90/最大): " + str(metrics['hold_minutes'])
+    report += "\n分段(重复研究缓存，非独立OOS): " + json.dumps(metrics['split'],ensure_ascii=False)
     print()
     print(report)
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = (args.output_label + '_' if args.output_label else '') + datetime.now().strftime("%Y%m%d_%H%M%S_%f") + '_' + uuid.uuid4().hex[:8]
+    metrics_path = os.path.join(OUT_DIR, "summary_%s.json" % stamp)
+    with open(metrics_path, 'x', encoding='utf-8') as handle:
+        json.dump(metrics, handle, ensure_ascii=False, indent=2, allow_nan=False)
     trades_path = os.path.join(OUT_DIR, "trades_%s.csv" % stamp)
     with open(trades_path, "w", newline="", encoding="utf-8-sig") as handle:
         fields = list(trades[0].keys()) if trades else ["open_bj"]
@@ -615,6 +782,7 @@ def main():
     print()
     print("逐笔明细: %s" % trades_path)
     print("汇总报告: %s" % report_path)
+    print("指标JSON: %s" % metrics_path)
     return 0
 
 
