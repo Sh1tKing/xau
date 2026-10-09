@@ -67,6 +67,8 @@ class Response:
 
 class OpportunityAITests(unittest.TestCase):
     def setUp(self):
+        previous_disable = logging.root.manager.disable
+        self.addCleanup(logging.disable, previous_disable)
         logging.disable(logging.CRITICAL)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -332,6 +334,71 @@ class OpportunityAITests(unittest.TestCase):
              patch.object(self.trader, 'record_entry_context') as record:
             self.assertTrue(self.trader.place_order(result))
         record.assert_not_called()
+
+    def execute_real_order_matching(self, receipt_ticket, duplicate=False):
+        """Run actual host reserve/send/receipt and AI matching; mock broker only."""
+        from strategies.lifecycle import EventLedger
+        m15, h1, m5, clock = market()
+        now = clock.timestamp() + 5
+        result = ai.base.build_fib_volume_pa_decision(m15, h1, m5, 55, now=clock, server_utc_offset=3)
+        self.assertEqual(result.action, 'buy', result.reasoning)
+        own = next(item for item in result.details['opportunities'] if item['action'] == 'buy')
+        result.details.update(opportunity_id=own['opportunity_id'], event_id=own['event_id'],
+                              strategy_evidence=copy.deepcopy(own['strategy_evidence']))
+        original_contract = copy.deepcopy(own['strategy_contract'])
+        token = ai.base.execution_token(own['event_id'], ai.base.SYMBOL, ai.base.MAGIC, 'buy')
+        position = SimpleNamespace(ticket=123, identifier=123, symbol=ai.base.SYMBOL, magic=ai.base.MAGIC,
+                       type=ai.base.mt5.POSITION_TYPE_BUY, comment='_SR_' + token,
+                       price_open=float(result.details['entry_price']), sl=result.stop_loss, tp=result.take_profit,
+                       time=int(now+10800), volume=.01, profit=0.)
+        positions = [position]
+        if duplicate:
+            other = copy.copy(position); other.ticket = 456; other.identifier = 456
+            positions.append(other)
+        sent = False
+        def broker_positions(**kwargs):
+            return positions if sent else []
+        def broker_send(request):
+            nonlocal sent
+            self.assertEqual(request['comment'], '_SR_' + token)
+            sent = True
+            return SimpleNamespace(retcode=ai.base.mt5.TRADE_RETCODE_DONE, order=receipt_ticket,
+                                   price=position.price_open, comment='mock receipt')
+        self.trader.strategy_ledger = EventLedger(str(Path(self.temp.name)/'matching-events.json'))
+        tick = SimpleNamespace(bid=position.price_open, ask=position.price_open+.33, time=int(now+10800))
+        with patch.object(ai.base.time, 'time', return_value=now), patch.object(ai.base, 'ENABLE_TRADING', True), \
+             patch.object(ai.base.mt5, 'account_info', return_value=SimpleNamespace(trade_mode=ai.base.mt5.ACCOUNT_TRADE_MODE_DEMO)), \
+             patch.object(ai.base.mt5, 'symbol_info_tick', return_value=tick), \
+             patch.object(ai.base.mt5, 'positions_get', side_effect=broker_positions), \
+             patch.object(ai.base.mt5, 'order_send', side_effect=broker_send) as send:
+            self.assertTrue(self.trader.place_order(result))
+            send.assert_called_once()
+            state = self.trader.strategy_ledger.snapshot()
+            recovered = ai.base.recovery_event(position, state, ai.base.SYMBOL, ai.base.MAGIC)
+        self.assertEqual(self.trader.last_order_ticket, receipt_ticket)
+        if duplicate:
+            self.assertEqual(self.trader.entry_contexts, {})
+            return
+        context = self.trader.entry_contexts['123']
+        self.assertEqual(context['opportunity_id'], own['opportunity_id'])
+        self.assertEqual(context['event_id'], own['event_id'])
+        self.assertEqual(context['strategy_contract'], original_contract)
+        self.assertEqual(context['strategy_evidence'], own['strategy_evidence'])
+        if receipt_ticket:
+            self.assertEqual(state['positions']['123']['event_id'], own['event_id'])
+            self.assertIsNone(recovered)  # Already bound; receipt branch must not rely on recovery.
+        else:
+            self.assertEqual(state['positions'], {})
+            self.assertEqual(recovered[0], own['event_id'])
+
+    def test_bound_exact_receipt_binds_original_context_via_real_order_path(self):
+        self.execute_real_order_matching(123)
+
+    def test_unbound_exact_token_without_receipt_recovers_original_context(self):
+        self.execute_real_order_matching(0)
+
+    def test_duplicate_exact_token_without_receipt_never_binds_context(self):
+        self.execute_real_order_matching(0, duplicate=True)
 
     def test_region_finalize_preserves_verified_anchor_and_caps_obstacle(self):
         for action in ('buy', 'sell'):
