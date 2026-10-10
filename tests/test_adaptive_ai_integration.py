@@ -185,12 +185,91 @@ class AdaptiveAITests(unittest.TestCase):
                 self.assertEqual(self.run_entry().call_count, 0)
         self.assertEqual(self.sent, [])
 
+    def test_positions_become_unknown_or_occupied_after_ai1_stop_before_ai2_http(self):
+        for positions in (None, [SimpleNamespace(ticket=999, magic=0)]):
+            with self.subTest(positions=positions):
+                other = AdaptiveAITests(); other.setUp()
+                try:
+                    other.configure()
+                    state = [[]]
+                    with patch.object(base.mt5, 'positions_get', side_effect=lambda **_: state[0]):
+                        post = other.run_entry(before_review=lambda: state.__setitem__(0, positions))
+                    self.assertEqual(post.call_count, 1, other.snapshots)
+                    self.assertEqual(other.sent, [])
+                    self.assertIn('持仓状态未知或已达到单仓上限', other.snapshots[-1][2]['reason'])
+                finally: other.doCleanups()
+
+    def test_account_becomes_unknown_or_real_after_ai1_stop_before_ai2_http(self):
+        for account in (None, SimpleNamespace(trade_mode=base.mt5.ACCOUNT_TRADE_MODE_REAL)):
+            with self.subTest(account=account):
+                other = AdaptiveAITests(); other.setUp()
+                try:
+                    other.configure()
+                    state = [SimpleNamespace(trade_mode=base.mt5.ACCOUNT_TRADE_MODE_DEMO)]
+                    with patch.object(base.mt5, 'account_info', side_effect=lambda: state[0]):
+                        post = other.run_entry(before_review=lambda: state.__setitem__(0, account))
+                    self.assertEqual(post.call_count, 1, other.snapshots)
+                    self.assertEqual(other.sent, [])
+                    self.assertIn('仅允许模拟账户', other.snapshots[-1][2]['reason'])
+                finally: other.doCleanups()
+
+    def test_ai2_retry_and_failover_recheck_positions_before_each_http(self):
+        for protocol in ('chat', 'messages'):
+            for backup in (False, True):
+                for positions in (None, [SimpleNamespace(ticket=999, magic=0)]):
+                    with self.subTest(protocol=protocol, backup=backup, positions=positions):
+                        other = AdaptiveAITests(); other.setUp()
+                        try:
+                            other.configure(); state = [[]]; requests = []
+                            url = 'https://unit.test/' + protocol
+                            def post(url, **kwargs):
+                                request = kwargs['json']; requests.append(copy.deepcopy(request))
+                                pack = json.loads(request['messages'][-1]['content'].split('\n', 1)[1])
+                                if 'proposal' not in pack:
+                                    return Response(other.proposal(request), protocol == 'messages')
+                                state[0] = positions
+                                raise ai.requests.ConnectionError('mock review transport failure')
+                            options = {'AI2_BACKUP_URL': url.replace('unit.test', 'backup.test'),
+                                       'AI2_BACKUP_KEY': 'mock'} if backup else {}
+                            with patch.object(ai, 'AI1_URL', url), patch.object(ai, 'AI2_URL', url), \
+                                 patch.dict(ai.os.environ, options), \
+                                 patch.object(base.mt5, 'positions_get', side_effect=lambda **_: state[0]), \
+                                 patch.object(ai.requests, 'post', side_effect=post) as http:
+                                stamp = int(other.data[0].time.iloc[-1])
+                                seq = other.trader.claim_task('entry', stamp, 360)
+                                other.trader.entry_task(stamp, seq)
+                            self.assertEqual(http.call_count, 2, other.snapshots)
+                            self.assertEqual(other.sent, [])
+                            self.assertIn('持仓状态未知或已达到单仓上限', other.snapshots[-1][2]['reason'])
+                            system = requests[1]['system'] if protocol == 'messages' else requests[1]['messages'][0]['content']
+                            self.assertIn(DEFAULT_REGISTRY.snapshot().get('asia_adaptive').ai_rules['review'], system)
+                        finally: other.doCleanups()
+
     def test_clock_source_failure_does_not_claim_scope_then_valid_retries(self):
         self.configure(); self.tick.time = 0
         self.assertEqual(self.run_entry().call_count,0)
         self.assertFalse(getattr(self.trader,'_analysis_request_scopes',set()))
         self.tick.time=int(self.now+10800)
         self.assertEqual(self.run_entry().call_count,2)
+
+    def test_first_request_clock_failure_after_valid_collection_allows_same_checkpoint_recovery(self):
+        self.configure(); collections = []
+        def context():
+            collections.append(True)
+            if len(collections) == 2:
+                self.tick.time = 0
+            return tuple(self.data)
+        with patch.object(self.trader, 'get_context', side_effect=context):
+            self.assertEqual(self.run_entry().call_count, 0)
+        self.assertEqual(len(collections), 2)
+        candidate = next(snapshot[2] for snapshot in self.snapshots if snapshot[1] == 'entry_candidate')
+        self.assertTrue(candidate['market_evidence']['opportunities'])
+        self.assertFalse(getattr(self.trader, '_analysis_request_scopes', set()))
+        self.assertEqual(self.sent, [])
+        self.tick.time = int(self.now + 10800)
+        self.assertEqual(self.run_entry().call_count, 2, self.snapshots)
+        self.assertEqual(len(self.sent), 1, self.snapshots)
+        self.assertTrue(self.trader._analysis_request_scopes)
 
     def test_newbars_stale_checkpoint_and_too_near_margin_stop_ai2(self):
         for label in ('newbars','ttl','margin','chase','wick'):

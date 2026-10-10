@@ -2130,19 +2130,23 @@ class ThreeAITrader(base.FibVolumePATrader):
         with self._mt5_lock:
             return quote_from_tick(base.mt5.symbol_info_tick(base.SYMBOL))
 
+    def ensure_entry_account_ready(self, contract):
+        if not contract.get("demo_only"):
+            return
+        account = base.mt5.account_info()
+        if account is None or getattr(account, "trade_mode", None) != base.mt5.ACCOUNT_TRADE_MODE_DEMO:
+            raise MarketSnapshotError("研究策略仅允许模拟账户，不请求AI或下单")
+        if contract.get("analysis_mode"):
+            positions = base.mt5.positions_get(symbol=base.SYMBOL)
+            if positions is None or len(positions) >= base.MAX_POSITIONS:
+                raise MarketSnapshotError("自主分析持仓状态未知或已达到单仓上限，AI not called")
+
     def collect_entry_snapshot(self, decision_id):
         df_m15, df_h1, df_m5 = self.get_context()
         local_result = self.evaluate_context(df_m15, df_h1, df_m5)
         if (local_result.details or {}).get("strategy_error"):
             raise MarketSnapshotError(local_result.details["strategy_error"])
-        if (local_result.details or {}).get("strategy_contract", {}).get("demo_only"):
-            account = base.mt5.account_info()
-            if account is None or getattr(account, "trade_mode", None) != base.mt5.ACCOUNT_TRADE_MODE_DEMO:
-                raise MarketSnapshotError("研究策略仅允许模拟账户，不请求AI或下单")
-            if (local_result.details or {}).get("strategy_contract", {}).get("analysis_mode"):
-                positions = base.mt5.positions_get(symbol=base.SYMBOL)
-                if positions is None or len(positions) >= base.MAX_POSITIONS:
-                    raise MarketSnapshotError("自主分析持仓状态未知或已达到单仓上限，AI not called")
+        self.ensure_entry_account_ready((local_result.details or {}).get("strategy_contract", {}))
         assessments = (local_result.details or {}).get("strategy_assessments", {})
         if ("opportunities" not in (local_result.details or {}) and (local_result.details or {}).get("strategy_contract", {}).get("one_entry_per_event")
                 and assessments and all(item.get("blockers") for item in assessments.values())):
@@ -2166,6 +2170,9 @@ class ThreeAITrader(base.FibVolumePATrader):
             raise MarketSnapshotError("已有新的已收盘H1/M15/M5，旧提案停止审核/执行，等待下一轮重新分析")
 
     def prepare_review_request(self, proposal, ai1_pack, parsed, reason, decision_id, trigger):
+        contract = (proposal.details or {}).get("strategy_contract", {})
+        if contract.get("analysis_mode"):
+            self.ensure_entry_account_ready(contract)
         self.ensure_strategy_current(ai1_pack)
         self.ensure_review_bars_current(ai1_pack["bar_closure"])
         strategy_error = self.validate_strategy_entry(proposal)
@@ -2467,8 +2474,6 @@ class ThreeAITrader(base.FibVolumePATrader):
                 return
             if self._stop.is_set() or self.current_position_count() >= base.MAX_POSITIONS:
                 return
-            if not self.claim_analysis_scope(pack):
-                return
             if "opportunities" in pack and not pack["opportunities"]:
                 base.logger.info("AI not called 本地粗筛无合法候选 reason=%s blockers=%s", local_result.reasoning, pack.get("opportunity_blockers"))
                 append_decision_snapshot(decision_id, "local_prefilter", {"reason": "no_eligible_structural_opportunity",
@@ -2479,8 +2484,9 @@ class ThreeAITrader(base.FibVolumePATrader):
                 return
 
             request_pack = compact_market_pack(pack)
+            scope_claimed = False
             def refresh_ai1_request():
-                nonlocal df_m15, df_h1, df_m5, local_result, pack, fib, atr, price, request_pack
+                nonlocal df_m15, df_h1, df_m5, local_result, pack, fib, atr, price, request_pack, scope_claimed
                 df_m15, df_h1, df_m5, local_result, pack, fib, atr, price = self.collect_entry_snapshot(decision_id)
                 if "opportunities" in pack and not pack["opportunities"]:
                     append_decision_snapshot(decision_id, "local_prefilter", {"reason": "no_eligible_structural_opportunity",
@@ -2488,17 +2494,23 @@ class ThreeAITrader(base.FibVolumePATrader):
                         "blockers": pack.get("opportunity_blockers")})
                     raise MarketSnapshotError("无合法结构候选，本轮本地观望，不请求AI")
                 request_pack = compact_market_pack(pack)
-                scopes = analysis_scope_keys(pack)
-                if scopes:
-                    with self._entry_lock:
-                        self._analysis_request_scopes = scopes
+                snapshot = {"prompt": prompt_json("分析本次已收盘行情及当前报价，只输出契约JSON。", request_pack),
+                            "snapshot_id": pack["snapshot_id"], "quote": pack["live_quote"],
+                            "instructions": role_instructions("AI-1", request_contracts(pack)),
+                            "profile_rules": role_rules("AI-1", request_contracts(pack))}
+                if not scope_claimed:
+                    if not self.claim_analysis_scope(pack):
+                        raise MarketSnapshotError("同分析检查点已经派发，AI not called")
+                    scope_claimed = True
+                else:
+                    scopes = analysis_scope_keys(pack)
+                    if scopes:
+                        with self._entry_lock:
+                            self._analysis_request_scopes = scopes
                 append_decision_snapshot(decision_id, "ai1_input", {
                     "market_evidence": pack, "local_result": local_result.to_decision(), "trigger": trigger,
                     "cost_control_version": COST_CONTROL_VERSION, "freshness_version": MARKET_FRESHNESS_VERSION})
-                return {"prompt": prompt_json("分析本次已收盘行情及当前报价，只输出契约JSON。", request_pack),
-                        "snapshot_id": pack["snapshot_id"], "quote": pack["live_quote"],
-                        "instructions": role_instructions("AI-1", request_contracts(pack)),
-                        "profile_rules": role_rules("AI-1", request_contracts(pack))}
+                return snapshot
 
             ai_started = True
             raw = call_chat(
