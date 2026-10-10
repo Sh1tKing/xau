@@ -550,7 +550,7 @@ def role_instructions(role, contracts):
     rules = role_rules(role, contracts)
     extra = ""
     if role == "AI-3" and any(contract.get("analysis_mode") for contract in contracts):
-        extra = "\nanalysis_checkpoint有效期及消费只限制新入场；开仓后检查点过期或已消费本身不是交易失效，不据此平仓。原始打法失效证据与Python90分钟持仓期限分别判断。"
+        extra = "\nanalysis_checkpoint有效期及消费只限制新入场；开仓后检查点过期或已消费本身不是交易失效，不据此平仓。原始打法失效证据与入场保存的原始持仓契约中Python持仓期限分别判断。"
     return generic + extra + "\n本次来源绑定的策略角色规则：" + json.dumps(rules, ensure_ascii=False)
 
 

@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import xauusd_fib_volume_pa_ai3 as ai
-from strategies.framework import DEFAULT_REGISTRY
+from strategies.framework import DEFAULT_REGISTRY, Registry
 from strategies.lifecycle import EventLedger
 from test_ai_entry_gate_v2 import quality_sample
 
@@ -320,6 +320,62 @@ class AdaptiveAITests(unittest.TestCase):
         self.assertIn('检查点过期或已消费本身不是交易失效',snapshot['instructions'])
         self.assertNotIn(DEFAULT_REGISTRY.snapshot().get('london_adaptive').ai_rules['guardian'],snapshot['instructions'])
         self.assertEqual(snapshot['profile_rules'][0]['profile'],'asia_adaptive')
+
+    def test_guardian_and_ledger_keep_nondefault_saved_deadline_after_definition_reload(self):
+        for profile in ('asia_adaptive', 'london_adaptive', 'us_adaptive'):
+            with self.subTest(profile=profile):
+                other = AdaptiveAITests(); other.setUp()
+                try:
+                    other.configure(profile)
+                    definitions = other.directory / 'definitions'
+                    definitions.mkdir()
+                    for source in DEFAULT_REGISTRY.directory.glob('*_adaptive.py'):
+                        text = source.read_text(encoding='utf-8')
+                        self.assertEqual(text.count('max_hold_minutes=90'), 1)
+                        (definitions / source.name).write_text(
+                            text.replace('max_hold_minutes=90', 'max_hold_minutes=120'), encoding='utf-8')
+                    registry = Registry(definitions)
+                    original = registry.snapshot()
+                    with patch.object(base, 'STRATEGIES', registry):
+                        post = other.run_entry()
+                        self.assertEqual(post.call_count, 2, other.snapshots)
+                        self.assertEqual(len(other.sent), 1, other.snapshots)
+                        saved = copy.deepcopy(other.trader.entry_contexts['123']['strategy_contract'])
+                        self.assertEqual(saved['id'], profile)
+                        self.assertEqual(saved['max_hold_minutes'], 120)
+                        ledger_before = other.trader.strategy_ledger.snapshot()
+                        position = ledger_before['positions']['123']
+                        self.assertEqual(position['max_hold_minutes'], 120)
+                        deadline = position['opened_at_utc'] + 120 * 60
+
+                        # A real content-fingerprint reload must not rewrite an open position.
+                        source = definitions / (profile + '.py')
+                        source.write_text(source.read_text(encoding='utf-8').replace(
+                            'max_hold_minutes=120', 'max_hold_minutes=180'), encoding='utf-8')
+                        current = registry.snapshot()
+                        self.assertNotEqual(current.fingerprint, original.fingerprint)
+                        self.assertEqual(current.get(profile).max_hold_minutes, 180)
+                        other.now += 600; other.tick.time += 600
+                        snapshot = other.trader.collect_ai3_snapshot()
+                        self.assertIsNotNone(snapshot)
+                        self.assertIn(saved['ai_rules']['guardian'], snapshot['instructions'])
+                        self.assertIn('120分钟', snapshot['instructions'])
+                        self.assertNotIn('90分钟', snapshot['instructions'])
+                        self.assertNotIn('180分钟', snapshot['instructions'])
+                        self.assertNotIn(current.get(profile).ai_rules['guardian'], snapshot['instructions'])
+                        self.assertIn('检查点过期或已消费本身不是交易失效', snapshot['instructions'])
+                        self.assertEqual(snapshot['profile_rules'], [
+                            {'profile': profile, 'rule': saved['ai_rules']['guardian']}])
+                        payload = json.loads(snapshot['prompt'].split('\n', 1)[1])
+                        self.assertEqual(payload['positions'][0]['entry_context']['strategy_contract'], saved)
+                        self.assertEqual(other.trader.strategy_ledger.snapshot(), ledger_before)
+                        restored = EventLedger(other.directory / 'events.json')
+                        self.assertEqual(restored.snapshot(), ledger_before)
+                        for ledger in (other.trader.strategy_ledger, restored):
+                            self.assertEqual(ledger.due_tickets(deadline - .001), ())
+                            self.assertEqual(ledger.due_tickets(deadline), (123,))
+                finally:
+                    other.doCleanups()
 
     def test_actual_retry_refresh_crosses_profile_with_live_reference_and_ai2_selected_rules(self):
         for protocol in ('chat','messages'):
