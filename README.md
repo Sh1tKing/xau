@@ -13,6 +13,8 @@
 
 新候选参考目标上限3R、止损不超过8美元、最多持有180分钟，每个当地日期窗口最多一次下单尝试，平仓后冷却10分钟。旧三策略保留但默认关闭。事件和期限写入 `xau_fib_pa_logs/strategy_event_state.json`，部署迁移同一账户时保留该文件及AI持仓上下文。
 
+另有两个默认关闭的日内研究定义：`region_retest`（区域突破回踩）与 `region_rejection`（区域触碰拒绝）。它们在欧美盘中使用新形成的已确认M15区域、首次M5事件及独立保护锚，目标上限2.5R、最多120分钟、平仓冷却10分钟。参数属于本项目假设，不是视频作者算法的复现；构建与离线结果见[验证记录](docs/experiments/2026-10-10-intraday-build-validation.md)和[设计](docs/superpowers/specs/2026-10-10-intraday-region-opportunities-draft.md)。
+
 将 `.env.example` 复制为本机 `.env` 并填写自己的配置；示例值不代表当前服务器配置。密钥、账户、日志与持仓状态不在公开仓库中。框架代码或配置修改需要自行重启；加载新框架后，策略定义保存将在下一次评估/请求刷新时自动检查。
 
 三AI主备配置统一使用Messages：中转站 `/v1/messages`，DeepSeek官网 `/anthropic/v1/messages`。DeepSeek官方只发送effort、使用提示词JSON与Python严格校验；其它Messages路线优先Schema。模型、档位和超时按实际 `.env`，切换协议不保证消除超时。参见 [协议迁移记录](docs/superpowers/specs/2026-10-09-messages-route-migration.md)。

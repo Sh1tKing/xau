@@ -7,11 +7,13 @@
 | 文件 | 内容 |
 | --- | --- |
 | `session_retest.py` | 默认启用：伦敦/纽约当地建箱、首次突破回踩，3R、180分钟、一窗口一次、10分钟平仓冷却 |
+| `region_retest.py` | 默认禁用：盘中确认区域突破后的首次M5回踩，2.5R上限、120分钟、10分钟平仓冷却 |
+| `region_rejection.py` | 默认禁用：盘中确认区域的首次触碰拒绝，2.5R上限、120分钟、10分钟平仓冷却 |
 | `pullback.py` | 趋势回撤评分、动量加减分、市场状态约束和三角色规则 |
 | `range_edge.py` | 区间长度、宽度、边缘范围、拒绝条件、评分和详细证据 |
 | `breakout.py` | 箱体长度、突破幅度、回踩容差、量能评分和详细证据 |
 
-每个文件集中声明 `P` 参数、`evaluate(c)` 逻辑和 `STRATEGY`。修改参数时，评分、证据函数和AI规则都应引用同一个 `P`；修改算法时，也要更新同文件的证据与规则，框架不能推导任意Python代码的金融含义。旧三个策略的 `target_r` 为1.8，新候选为3.0；本地85分表示规则确认，不是胜率。
+每个文件集中声明 `P` 参数、`evaluate(c)` 逻辑和 `STRATEGY`。修改参数时，评分、证据函数和AI规则都应引用同一个 `P`；修改算法时，也要更新同文件的证据与规则，框架不能推导任意Python代码的金融含义。旧三个策略的 `target_r` 为1.8，时段回踩为3.0，区域定义为2.5；本地85分表示规则确认，不是胜率。
 
 `STRATEGY` 的字段：
 
@@ -36,12 +38,20 @@
 - `score` 必须为0–100整数。分数仅是本地评分，不代替AI质量门槛。
 - `details` 给出说明，常用 `fib/volume/price_action/trend/fib_score/pa_score`；M5加分只在相应评分字段存在时使用。
 - `structure` 可为公共 `FibLevels` 或 `None`，供框架生成保护价格。
-- `evidence` 为JSON可序列化的真实事实，禁止NaN。AI收到的路径是 `/strategy_evidence/buy/evidence/...` 或sell。
+- `evidence` 为JSON可序列化的真实事实，禁止NaN。AI候选池中的路径是 `/opportunities/<索引>/strategy_evidence/buy/evidence/...` 或sell。
 - `blockers` 为字符串tuple。未完成策略硬条件时必须写入，Python会拦住本地与AI自主方案；不要只在提示词里声明。低分、普通量等软意见应留在评分与证据，不要误写为硬条件。
 
 自定义收盘触发可以声明 `evidence.closed_trigger={confirmed,timeframe,bar_time}`。当confirmed为true，时间必须来自本次输入中真实的已收盘M15/M5；质量契约据此阻止模型把已触发说成完全没有触发。它不自动批准交易。
 
-参考来源由契约声明：`entry_reference=closed_m15/closed_m5`，`stop_reference=structure/m5_extreme`；只有新候选单独使用确认M5参考，旧策略仍使用M15。`max_hold_minutes/cooldown_seconds/one_entry_per_event/demo_only` 声明生命周期，Python保存并执行，已有仓不随定义修改延长。公共边界仍是H1方向、M5保护极值、止损8美元、RR至少1.5、EMA21追价1.5ATR、0.01手和最多1仓。服务器止损、本地锁盈及结构护盘仍是框架的公共保护；AI-3再结合入场保存的策略护盘规则。插件不改变这些限制，不能靠文本覆盖它们。
+宿主逐项完成所有启用定义的计划，再为纯本地模式选择可执行的最高分方案。AI收到的是结构合法候选池：本地分低或参考方案失败仍可保留，允许AI在同一公共风险边界内自主提出方案。每轮只发一份共享行情，AI-1返回成功请求中真实的 `opportunity_id`；质量卡引用所属候选或共享OHLC，不能借另一候选的触发，也不能把原本地赢家的别名当所选方案。AI-2保留选中项的原索引供引用核验，AI-3沿用入场保存的契约。无结构合法候选时写本地决策快照，不请求AI。
+
+新M15评估保留上述自主提案能力。额外M5复核先记录全部本地候选，再要求本地BUY/SELL方案可执行且分数达到实际本地门槛才派发AI；合法但低分或本地计划失败的池不会每5分钟追加付费请求。AI定稿的`reference_price`保持数值，原始来源/时间另存`reference_price_metadata`，审核和执行不能把元数据对象当价格。
+
+参考来源由契约声明：`entry_reference=closed_m15/closed_m5`，`stop_reference=structure/m5_extreme/region`；研究定义单独使用确认M5参考，旧三个策略仍使用M15。区域保护还要覆盖有来源的失效锚，目标先考虑真实的反向区域边缘。`max_hold_minutes/cooldown_seconds/one_entry_per_event/demo_only` 声明生命周期，Python保存并执行，已有仓不随定义修改延长。公共边界仍是H1方向、M5保护极值、止损8美元、RR至少1.5、EMA21追价1.5ATR、0.01手和最多1仓。服务器止损、本地锁盈及结构护盘仍是框架的公共保护；AI-3再结合入场保存的策略护盘规则。插件不改变这些限制，不能靠文本覆盖它们。
+
+区域定义用 `parameters.region_event_kind=retest/rejection` 声明已支持的事件算法，宿主从原始行情复算其区域、触发、失效锚、窗口及完整目标障碍；不会根据策略ID猜算法。改名或新增同接口定义不需要给宿主加ID分支。新增其他区域来源或算法仍须扩展辅助模块、测试并自行重启，不能只写一段提示词。
+
+`one_entry_per_event=True` 的新策略须提供 `entry_event`，包括真实执行键、周期起点、原始触发时间、显式UTC收盘与排他有效期、原始K线引用；有效期最多确认后300秒并受原窗口/区域期限约束。缺来源、缺对应K线、错方向、未来或过期均拒绝。原 `session_retest` 支持显式旧证据适配，未保存的历史事实保持未知。下单前原子预留执行键；拒单或回执不确定不会释放事件。新订单comment含短执行token，恢复须匹配原事件、symbol、magic、方向及契约；旧标记有歧义时不猜最近事件。
 
 ## 加载和验证
 
@@ -59,6 +69,15 @@ py -3.12 xauusd_fib_volume_pa_ai3.py --self-test
 py -3.12 xauusd_fib_pa_backtest.py --offline --threshold 55 --max-sl 8 --balance 100
 ```
 
-第一条只加载并验证策略声明，打印指纹、时段和参数，不连接MT5、不请求AI。内置自检固定旧三策略数学样例，新候选由 `test_session_retest_facts.py`、`test_session_retest_integration.py`、`test_session_retest_backtest.py` 和 `test_strategy_lifecycle.py` 单独验证。离线回测不含AI，不保证实际成交或收益。
+第一条只加载并验证策略声明，打印指纹、时段和参数，不连接MT5、不请求AI。内置自检固定旧三策略数学样例；事件、区域、形态、候选池、AI绑定与生命周期另由相应 `test_entry_events.py`、`test_intraday_regions.py`、`test_intraday_patterns.py`、`test_strategy_opportunities.py`、`test_ai_strategy_opportunities.py` 及回放测试覆盖。离线回测不含AI，不保证实际成交或收益。
+
+已有本地历史缓存时，可以仅在这次离线回放中启用研究定义，不编辑定义或实际 `.env`：
+
+```powershell
+py -3.12 xauusd_fib_pa_backtest.py --offline --strategies region_retest,region_rejection --threshold 55 --max-sl 8 --balance 100 --output-label regions
+py -3.12 xauusd_fib_pa_backtest.py --offline --strategies session_retest,region_retest,region_rejection --threshold 55 --max-sl 8 --balance 100 --entry-delay-seconds 120 --spread-multiplier 2 --output-label all3-delay120-spread2
+```
+
+`--strategies`只允许与`--offline`合用；无该参数沿用默认启用项。延迟必须是非负整分钟秒数，成交使用目标分钟的真实缓存Bid/Ask，保持原SL/TP及来源；缺分钟、新收盘K线、事件过期或实时报价不合法就拒绝。点差倍数同时影响入场、护盘和退出。每次输出带独立时间与标识的CSV/TXT/JSON，JSON记录启用项、原指纹、延迟、点差、零成交日和拒绝漏斗。`--split-date`默认2026-09-15，这份缓存已用于研究，前后分段不能当独立样本外结果。
 
 事件文件默认位于日志目录，可用 `FIB_PA_STRATEGY_STATE_FILE` 指定路径。删除会丢失已用窗口和期限，迁移同一账户须保留。写入失败停止新入场；旧期限仍可读取供护盘。只运行一个进程实例。

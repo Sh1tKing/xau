@@ -1,6 +1,8 @@
-# 日内区域事件与候选池代码草案
+# 日内区域事件与候选池冻结设计
 
-日期：2026-10-10。状态：构思草案，未实现、未启用、未完成收益验证。来源：[合集主题及作者答疑梳理](../../experiments/2026-10-10-bilibili-technical-collection-review.md)及[中频需求](../../experiments/2026-10-10-intraday-medium-frequency-direction.md)。已确认登录并读取六节页面，完整字幕尚未取得；下列参数和数据结构均为本项目提出，不是作者算法的复现。
+日期：2026-10-10。状态：按本设计完成构建、复审及冻结缓存回放；两个新区域定义仍默认禁用，收益与稳定日内多次交易尚未验证成立。来源：[合集主题及作者答疑梳理](../../experiments/2026-10-10-bilibili-technical-collection-review.md)及[中频需求](../../experiments/2026-10-10-intraday-medium-frequency-direction.md)。已确认登录并读取六节页面，完整字幕尚未取得；下列参数和数据结构均为本项目提出，不是作者算法的复现。
+
+本文保留实施前冻结的方案、初始参数及验收条件；下文“建议新增”“初始假设”等是当时的设计表述。最终实现和九组实测见[构建验证记录](../../experiments/2026-10-10-intraday-build-validation.md)，没有根据结果改参数或切换启用项。
 
 ## 目标与边界
 
@@ -8,9 +10,9 @@
 
 本地粗筛→AI-1自主精筛和提案→AI-2独立审核→AI-3护盘不变。只扩展事实与事件管理，不增添AI角色。实际 `.env`、模型、档位、超时和门槛不在该设计修改范围。保留Messages协议、严格JSON质量卡、主备共用5次HTTP预算、逐POST刷新及截断失败。代理不启动交易。
 
-## 现有代码中的接入限制
+## 实施前的接入限制
 
-已核对当前代码，下面是尚未修复的接口约束，不是新的策略已被实现：
+冻结设计时核对出的五项接口约束如下，现已由通用事件、逐候选定稿、AI池绑定和执行token接口解除；保留它们作为变更原因记录：
 
 1. `xauusd_fib_volume_pa_trader.py:build_fib_volume_pa_decision()` 每个方向先按评分选择一个策略，随后才在内部 `finish()` 检查止损、追价等条件。高分候选不可执行时，其他策略不会继续在这个本地选择流程里完成定稿。AI-1仍可在所选契约内自主提案，因此不能说这个行为必然造成全部观望。
 2. `validate_strategy_entry()` 的通用 `one_entry_per_event` 分支实际读取 `retest_bar.close_utc` 与 `windows.entry_end_utc`。普通区域拒绝策略没有这些字段；不能靠伪造“开盘回踩”字段接入。
@@ -72,7 +74,7 @@ flowchart LR
 
 ### 三、通用事件契约
 
-建议新增纯数据模块 `strategies/events.py`，提供冻结结构，内容示意如下；名称和接口尚未实现：
+新增纯数据模块 `strategies/events.py`，提供冻结结构；下列为原设计的字段示意，最终接口以该模块和回归为准：
 
 ```python
 @dataclass(frozen=True)
