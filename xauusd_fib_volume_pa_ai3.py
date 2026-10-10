@@ -2170,10 +2170,10 @@ class ThreeAITrader(base.FibVolumePATrader):
             raise MarketSnapshotError("已有新的已收盘H1/M15/M5，旧提案停止审核/执行，等待下一轮重新分析")
 
     def prepare_review_request(self, proposal, ai1_pack, parsed, reason, decision_id, trigger):
+        self.ensure_strategy_current(ai1_pack)
         contract = (proposal.details or {}).get("strategy_contract", {})
         if contract.get("analysis_mode"):
             self.ensure_entry_account_ready(contract)
-        self.ensure_strategy_current(ai1_pack)
         self.ensure_review_bars_current(ai1_pack["bar_closure"])
         strategy_error = self.validate_strategy_entry(proposal)
         if strategy_error:
