@@ -362,6 +362,17 @@ class Backtest:
                 scheduled_fill_server_ts=signal_ts+self.entry_delay_seconds,
                 reason=execution_error,event_id=event_id))
             return
+        # place_order applies this cap to every definition, including legacy
+        # contracts that deliberately bypass the demo research helper above.
+        live_risk = base.directional_stop_distance(side, entry, float(result.stop_loss))
+        if not math.isfinite(live_risk) or live_risk <= 0 or live_risk > base.MAX_SL_ABS + .001:
+            reason = "成交价止损距离非法或超出上限"
+            self.stats["成交价止损距离非法或超限放弃"] += 1
+            self.rejects[reason] += 1
+            self.rejected_fills.append(dict(signal_server_ts=signal_ts, fill_server_ts=self.t[i],
+                scheduled_fill_server_ts=signal_ts+self.entry_delay_seconds,
+                reason=reason, event_id=event_id))
+            return
         sl, tp = float(result.stop_loss), float(result.take_profit)
         if base.reward_risk_ratio(side, entry, sl, tp) < base.MIN_REWARD_RISK:
             self.stats["成交价盈亏比不足放弃"] += 1

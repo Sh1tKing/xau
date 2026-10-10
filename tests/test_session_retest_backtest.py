@@ -299,11 +299,11 @@ class SessionRetestBacktestTests(unittest.TestCase):
 
     def test_legacy_strategy_replay_prices_and_exit_semantics_remain_unchanged(self):
         test = self.backtest()
-        result = proposal(sl=90., tp=125.)
+        result = proposal(sl=94., tp=125.)
         result.details = dict(setup="pullback", session="london",
                               strategy_contract={"id": "pullback", "name": "旧策略"})
         test.open_position(result, 0, self.decision - 600)  # Legacy delayed-fill semantics remain.
-        self.assertIsNotNone(test.position)  # Existing replay applies RR, not new candidate guards.
+        self.assertIsNotNone(test.position)  # Legacy event guards stay absent; shared SL cap/RR apply.
         self.assertEqual(test.position["state"].entry_price, 101.8)
         self.assertEqual(test.position["max_hold_minutes"], 0)
         test.l[2], test.h[2] = 89., 126.

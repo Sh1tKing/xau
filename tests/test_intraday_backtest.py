@@ -124,5 +124,55 @@ class IntradayReplayTests(unittest.TestCase):
         self.assertEqual(metric['split']['later']['net'],-1)
         self.assertEqual(metric['hold_minutes']['p90'],28)
 
+class LegacyExecutionCapTests(unittest.TestCase):
+    def setUp(self):
+        self.data, self.meta, self.ts = old.market()
+        self.addCleanup(patch.stopall)
+        patch.object(replay.base, 'MAX_SL_ABS', 8.).start()
+
+    def legacy(self, side, sl):
+        result = old.proposal(side, sl=sl, tp=125. if side == 'buy' else 80.)
+        result.details['strategy_contract'] = dict(id='pullback', demo_only=False,
+            one_entry_per_event=False, max_hold_minutes=0, cooldown_seconds=0)
+        result.details.pop('strategy_event_id')
+        return result
+
+    def test_reference_legal_live_buy_and_sell_stop_exceeds_cap(self):
+        # BUY: reference101.6/SL93.6 fits8, Ask101.8 does not.
+        # SELL: reference101.7/SL109.7 fits8, Bid101.6 does not.
+        for side, sl in (('buy', 93.6), ('sell', 109.7)):
+            for delay, index, multiplier in ((0, 0, 1), (60, 1, 2)):
+                with self.subTest(side=side, delay=delay):
+                    test = replay.Backtest(self.data, self.meta, 55,
+                        entry_delay_seconds=delay, spread_multiplier=multiplier)
+                    result = self.legacy(side, sl)
+                    frozen = copy.deepcopy(result)
+                    test.open_position(result, index, self.ts)
+                    self.assertIsNone(test.position)
+                    self.assertEqual(test.stats['成交价止损距离非法或超限放弃'], 1)
+                    self.assertEqual(test.rejected_fills[-1]['signal_server_ts'], self.ts)
+                    self.assertEqual(test.rejected_fills[-1]['scheduled_fill_server_ts'], self.ts+delay)
+                    self.assertEqual(result, frozen)
+
+    def test_live_buy_and_sell_exact_cap_can_fill(self):
+        for side, sl in (('buy', 93.8), ('sell', 109.6)):
+            with self.subTest(side=side):
+                test = replay.Backtest(self.data, self.meta, 55)
+                result = self.legacy(side, sl)
+                test.open_position(result, 0, self.ts)
+                self.assertIsNotNone(test.position, test.rejects)
+                self.assertAlmostEqual(test.position['state'].risk, 8.)
+                self.assertEqual(test.position['sl'], sl)
+
+    def test_wrong_side_zero_and_nonfinite_stop_never_fill(self):
+        for side, sl in (('buy', 101.8), ('buy', 103.), ('sell', 101.6),
+                         ('sell', 99.), ('buy', float('nan')), ('sell', float('inf'))):
+            with self.subTest(side=side, sl=sl):
+                test = replay.Backtest(self.data, self.meta, 55)
+                test.open_position(self.legacy(side, sl), 0, self.ts)
+                self.assertIsNone(test.position)
+                self.assertEqual(test.stats['成交价止损距离非法或超限放弃'], 1)
+
+
 if __name__=='__main__': unittest.main()
 
