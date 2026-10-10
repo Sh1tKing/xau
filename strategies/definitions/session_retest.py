@@ -27,7 +27,7 @@ def evaluate(c):
 
 
 STRATEGY = Strategy(
-    id="session_retest", name="欧美时段突破回踩", version="1",
+    id="session_retest", name="欧美时段突破回踩", version="1", enabled=False,
     sessions={"asia": 0, "london": 0, "overlap": 0, "late_us": 0},
     parameters=P, evaluate=evaluate, target_r=P["target_r"], m5_boost=False,
     entry_reference="closed_m5", stop_reference="m5_extreme", max_hold_minutes=P["max_hold_minutes"],

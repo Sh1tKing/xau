@@ -70,7 +70,7 @@ class SessionRetestBacktestTests(unittest.TestCase):
         self.data, self.meta, self.decision = market()
 
     def backtest(self, data=None, meta=None):
-        return replay.Backtest(data or self.data, meta or self.meta, 55)
+        return replay.Backtest(data or self.data, meta or self.meta, 55, strategies="session_retest")
 
     def evaluate(self, test, stamp):
         # Synthetic flat H1 represents an allowed BUY; session rules and all price guards are real.

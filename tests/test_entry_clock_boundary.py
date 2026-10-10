@@ -22,6 +22,11 @@ class EntryClockBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        original = base.STRATEGIES.snapshot()
+        legacy_snapshot = Snapshot(original.fingerprint, tuple(
+            replace(strategy, enabled=strategy.id == "session_retest") for strategy in original.strategies))
+        registry_patch = patch.object(base.STRATEGIES, "snapshot", return_value=legacy_snapshot)
+        registry_patch.start(); self.addCleanup(registry_patch.stop)
         self.frames = market()
         self.boundary = self.frames[-1].timestamp()
         self.m5 = int(self.boundary+10800)

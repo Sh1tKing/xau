@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import xauusd_fib_volume_pa_ai3 as ai
-from strategies.framework import DEFAULT_REGISTRY
+from strategies.framework import DEFAULT_REGISTRY, Registry
 from strategies.lifecycle import EventLedger
 from test_session_retest_facts import fixture
 
@@ -46,6 +46,14 @@ class ResearchIntegrationTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
+        # Keep explicit legacy tests on their original contract after defaults change.
+        definitions = self.directory / "definitions"
+        definitions.mkdir()
+        legacy = Path(__file__).resolve().parents[1] / "strategies/definitions/session_retest.py"
+        (definitions / "session_retest.py").write_text(
+            legacy.read_text(encoding="utf-8").replace("enabled=False", "enabled=True"), encoding="utf-8")
+        registry_patch = patch.object(base, "STRATEGIES", Registry(definitions))
+        registry_patch.start(); self.addCleanup(registry_patch.stop)
         self.frames = market()
         self.now = self.frames[-1].timestamp()+5
         self.env = patch.dict(os.environ, {"FIB_PA_STRATEGY_STATE_FILE": str(self.directory/"events.json")})
@@ -68,10 +76,12 @@ class ResearchIntegrationTests(unittest.TestCase):
         ref = float(result.details["entry_price"])
         return SimpleNamespace(bid=ref, ask=ref+.33, time=int(self.now+10800))
 
-    def test_only_report_candidate_is_active_in_all_host_sessions(self):
+    def test_default_adaptive_profiles_and_legacy_report_contract_remain_available(self):
         snapshot = DEFAULT_REGISTRY.snapshot()
-        for session in ("asia", "london", "overlap", "late_us"):
-            self.assertEqual([s.id for s in snapshot.active(session)], ["session_retest"])
+        for session, profile in (("asia", "asia_adaptive"), ("london", "london_adaptive"),
+                                 ("overlap", "us_adaptive"), ("late_us", "us_adaptive")):
+            self.assertEqual([s.id for s in snapshot.active(session)], [profile])
+        self.assertFalse(snapshot.get("session_retest").enabled)
         contract = snapshot.get("session_retest").manifest()
         self.assertEqual((contract["target_max_reference_r"], contract["max_hold_minutes"],
                           contract["cooldown_seconds"], contract["demo_only"]), (3.,180,600,True))

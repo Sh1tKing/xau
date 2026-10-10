@@ -69,6 +69,7 @@ class Strategy:
     cooldown_seconds: int = 0
     one_entry_per_event: bool = False
     demo_only: bool = False
+    analysis_mode: bool = False  # Broad AI analysis checkpoint, not a confirmed entry pattern.
 
     def manifest(self):
         return copy.deepcopy({"id": self.id, "name": self.name, "version": self.version,
@@ -77,7 +78,7 @@ class Strategy:
                 "regime_filter": self.regime_filter, "entry_reference": self.entry_reference,
                 "stop_reference": self.stop_reference, "max_hold_minutes": self.max_hold_minutes,
                 "cooldown_seconds": self.cooldown_seconds, "one_entry_per_event": self.one_entry_per_event,
-                "demo_only": self.demo_only})
+                "demo_only": self.demo_only, "analysis_mode": self.analysis_mode})
 
     def assess(self, context):
         contract = self.manifest()
@@ -175,8 +176,11 @@ class Registry:
             raise StrategyError(f"{s.id} 入场/止损来源非法")
         if (type(s.max_hold_minutes) is not int or not 0 <= s.max_hold_minutes <= 2880
                 or type(s.cooldown_seconds) is not int or not 0 <= s.cooldown_seconds <= 86400
-                or type(s.one_entry_per_event) is not bool or type(s.demo_only) is not bool):
+                or type(s.one_entry_per_event) is not bool or type(s.demo_only) is not bool
+                or type(s.analysis_mode) is not bool):
             raise StrategyError(f"{s.id} 生命周期声明非法")
+        if s.analysis_mode and (not s.demo_only or not s.one_entry_per_event):
+            raise StrategyError(f"{s.id} 分析模式必须仅模拟账户且单检查点一次订单")
         if (s.regime_filter not in ("none", "pullback") or (s.momentum is not None and not callable(s.momentum))
                 or s.describe is not None and not callable(s.describe)):
             raise StrategyError(f"{s.id} regime_filter/momentum错误")
