@@ -40,7 +40,7 @@ def trade_stats(rows):
             abs(float(r['sl'])-float(r['entry'])) for r in rows), 3), exits=exits)
 
 
-def path_diagnosis(row, bars, times, offset, point, spread_multiplier):
+def path_diagnosis(row, bars, times, offset, point, spread_multiplier, lot_value):
     start = int(row['fill_server_ts'])
     index = bisect.bisect_left(times, start)
     assert index < len(times) and times[index] == start
@@ -85,7 +85,7 @@ def path_diagnosis(row, bars, times, offset, point, spread_multiplier):
             reason, price = 'original_target', tp
         if reason:
             result.update(fixed_path_status='known', fixed_exit=reason,
-                fixed_pnl_per_ticket=round(sign*(price-entry), 2),
+                fixed_pnl_per_ticket=round(sign*(price-entry)*lot_value, 2),
                 fixed_hold_min=(t-start)//60)
             return result
         expected += 60
@@ -110,7 +110,7 @@ def main():
         assert abs(sum(float(r['pnl']) for r in rows)-case['metrics']['net']) < .02
         metadata = case['metrics']['metadata']
         paths = [path_diagnosis(r, bars, times, metadata['server_offset'], metadata['point'],
-                               case['spread_multiplier']) for r in rows]
+                               case['spread_multiplier'], metadata['contract_size']*.01) for r in rows]
         grouped = {}
         for sid in sorted(set(r['strategy_id'] for r in rows)):
             group = [r for r in rows if r['strategy_id'] == sid]
