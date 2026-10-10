@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from strategies.framework import Context, DEFAULT_REGISTRY, StrategyError, VERSION as STRATEGY_FRAMEWORK_VERSION
 from strategies.lifecycle import EventLedger, execution_token, recovery_event
 from strategies.events import validate_entry_event
+from strategies.adaptive import validate_analysis_checkpoint
 from strategies.regions import region_facts
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,7 @@ import pandas as pd
 
 STRATEGIES = DEFAULT_REGISTRY
 ENTRY_CLOCK_VERSION = "closed-entry-clock-v1"
+ADAPTIVE_SESSION_VERSION = "adaptive-session-v1"
 
 
 def strategy_api():
@@ -1619,6 +1621,19 @@ def build_fib_volume_pa_decision(
                 evidence = copy.deepcopy(result.evidence)
                 evidence.pop("host_verified_region", None)
                 evidence.pop("host_verified_entry_event", None)
+                evidence.pop("host_verified_analysis_checkpoint", None)
+                if strategy.analysis_mode:
+                    error = validate_analysis_checkpoint(evidence, decision_clock, server_utc_offset,
+                                                         df_m5, df_m15, strategy.id, side)
+                    if error:
+                        blockers.append(error)
+                    else:
+                        evidence["host_verified_analysis_checkpoint"] = {
+                            "analysis_checkpoint": copy.deepcopy(evidence["analysis_checkpoint"]),
+                            "profile": strategy.id, "action": side, "event_id": evidence["event_id"],
+                            "server_offset_hours": server_utc_offset,
+                            "h1_bar_time": int(df_h1["time"].iloc[-1]), "h1_trend": h1_trend}
+
                 if evidence.get("closed_trigger", {}).get("confirmed") and strategy.one_entry_per_event:
                     error = validate_entry_event(evidence, decision_clock, server_utc_offset, df_m5, df_m15,
                                                  legacy_session=strategy.id == "session_retest")
@@ -1642,10 +1657,10 @@ def build_fib_volume_pa_decision(
                             evidence["host_verified_region"]["target_max_reference_r"] = strategy.target_r
                         except StrategyError as exc:
                             blockers.append(str(exc))
-                if strategy.one_entry_per_event and not evidence.get("closed_trigger", {}).get("confirmed"):
+                if strategy.one_entry_per_event and not strategy.analysis_mode and not evidence.get("closed_trigger", {}).get("confirmed"):
                     blockers.append("策略没有确认首次收盘事件")
                 event_id = evidence.get("event_id")
-                if strategy.one_entry_per_event and result.evidence.get("closed_trigger", {}).get("confirmed"):
+                if strategy.one_entry_per_event and (strategy.analysis_mode or result.evidence.get("closed_trigger", {}).get("confirmed")):
                     if not isinstance(event_id, str) or not event_id.strip():
                         blockers.append("策略事件标识缺失")
                     elif entry_gate is not None:
@@ -1700,8 +1715,9 @@ def build_fib_volume_pa_decision(
         if ALIGN_HARD_FILTER and not trends_support(action, h1_trend, m15_trend):
             blocks.append(f"{action.upper()} 与H1不同向(H1={h1_trend}, M15={m15_trend})")
         blocked, m5_text = m5_blocks_entry(df_m5, action)
-        if blocked:
+        if blocked and not details["strategy_contract"].get("analysis_mode"):
             blocks.append(m5_text)
+        details["m5_advisory"] = m5_text if blocked else ""
         structural = list(blocks)
         setup_price = float(df_m15["low"].tail(3).min() if action == "buy" else df_m15["high"].tail(3).max())
         # Legacy definitions retain their M15 reference; only an explicit research
@@ -1838,12 +1854,16 @@ def build_fib_volume_pa_decision(
         chosen = copy.deepcopy(finished[max(pool, key=lambda i: opportunities[i]["local_score"])])
         if chosen.action != "no":
             chosen.action = "no"
-            chosen.stop_loss = chosen.take_profit = 0.
+            if not chosen.details.get("strategy_contract", {}).get("analysis_mode"):
+                chosen.stop_loss = chosen.take_profit = 0.
             chosen.reasoning = label(chosen.details) + f"未达到交易阈值，score={chosen.confidence}"
     if not executable:
         reasons = list(dict.fromkeys(block for o in opportunities for block in o["structural_blockers"]))
         if reasons:
             chosen.reasoning += "；候选硬条件: " + "；".join(reasons)
+    if chosen.details.get("strategy_contract", {}).get("analysis_mode"):
+        chosen.action = "no"
+        chosen.reasoning = label(chosen.details) + "自主分析粗筛，仅供AI；本地分不作AI派发门槛。" + chosen.reasoning
     chosen.details["opportunities"] = copy.deepcopy(opportunities)
     return chosen
 
@@ -1897,6 +1917,41 @@ class FibVolumePATrader:
             assessments = details.get("strategy_evidence", details.get("strategy_assessments", {}))
             evidence = assessments.get(result.action, {}).get("evidence", {})
             event_id = details.get("strategy_event_id") or evidence.get("event_id")
+            if contract.get("analysis_mode"):
+                if details.get("source") != "ai1":
+                    return "自主粗筛仅允许来源绑定的AI提案，关闭AI不得自动下单"
+                binding = details.get("ai1_source_binding", {})
+                original = evidence.get("host_verified_analysis_checkpoint", {})
+                if (not original or original.get("analysis_checkpoint") != evidence.get("analysis_checkpoint")
+                        or original.get("profile") != contract.get("id") or original.get("action") != result.action
+                        or original.get("event_id") != event_id
+                        or original.get("server_offset_hours") != evidence.get("server_offset_hours")
+                        or original.get("h1_trend") != ("bull" if result.action == "buy" else "bear")
+                        or binding.get("checkpoint") != original or not binding.get("snapshot_id")
+                        or binding.get("fingerprint") != details.get("strategy_fingerprint")
+                        or binding.get("reference_price") != details.get("reference_price_metadata")):
+                    return "自主分析检查点缺少原始来源及AI请求绑定"
+                observed = time.time()
+                tick = mt5.symbol_info_tick(SYMBOL)
+                offset = tick_clock_offset(tick, observed)
+                error = validate_analysis_checkpoint(evidence, datetime.fromtimestamp(observed, timezone.utc),
+                                                      offset, profile=contract.get("id"), action=result.action)
+                if error:
+                    return "自主分析检查点无效: " + error
+                try:
+                    m15, h1, m5 = self.get_context()
+                    error = validate_analysis_checkpoint(evidence, datetime.fromtimestamp(observed, timezone.utc),
+                                                         offset, m5, m15, contract.get("id"), result.action)
+                    expected_h1 = int((observed + offset * 3600) // 3600) * 3600 - 3600
+                    if (error or int(h1["time"].iloc[-1]) != original.get("h1_bar_time")
+                            or int(h1["time"].iloc[-1]) != expected_h1
+                            or trend_from_ema(h1, 50) != original.get("h1_trend")):
+                        return "自主分析原始收盘来源或H1许可已改变: " + error
+                except (RuntimeError, KeyError, TypeError, ValueError, IndexError) as exc:
+                    return "自主分析来源复核失败: " + str(exc)
+                if assessments.get(result.action, {}).get("blockers"):
+                    return "策略硬条件已拒绝，不能提交订单"
+                return self.strategy_ledger.entry_error(event_id, observed)
             if not evidence.get("closed_trigger", {}).get("confirmed") or not event_id:
                 return "策略缺少真实首次收盘事件，拒绝下单"
             if event_id != evidence.get("event_id"):
@@ -2678,6 +2733,7 @@ class FibVolumePATrader:
         logger.info("止损价格=%s BUY向下/SELL向上量化，严格保留M5极值缓冲与止损上限", STOP_PRICE_VERSION)
         logger.info("入场时钟=%s 本地时钟到达M15/M5收盘边界前等待，同根K线下轮重查，护盘继续", ENTRY_CLOCK_VERSION)
         strategies = STRATEGIES.snapshot()
+        logger.info("%s 粗筛仅供AI，本地分不作自主AI派发门槛", ADAPTIVE_SESSION_VERSION)
         logger.info("策略框架=%s fingerprint=%s loaded=%s error=%s", STRATEGY_FRAMEWORK_VERSION,
                     strategies.fingerprint, [s.id for s in strategies.strategies if s.enabled], strategies.error or "无")
 

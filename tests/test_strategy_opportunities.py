@@ -11,6 +11,11 @@ from test_session_retest_integration import market
 from test_intraday_regions import data, m5_after, m5_clock
 
 
+def legacy_session_snapshot():
+    original = DEFAULT_REGISTRY.snapshot()
+    return Snapshot(original.fingerprint, (replace(original.get('session_retest'), enabled=True),))
+
+
 class OpportunityTests(unittest.TestCase):
     def decision(self, definitions, threshold=55, targets=None):
         frames=market()
@@ -49,7 +54,7 @@ class OpportunityTests(unittest.TestCase):
         self.assertEqual(result.action,'no')
 
     def test_session_baseline_prices_and_source_unchanged(self):
-        result=self.decision([DEFAULT_REGISTRY.snapshot().get('session_retest')])
+        result=self.decision([replace(DEFAULT_REGISTRY.snapshot().get('session_retest'), enabled=True)])
         self.assertEqual(result.action,'buy')
         self.assertEqual(result.details['reference_price_source'],'confirmed_closed_m5_close')
         expected=base.calculate_targets('buy',float(result.details['entry_price']),result.details['entry_guard_atr'],None,

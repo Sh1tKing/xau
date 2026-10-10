@@ -431,7 +431,8 @@ class OpportunityAITests(unittest.TestCase):
         from strategies.lifecycle import EventLedger
         m15, h1, m5, clock = market()
         now = clock.timestamp() + 5
-        result = ai.base.build_fib_volume_pa_decision(m15, h1, m5, 55, now=clock, server_utc_offset=3)
+        result = ai.base.build_fib_volume_pa_decision(m15, h1, m5, 55, now=clock, server_utc_offset=3,
+                                                   strategy_snapshot=host_fixtures.legacy_session_snapshot())
         self.assertEqual(result.action, 'buy', result.reasoning)
         own = next(item for item in result.details['opportunities'] if item['action'] == 'buy')
         result.details.update(opportunity_id=own['opportunity_id'], event_id=own['event_id'],

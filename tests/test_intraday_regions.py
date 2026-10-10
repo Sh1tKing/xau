@@ -307,7 +307,8 @@ class RegionTests(unittest.TestCase):
             Registry.validate(s)
         snap=Registry('strategies/definitions').snapshot()
         self.assertFalse(snap.error,snap.error)
-        self.assertEqual([s.id for s in snap.active('london')],['session_retest'])
+        self.assertEqual([s.id for s in snap.active('london')],['london_adaptive'])
+        self.assertFalse(snap.get('session_retest').enabled)
 
 if __name__=='__main__':unittest.main()
 

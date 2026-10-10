@@ -109,8 +109,8 @@ AI1_INSTRUCTIONS = (
     "按session和strategy_contract分析；parameters/ai_rules.entry定义本次策略，strategy_evidence是同版本评分事实。"
     "当前方向的blockers是策略硬条件；本地低分或no不剥夺自主提出合法方案的权利。"
     "方向仅H1，M15管本策略结构/量能/价格行为，M5只管时机；H4不否决，M15暂反向可以是回撤。"
-    "H1同向只是方向许可，还须策略有效、收盘确认及目标空间。引用computed_evidence和strategy_evidence的事实、bar_time/price，禁止另算或编造输入已提供的指标。"
-    "事实冲突写fact_conflicts并no，关键缺失写unknowns并no，不猜测。"
+    "H1同向只是方向许可，还须策略有效、真实收盘证据及目标空间；analysis_mode允许原始K线自主触发证据，不要求固定检测器确认；analysis_checkpoint只是分析及去重范围，不是交易触发。引用computed_evidence和strategy_evidence的事实、bar_time/price，禁止另算或编造输入已提供的指标。"
+    "事实冲突写fact_conflicts并no，必要的OHLC/来源/时效/保护/目标证据缺失写unknowns并no；外部新闻日历未知只作信息上下文，不自动迫使no，不猜测。"
     "涉及Fib时按给定容差/recent_probe/confirmation_extension，不因略越38.2/61.8否决。"
     "边缘收盘失守、独立反向结构收盘确认或明确形态失效才重判。"
     "目标须有数据依据及中间障碍，不为凑RR延远；首个未克服的重要障碍前不足1.5RR或无收盘触发则no并写等待条件。"
@@ -140,7 +140,7 @@ AI1_INSTRUCTIONS += (
     "本地分低或参考方案失败不剥夺自主提出安全方案的权限；patterns仅几何与位置事实，不是吞没硬门或首轮趋势判断。"
     "live_quote是本次请求重新采集的报价，不是参考K线收盘价；按当前报价核实方案可执行性，不能把止损贴近现价形成的高RR当作质量提升。"
     "local_plan_feasibility只评价原本地SL/TP，不是否决其他自主方案的全局开关；本地no或该方案不可执行时，仍可提出有证据的其他合法方案。"
-    "Python按rules.price_finalization定稿；先考虑M15参考价下最小止损宽度及target_max_reference_r目标上限，再核实实时报价RR，不能按随后会被截短的远目标宣称通过。"
+    "Python按rules.price_finalization定稿；按reference_price的模式参考价考虑M15 ATR最小止损宽度及target_max_reference_r目标上限；analysis_mode买用成功请求Ask、卖用Bid，旧模式用其闭合K线参考，再核实实时报价RR，不能按随后会被截短的远目标宣称通过。"
 )
 AI2_INSTRUCTIONS += (
     "ai1_snapshot是原分析报价，market_evidence.live_quote是本次审核新报价；比较变化，按final_plan_feasibility核实当前执行区间、止损触发侧剩余空间及追价。"
@@ -487,7 +487,7 @@ def opportunity_selection(payload, pack):
                             own = len(parts) > evidence_at + 1 and parts[evidence_at + 1] == candidate["action"]
                         shared = parts and parts[0] in ("m15_bars", "m5_bars", "h1_bars", "patterns", "live_quote", "atr", "h1_trend", "m15_trend", "m15_ema21", "bar_closure")
                         shared = shared or parts[:2] == ["computed_evidence", "price_action"]
-                        if not (own or shared) or any(p in ("host_verified_region", "host_verified_entry_event", "candidates") for p in parts):
+                        if not (own or shared) or any(p in ("host_verified_region", "host_verified_entry_event", "host_verified_analysis_checkpoint", "candidates") for p in parts):
                             return "AI-1证据隔离拒绝: " + pointer
                 error = check_refs(child)
                 if error:
@@ -517,6 +517,8 @@ def selected_opportunity_pack(pack, selection):
     result["strategy_fingerprint"] = candidate["strategy_fingerprint"]
     result["strategy_evidence"] = copy.deepcopy(candidate["strategy_evidence"])
     result["reference_price"] = copy.deepcopy(candidate["reference_price"])
+    if candidate.get("coarse_reference_price"):
+        result["coarse_reference_price"] = copy.deepcopy(candidate["coarse_reference_price"])
     result["price"] = candidate["reference_price"]["price"]
     result["details"] = copy.deepcopy(candidate["local_plan"].get("details", {}))
     result["setup"] = result["details"].get("setup", candidate["strategy_contract"].get("setup", candidate["strategy_contract"].get("id")))
@@ -531,8 +533,41 @@ def selected_opportunity_pack(pack, selection):
     finalization = result.get("rules", {}).get("price_finalization", {})
     finalization["reference"] = candidate["reference_price"].get("source")
     finalization["target_max_reference_r"] = candidate["strategy_contract"].get("target_max_reference_r", 1.8)
-    result["local_plan_feasibility"] = plan_feasibility(candidate["action"], result["price"], result["local_stop_loss"], result["local_take_profit"], result["live_quote"], result["atr"], result.get("m15_ema21"))
+    result["local_plan_feasibility"] = plan_feasibility(candidate["action"],
+        candidate.get("coarse_reference_price", candidate["reference_price"])["price"],
+        result["local_stop_loss"], result["local_take_profit"], result["live_quote"], result["atr"], result.get("m15_ema21"))
     return result
+
+
+def role_rules(role, contracts):
+    key = {"AI-1": "entry", "AI-2": "review", "AI-3": "guardian"}[role]
+    return [{"profile": contract.get("id"), "rule": contract.get("ai_rules", {}).get(key, "")}
+            for contract in contracts if contract]
+
+
+def role_instructions(role, contracts):
+    generic = {"AI-1": AI1_INSTRUCTIONS, "AI-2": AI2_INSTRUCTIONS, "AI-3": AI3_INSTRUCTIONS}[role]
+    rules = role_rules(role, contracts)
+    extra = ""
+    if role == "AI-3" and any(contract.get("analysis_mode") for contract in contracts):
+        extra = "\nanalysis_checkpoint有效期及消费只限制新入场；开仓后检查点过期或已消费本身不是交易失效，不据此平仓。原始打法失效证据与Python90分钟持仓期限分别判断。"
+    return generic + extra + "\n本次来源绑定的策略角色规则：" + json.dumps(rules, ensure_ascii=False)
+
+
+def request_contracts(pack):
+    return [item["strategy_contract"] for item in pack.get("opportunities", [])] or [pack.get("strategy_contract", {})]
+
+
+def analysis_scope_keys(pack):
+    """Closed-source request identity, independent of an asserted trade trigger."""
+    scopes = set()
+    for item in pack.get("opportunities", []):
+        if not item.get("strategy_contract", {}).get("analysis_mode"):
+            continue
+        checkpoint = item["strategy_evidence"][item["action"]]["evidence"]["analysis_checkpoint"]
+        scopes.add((item["strategy_contract"]["id"], item["strategy_fingerprint"],
+                    checkpoint["m5_bar_time"], checkpoint["m15_bar_time"]))
+    return scopes
 
 
 def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_id=None):
@@ -594,7 +629,7 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
         "computed_evidence": build_computed_entry_evidence(
             df_m15, df_h1, df_m5, local_result, fib, atr, price
         ),
-        "quality_rubric": quality_rubric(),
+        "quality_rubric": quality_rubric(contract.get("analysis_mode", False)),
         "rules": {
             "h1_sets_direction": True,
             "m15_opposite_is_pullback": contract.get("regime_filter", "pullback") == "pullback",
@@ -638,6 +673,21 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
                                           "local_plan_status": item["local_plan_status"]}
                                          for item in pack["opportunities"]]
         pack["opportunities"] = [item for item in pack["opportunities"] if base.opportunity_eligible(item)]
+        for item in pack["opportunities"]:
+            if item["strategy_contract"].get("analysis_mode"):
+                item["coarse_reference_price"] = copy.deepcopy(item["reference_price"])
+                side = item["action"]
+                live = pack["live_quote"]
+                value = live.get("ask" if side == "buy" else "bid")
+                if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                    raise MarketSnapshotError("自主分析实时参考报价无效")
+                item["reference_price"] = {"price": value,
+                    "source": "ai1_request_live_ask" if side == "buy" else "ai1_request_live_bid",
+                    "snapshot_time": live.get("observed_at"), "tick_time": live.get("time")}
+                item["local_plan_feasibility"] = plan_feasibility(side, item["coarse_reference_price"]["price"],
+                    item["local_plan"]["stop_loss"], item["local_plan"]["take_profit"], live, atr, pack["m15_ema21"])
+        if any(item["strategy_contract"].get("analysis_mode") for item in pack["opportunities"]):
+            pack["rules"]["price_finalization"]["reference"] = "selected opportunity successful AI1 request live Ask for BUY / Bid for SELL"
         # Full shared source frames once, including region reconstruction/ATR warmup.
         source_count = max([32] + [int(item["strategy_contract"].get("parameters", {}).get("pivot_lookback", 0))
                                   + int(item["strategy_contract"].get("parameters", {}).get("atr_period", 14))
@@ -659,6 +709,7 @@ def compact_market_pack(pack):
             if isinstance(value, dict):
                 value.pop("host_verified_region", None)
                 value.pop("host_verified_entry_event", None)
+                value.pop("host_verified_analysis_checkpoint", None)
                 for diagnostic in value.get("candidates", []) if isinstance(value.get("candidates"), list) else []:
                     if isinstance(diagnostic, dict):
                         diagnostic.pop("candidate", None)
@@ -852,15 +903,15 @@ def execution_rejection(facts):
     return "" if facts.get("executable") else "当前止损距离或盈亏比不符合硬限制"
 
 
-def quality_rubric():
+def quality_rubric(analysis_mode=False):
     """A transparent ordinal scale, not a calibrated probability of profit."""
     return {
         "version": QUALITY_VERSION,
         "meaning": "entry_quality_not_win_probability",
         "level_points": QUALITY_LEVEL_POINTS,
         "dimensions": {
-            "structure": "按strategy_contract评价本时段策略位置及有效性；满足该策略结构条件为adequate。Fib策略用现有容差/探入；浅回撤本身不是结构缺失。",
-            "trigger": "本地M15或M5已收盘规则或strategy_evidence.closed_trigger命中可为adequate；更明确独立确认可为strong，不强制双周期。颜色、弱量不否定false_break。",
+            "structure": ("按真实原始K线、位置及H1方向评价自主打法有效性，分盘菜单是参考；不要求固定Fib/建箱/首次事件。" if analysis_mode else "按strategy_contract评价本时段策略位置及有效性；满足该策略结构条件为adequate。Fib策略用现有容差/探入；浅回撤本身不是结构缺失。"),
+            "trigger": ("真实原始已收盘K线所证自主打法触发可为adequate，无需固定检测器；analysis_checkpoint本身不能证明触发。" if analysis_mode else "本地M15或M5已收盘规则或strategy_evidence.closed_trigger命中可为adequate；更明确独立确认可为strong，不强制双周期。颜色、弱量不否定false_break。"),
             "protection": "止损保护命名结构且覆盖最近3根M5极值和缓冲、距离不超过上限为adequate；不能只因相对ATR较紧就认定无保护。",
             "target": "目标有给定依据、重要未克服障碍之前有空间且有效报价RR至少1.5为adequate；刚过1.5无需在其他项重复扣分。",
             "counter_evidence": "没有可核实反向证据为strong；普通量、浅回撤、H1旧影线、未证实过程极值等minor意见为adequate；独立及时的反向结构为material。",
@@ -868,7 +919,7 @@ def quality_rubric():
         "reservations_policy": "保留意见直接嵌在所属维度，一个cause/event仅归一项。level是唯一程度声明：adequate的保留为minor，weak为material，missing为blocking；strong不得有保留，weak/missing必须有保留。普通量/浅回撤不能weak/missing。Python生成ID/归属/程度，不由模型重复声明。",
         "reservation_causes": sorted(QUALITY_CAUSES),
         "proposal_policy": "硬伤或必要证据缺失则no；已成立的候选仅有minor意见时给出提案，最终分数及Python/AI2决定是否放行。不要将不确定未来获利当成必要字段缺失。",
-        "quote_policy": "reference_price与live_quote来自不同时间，差异本身不是事实冲突；用live_quote核实当前可行性，AI2/Python还会复核执行。",
+        "quote_policy": ("自主候选reference_price是本次成功POST live_quote的BUY Ask/SELL Bid；coarse_reference_price与local_plan_feasibility保留原本地M15方案诊断。AI2/Python再核新报价。" if analysis_mode else "reference_price与live_quote来自不同时间，差异本身不是事实冲突；用live_quote核实当前可行性，AI2/Python还会复核执行。"),
         "reference_paths": ["/h1_trend", "/live_quote", "/local_plan_feasibility",
                             "/computed_evidence/fib", "/computed_evidence/m5_timing",
                             "/computed_evidence/price_action", "/computed_evidence/obstacles"],
@@ -1416,6 +1467,9 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
         if not isinstance(snapshot, dict) or (refresh_request is not None and not snapshot.get("prompt")):
             raise MarketSnapshotError("无法构造新的请求快照，停止本轮，不发送旧提示词")
         request_prompt = snapshot.get("prompt", prompt)
+        request_instructions = snapshot.get("instructions", instructions)
+        if not isinstance(request_instructions, str) or not request_instructions.strip():
+            raise MarketSnapshotError("请求角色规则为空或类型无效")
         if not task_alive():
             return ""
         if snapshot.get("snapshot_id"):
@@ -1426,7 +1480,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
         data = {
             "model": active["model"],
             "messages": [
-                {"role": "system", "content": instructions},
+                {"role": "system", "content": request_instructions},
                 {"role": "user", "content": request_prompt},
             ],
             "stream": False,
@@ -1435,7 +1489,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
         this_effort = "low" if low_retry else active["effort"]
         headers = {"Content-Type": "application/json", "Authorization": "Bearer " + active["key"]}
         if protocol == "anthropic":
-            data["system"] = instructions
+            data["system"] = request_instructions
             data["messages"] = [{"role": "user", "content": request_prompt}]
             output_config = {}
             if this_effort and not omit_reasoning:
@@ -1482,7 +1536,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 "read_timeout_sec": request_timeout,
                 "headers_elapsed_sec": response_progress.get("headers_elapsed_sec"),
                 "body_complete": response is not None,
-                "prompt_chars": len(request_prompt), "instructions_chars": len(instructions),
+                "prompt_chars": len(request_prompt), "instructions_chars": len(request_instructions), "profile_rules": snapshot.get("profile_rules"),
                 "snapshot_id": snapshot.get("snapshot_id"), "request_quote": snapshot.get("quote"),
                 "protocol": protocol, "response_contract_version": RESPONSE_CONTRACT_VERSION,
                 "json_mode_sent": json_mode, "json_error": json_error,
@@ -1726,6 +1780,11 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
     except (TypeError, ValueError):
         stop_loss, take_profit = 0.0, 0.0
 
+    analysis_mode = (strategy_contract or {}).get("analysis_mode", False)
+    if analysis_mode and (not all(math.isfinite(v) for v in (entry, atr, stop_loss, take_profit))
+                          or not prices_are_valid(action, entry, stop_loss, take_profit)
+                          or abs(entry-stop_loss) > base.MAX_SL_ABS):
+        return None, "Python拒绝: 自主AI止损止盈无效或止损超过8美元，不能补造方案"
     requested_take_profit = take_profit
     region_evidence = (strategy_evidence or {}).get(action, {}).get("evidence", {})
     is_region = (strategy_contract or {}).get("stop_reference") == "region"
@@ -1770,6 +1829,8 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
         if stop_loss <= 0 or (action == "buy" and stop_loss > required_sl) or (action == "sell" and stop_loss < required_sl):
             stop_loss = required_sl
         stop_loss, take_profit = clamp_proposal(action, entry, stop_loss, requested_take_profit, atr, target_r)
+    if analysis_mode and not prices_are_valid(action, entry, stop_loss, take_profit):
+        return None, "Python拒绝: 自主AI保护无法定稿"
     if not prices_are_valid(action, entry, stop_loss, take_profit):
         replaced = False
         if prices_are_valid(action, entry, local_stop, local_target):
@@ -1805,7 +1866,7 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
         chased, chase_text = base.chase_blocks_at(df_m15, entry, action, atr)
         if chased:
             return None, "Python拒绝: " + chase_text
-    if df_m5 is not None:
+    if df_m5 is not None and not analysis_mode:
         blocked, m5_text = base.m5_blocks_entry(df_m5, action)
         if blocked:
             return None, "Python拒绝: " + m5_text
@@ -2078,6 +2139,10 @@ class ThreeAITrader(base.FibVolumePATrader):
             account = base.mt5.account_info()
             if account is None or getattr(account, "trade_mode", None) != base.mt5.ACCOUNT_TRADE_MODE_DEMO:
                 raise MarketSnapshotError("研究策略仅允许模拟账户，不请求AI或下单")
+            if (local_result.details or {}).get("strategy_contract", {}).get("analysis_mode"):
+                positions = base.mt5.positions_get(symbol=base.SYMBOL)
+                if positions is None or len(positions) >= base.MAX_POSITIONS:
+                    raise MarketSnapshotError("自主分析持仓状态未知或已达到单仓上限，AI not called")
         assessments = (local_result.details or {}).get("strategy_assessments", {})
         if ("opportunities" not in (local_result.details or {}) and (local_result.details or {}).get("strategy_contract", {}).get("one_entry_per_event")
                 and assessments and all(item.get("blockers") for item in assessments.values())):
@@ -2142,7 +2207,9 @@ class ThreeAITrader(base.FibVolumePATrader):
         proposal.details["ai2_snapshot_id"] = market["snapshot_id"]
         append_decision_snapshot(decision_id, "ai2_input", {"review": review, "trigger": trigger})
         return {"prompt": prompt_json("审核当前可执行的最终订单，只输出契约JSON。", review),
-                "snapshot_id": market["snapshot_id"], "quote": market["live_quote"]}
+                "snapshot_id": market["snapshot_id"], "quote": market["live_quote"],
+                "instructions": role_instructions("AI-2", [proposal.details.get("strategy_contract", {})]),
+                "profile_rules": role_rules("AI-2", [proposal.details.get("strategy_contract", {})])}
 
     def validate_execution_prices(self, result, tick):
         research_error = base.research_execution_error(result, tick)
@@ -2300,14 +2367,16 @@ class ThreeAITrader(base.FibVolumePATrader):
         if opportunities is not None:
             append_decision_snapshot("%s-m5-local" % bar_time, "local_evaluation", {
                 "local_result": local_result.to_decision(), "trigger": "M5"})
-        if local_result.action not in ("buy", "sell") or local_result.confidence < base.CONFIDENCE_THRESHOLD:
+        adaptive = any(base.opportunity_eligible(item) and item["strategy_contract"].get("analysis_mode")
+                       for item in opportunities or [])
+        if not adaptive and (local_result.action not in ("buy", "sell") or local_result.confidence < base.CONFIDENCE_THRESHOLD):
             reject = ""
             if "拒绝:" in (local_result.reasoning or ""):
                 reject = " 拒绝:" + local_result.reasoning.split("拒绝:", 1)[1].strip().replace("\n", " ")[:160]
             assessments = (local_result.details or {}).get("strategy_assessments", {})
             blockers = {side: assessments.get(side, {}).get("blockers", []) for side in ("buy", "sell")}
             base.logger.info(
-                "M5时机未到 action=%s confidence=%s BUY=%s SELL=%s%s 策略阻断BUY=%s SELL=%s 理由=%s"
+                "AI not called M5本地粗筛拒绝 action=%s confidence=%s BUY=%s SELL=%s%s 策略阻断BUY=%s SELL=%s 理由=%s"
                 % (
                     local_result.action,
                     local_result.confidence,
@@ -2320,10 +2389,15 @@ class ThreeAITrader(base.FibVolumePATrader):
                 )
             )
             return
-        base.logger.info(
-            "M5拒绝仍在%g美元内，派发开仓 action=%s score=%s SL=%s"
-            % (base.MAX_SL_ABS, local_result.action, local_result.confidence, local_result.stop_loss)
-        )
+        if adaptive:
+            base.logger.info("%s M5自主粗筛派发 profile=%s local_action=%s score=%s，不要求本地方案可执行",
+                             base.ADAPTIVE_SESSION_VERSION, local_result.details.get("setup"),
+                             local_result.action, local_result.confidence)
+        else:
+            base.logger.info(
+                "M5拒绝仍在%g美元内，派发开仓 action=%s score=%s SL=%s"
+                % (base.MAX_SL_ABS, local_result.action, local_result.confidence, local_result.stop_loss)
+            )
         self.dispatch_entry(bar_time, trigger="M5")
 
     def dispatch_entry(self, bar_time, trigger="M15"):
@@ -2334,7 +2408,23 @@ class ThreeAITrader(base.FibVolumePATrader):
         base.logger.info("AI-1 已派发分析线程 bar=%s seq=%s trigger=%s", bar_time, seq, trigger)
         threading.Thread(target=self.entry_task, args=(bar_time, seq, trigger), daemon=True).start()
 
+    def claim_analysis_scope(self, pack):
+        """Ordinary dispatch only; compatibility/failover refresh never claims again."""
+        scopes = analysis_scope_keys(pack)
+        if not scopes:
+            return True
+        with self._entry_lock:
+            previous = getattr(self, "_analysis_request_scopes", set())
+            if scopes & previous:
+                base.logger.info("AI not called 同分析检查点已经派发 profiles=%s", sorted(scopes))
+                return False
+            # Keep only current source scopes; no persistent prompt/history growth.
+            self._analysis_request_scopes = scopes
+        base.logger.info("%s 实际分析派发 profiles/source=%s", base.ADAPTIVE_SESSION_VERSION, sorted(scopes))
+        return True
+
     def entry_task(self, bar_time, seq, trigger="M15"):
+        ai_started = False
         try:
             if self._stop.is_set():
                 return
@@ -2375,8 +2465,14 @@ class ThreeAITrader(base.FibVolumePATrader):
                     )
                     self.place_order(local_result)
                 return
+            if self._stop.is_set() or self.current_position_count() >= base.MAX_POSITIONS:
+                return
+            if not self.claim_analysis_scope(pack):
+                return
             if "opportunities" in pack and not pack["opportunities"]:
-                append_decision_snapshot(decision_id, "local_prefilter", {"reason": "no_eligible_structural_opportunity", "blockers": pack.get("opportunity_blockers")})
+                base.logger.info("AI not called 本地粗筛无合法候选 reason=%s blockers=%s", local_result.reasoning, pack.get("opportunity_blockers"))
+                append_decision_snapshot(decision_id, "local_prefilter", {"reason": "no_eligible_structural_opportunity",
+                    "status": "AI not called", "local_reasoning": local_result.reasoning, "blockers": pack.get("opportunity_blockers")})
                 return
             if not self.entry_is_current(seq, bar_time):
                 base.logger.info("AI-1 任务已过期，取消请求 seq=%s" % seq)
@@ -2387,15 +2483,24 @@ class ThreeAITrader(base.FibVolumePATrader):
                 nonlocal df_m15, df_h1, df_m5, local_result, pack, fib, atr, price, request_pack
                 df_m15, df_h1, df_m5, local_result, pack, fib, atr, price = self.collect_entry_snapshot(decision_id)
                 if "opportunities" in pack and not pack["opportunities"]:
-                    append_decision_snapshot(decision_id, "local_prefilter", {"reason": "no_eligible_structural_opportunity", "blockers": pack.get("opportunity_blockers")})
+                    append_decision_snapshot(decision_id, "local_prefilter", {"reason": "no_eligible_structural_opportunity",
+                        "status": "AI not called for this refreshed scope", "local_reasoning": local_result.reasoning,
+                        "blockers": pack.get("opportunity_blockers")})
                     raise MarketSnapshotError("无合法结构候选，本轮本地观望，不请求AI")
                 request_pack = compact_market_pack(pack)
+                scopes = analysis_scope_keys(pack)
+                if scopes:
+                    with self._entry_lock:
+                        self._analysis_request_scopes = scopes
                 append_decision_snapshot(decision_id, "ai1_input", {
                     "market_evidence": pack, "local_result": local_result.to_decision(), "trigger": trigger,
                     "cost_control_version": COST_CONTROL_VERSION, "freshness_version": MARKET_FRESHNESS_VERSION})
                 return {"prompt": prompt_json("分析本次已收盘行情及当前报价，只输出契约JSON。", request_pack),
-                        "snapshot_id": pack["snapshot_id"], "quote": pack["live_quote"]}
+                        "snapshot_id": pack["snapshot_id"], "quote": pack["live_quote"],
+                        "instructions": role_instructions("AI-1", request_contracts(pack)),
+                        "profile_rules": role_rules("AI-1", request_contracts(pack))}
 
+            ai_started = True
             raw = call_chat(
                 "AI-1",
                 AI1_MODEL,
@@ -2527,6 +2632,11 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "python_finalization": reason,
                 }
             )
+            if pack.get("strategy_contract", {}).get("analysis_mode"):
+                proposal.details["ai1_source_binding"] = {
+                    "checkpoint": copy.deepcopy(pack["strategy_evidence"][proposal.action]["evidence"].get("host_verified_analysis_checkpoint")),
+                    "snapshot_id": pack.get("snapshot_id"), "fingerprint": pack.get("strategy_fingerprint"),
+                    "reference_price": copy.deepcopy(pack["reference_price"])}
             final_entry_price = float(proposal.details.get("entry_price") or entry_price)
             proposal.details["execution_guard"] = {
                 "atr": atr, "ema21": pack.get("m15_ema21"), "bar_closure": pack["bar_closure"],
@@ -2594,7 +2704,7 @@ class ThreeAITrader(base.FibVolumePATrader):
             )
         except MarketSnapshotError as exc:
             append_decision_snapshot(decision_id, "entry_stopped", {"reason": str(exc)})
-            base.logger.info("行情刷新/执行复核停止本轮: %s", exc)
+            base.logger.info("%s: %s", "行情刷新或执行复核停止本轮" if ai_started else "AI not called 本地粗筛/来源阻断", exc)
         except AIRequestError as exc:
             append_decision_snapshot(decision_id, "ai_request_failed", {"role": exc.role, "reason": exc.detail})
             self.alert_api_failure(exc.role, exc.detail)
@@ -2728,7 +2838,9 @@ class ThreeAITrader(base.FibVolumePATrader):
         return {"prompt": prompt_json(
             '请只输出 JSON: {"action":"hold|tighten_sl|close","ticket":0,"new_stop_loss":0,"reasoning":"..."}', payload),
                 "snapshot_id": payload["snapshot_id"], "quote": quote,
-                "tickets": {int(item["ticket"]) for item in payload["positions"]}}
+                "tickets": {int(item["ticket"]) for item in payload["positions"]},
+                "instructions": role_instructions("AI-3", [item["entry_context"].get("strategy_contract") or {} for item in payload["positions"]]),
+                "profile_rules": role_rules("AI-3", [item["entry_context"].get("strategy_contract") or {} for item in payload["positions"]])}
 
     def ai3_task(self, bar_time, seq):
         try:
@@ -2827,6 +2939,7 @@ class ThreeAITrader(base.FibVolumePATrader):
         self.reconcile_entry_contexts()
         log_path = attach_ai_logger()
         strategies = base.STRATEGIES.snapshot()
+        base.logger.info("%s 本地分不作自主AI派发门槛", base.ADAPTIVE_SESSION_VERSION)
         base.logger.info("策略框架=%s fingerprint=%s loaded=%s error=%s", base.STRATEGY_FRAMEWORK_VERSION,
                          strategies.fingerprint, [s.id for s in strategies.strategies if s.enabled], strategies.error or "无")
         base.logger.info(

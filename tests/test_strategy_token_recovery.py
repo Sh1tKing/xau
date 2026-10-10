@@ -64,8 +64,10 @@ class TokenTests(unittest.TestCase):
     def test_host_failed_reservation_sends_no_order_and_uncertain_send_consumes(self):
         import xauusd_fib_volume_pa_trader as base
         from test_session_retest_integration import market
+        from test_strategy_opportunities import legacy_session_snapshot
         m15,h1,m5,clock=market();now=clock.timestamp()+5
-        local=base.build_fib_volume_pa_decision(m15,h1,m5,55,clock,server_utc_offset=3)
+        local=base.build_fib_volume_pa_decision(m15,h1,m5,55,clock,server_utc_offset=3,
+                                               strategy_snapshot=legacy_session_snapshot())
         ref=float(local.details['entry_price']);quote=SimpleNamespace(bid=ref,ask=ref+.33,time=int(now+10800))
         with patch.dict(os.environ,{'FIB_PA_STRATEGY_STATE_FILE':str(self.ledger.path)}), \
              patch.object(base.time,'time',return_value=now),patch.object(base,'ENABLE_TRADING',True), \
