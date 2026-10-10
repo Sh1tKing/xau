@@ -219,32 +219,46 @@ class OpportunityAITests(unittest.TestCase):
         dispatch.assert_called_once_with(1000, trigger='M5')
         snapshots.assert_called_once()
 
-    def test_ai_entry_assembled_numeric_region_reference_runs_real_execution_guard(self):
+    def run_assembled_region_execution_guard(self, action):
         m15, m5, now, evidence = host_fixtures.OpportunityTests().region()
-        frozen = ai.base.verified_region_evidence('buy', m15, m5, now, 0, evidence, P, 'rejection')
+        if action == 'sell':
+            from strategies.regions import region_facts
+            def mirror(df):
+                result = df.copy()
+                result['open'], result['close'] = 200-df['open'], 200-df['close']
+                result['high'], result['low'] = 200-df['low'], 200-df['high']
+                return result
+            m15, m5 = mirror(m15), mirror(m5)
+            evidence = region_facts('rejection', m15, m5, now, 0, action, P)
+        frozen = ai.base.verified_region_evidence(action, m15, m5, now, 0, evidence, P, 'rejection')
         contract = {'id': 'region_rejection', 'demo_only': True, 'stop_reference': 'region',
                     'entry_reference': 'closed_m5', 'regime_filter': 'none', 'target_max_reference_r': 2.5,
                     'parameters': P}
         selected = candidate('B', 100., 'region_rejection')
+        selected['action'] = action
         selected['strategy_contract'] = contract
-        selected['strategy_evidence'] = {'buy': {'blockers': [], 'evidence': frozen}}
+        selected['strategy_evidence'] = {action: {'blockers': [], 'evidence': frozen}}
         selected['reference_price'] = {'price': 100., 'source': 'confirmed_closed_m5_close', 'bar_time': int(m5.time.iloc[-1])}
         request = pool([selected]); request['m15_ema21'] = 100.
-        request['live_quote'] = {'bid': 100., 'ask': 100.1, 'time': 1001}
-        value = payload('B', 0); value.update(stop_loss=97.54, take_profit=104.92)
+        request['h1_trend'] = request['m15_trend'] = 'bull' if action == 'buy' else 'bear'
+        request['live_quote'] = {'bid': 100. if action == 'buy' else 99.9, 'ask': 100.1 if action == 'buy' else 100., 'time': 1001}
+        value = payload('B', 0); value.update(action=action, stop_loss=97.54 if action == 'buy' else 102.46,
+                                             take_profit=104.92 if action == 'buy' else 95.08)
+        value['quality_assessment']['direction'] = action
+        for item in value['quality_assessment']['dimensions'].values():
+            item['evidence_refs'] = [ref.replace('/buy/', '/' + action + '/') for ref in item['evidence_refs']]
         captured = []
         # This intercept is after actual entry_task assembly. Execution guard and
         # the region host helper run unchanged; broker send is not performed.
         def place(result):
             captured.append(copy.deepcopy(result))
-            self.assertEqual(self.trader.validate_execution_prices(result, SimpleNamespace(bid=100., ask=100.1)), '')
+            self.assertEqual(self.trader.validate_execution_prices(result, SimpleNamespace(**request['live_quote'])), '')
             return True
         with patch.object(self.trader, 'ensure_review_bars_current'), \
              patch.object(self.trader, 'validate_strategy_entry', return_value=''), \
              patch.object(self.trader, 'get_live_quote', return_value=request['live_quote']), \
              patch.object(self.trader, 'place_order', side_effect=place), \
-             patch.object(ai.base, 'm5_blocks_entry', return_value=(False, '')), \
-             patch.object(ai.base, 'recent_m5_extreme', return_value=98.6):
+             patch.object(ai.base, 'm5_blocks_entry', return_value=(False, '')):
             post, snapshots, _ = self.run_entry(iter([request, request]),
                     [Response(value), Response({'decision': 'APPROVE', 'defects': [], 'reasoning': 'safe', 'fact_conflicts': []})],
                     frames=(m15, frame(), m5))
@@ -253,6 +267,12 @@ class OpportunityAITests(unittest.TestCase):
         self.assertEqual(captured[0].details['reference_price'], 100.)
         self.assertEqual(captured[0].details['reference_price_metadata'], selected['reference_price'])
         self.assertEqual(captured[0].details['reference_price_source'], 'confirmed_closed_m5_close')
+
+    def test_ai_buy_assembled_numeric_region_reference_runs_real_execution_guard(self):
+        self.run_assembled_region_execution_guard('buy')
+
+    def test_ai_sell_assembled_numeric_region_reference_runs_real_execution_guard(self):
+        self.run_assembled_region_execution_guard('sell')
 
     def test_retry_success_pool_replaces_prior_source_and_rejects_stale_id(self):
         first, second = pool([candidate('A')]), pool([candidate('B', 101.)])
