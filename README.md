@@ -1,6 +1,6 @@
 # XAUUSD 三AI交易系统
 
-当前默认只启用研究报告优先候选“欧美时段突破回踩”，仅允许MT5模拟账户。伦敦与纽约当地08:00–08:30建箱，08:30–11:00等待首次突破后的首次M5回踩确认，自动处理夏令时。H1许可方向，M15提供ATR和EMA追价限制。本地策略粗筛，AI-1自主提出方案，AI-2审核最终价格，AI-3持仓护盘；Python执行止损、盈亏比、追价和持仓限制。
+默认启用亚、欧、美三盘自主AI粗筛，仅允许MT5模拟账户。本地整理位置、趋势、波动和原始价格行为，不要求先命中固定形态或本地分数过线；AI-1结合分盘参考自主选择打法、提出方案或观望，AI-2审核固定价格和当次报价，AI-3按原入场理由护盘。H1许可方向，M15提供ATR和EMA追价限制，Python执行止损、盈亏比、M5极值保护和持仓限制。
 
 - `xauusd_fib_volume_pa_ai3.py`：三AI运行入口。
 - `xauusd_fib_volume_pa_trader.py`：本地策略、下单与护盘。
@@ -8,10 +8,12 @@
 - [策略文件说明](docs/strategies/README.md)：修改 `strategies/definitions/` 的策略内容，框架自动发现并绑定同版本评分、证据与AI规则。
 - [部署说明](docs/deployment/README.md)：Windows、Python 3.12、MT5终端与依赖。
 - [入场契约与边界设计](docs/superpowers/specs/2026-10-09-entry-gate-reliability.md)：最新评分和实时执行规则。
+- [三盘自主AI模拟策略](docs/superpowers/specs/2026-10-10-adaptive-session-demo.md)：当前默认模式、分盘参考及AI请求条件。
+- [三盘流程验证](docs/experiments/2026-10-10-adaptive-session-validation.md)：完整模拟AI链路、边界回归及缓存候选覆盖。
 - [接入后的实际回放验证](docs/experiments/2026-10-09-session-retest-integration-validation.md)：本地10笔、净+0.30美元，后段仍亏，研究收益不能沿用。
 - [黄金多策略研究与模拟比较](docs/experiments/2026-10-09-gold-strategy-research.md)：短线、中线及激进候选的独立离线实验；优先候选现已按[接入设计](docs/superpowers/specs/2026-10-09-session-retest-integration.md)加入模拟盘框架。
 
-新候选参考目标上限3R、止损不超过8美元、最多持有180分钟，每个当地日期窗口最多一次下单尝试，平仓后冷却10分钟。旧三策略保留但默认关闭。事件和期限写入 `xau_fib_pa_logs/strategy_event_state.json`，部署迁移同一账户时保留该文件及AI持仓上下文。
+新三盘参考目标上限3R、止损不超过8美元、最多持有90分钟，每个分析检查点最多一次下单尝试，平仓后冷却60秒。普通已收盘M5可发起分析，检查点不是交易触发成立；AI仍须给真实证据并通过质量门槛。北京时间分段：亚盘07–15、欧盘15–20，美盘20–次日07（包含重叠和尾段），不冒称交易所开盘或自动夏令时分段。旧固定定义保留但默认关闭。事件和期限写入 `xau_fib_pa_logs/strategy_event_state.json`，部署迁移同一账户时保留该文件及AI持仓上下文。
 
 另有两个默认关闭的日内研究定义：`region_retest`（区域突破回踩）与 `region_rejection`（区域触碰拒绝）。它们在欧美盘中使用新形成的已确认M15区域、首次M5事件及独立保护锚，目标上限2.5R、最多120分钟、平仓冷却10分钟。参数属于本项目假设，不是视频作者算法的复现；构建与离线结果见[验证记录](docs/experiments/2026-10-10-intraday-build-validation.md)和[设计](docs/superpowers/specs/2026-10-10-intraday-region-opportunities-draft.md)。
 
