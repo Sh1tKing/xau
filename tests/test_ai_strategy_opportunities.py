@@ -148,11 +148,12 @@ class OpportunityAITests(unittest.TestCase):
         self.assertIn('patterns', pack)
         self.assertEqual(len(pack['m5_bars']), len(m5))
 
-    def run_entry(self, snapshots, responses, finalize=None):
+    def run_entry(self, snapshots, responses, finalize=None, frames=None):
         local = ai.base.StrategyResult('no', 20, False, 'reference fail', 0., 0., 20, 0, {})
         def collect(_):
             value = copy.deepcopy(next(snapshots))
-            return frame(), frame(), frame(), local, value, None, 2., 100.
+            market_frames = frames if frames is not None else (frame(), frame(), frame())
+            return *market_frames, local, value, None, 2., 100.
         scopes = [patch.object(self.trader, 'collect_entry_snapshot', side_effect=collect),
                   patch.object(self.trader, 'entry_is_current', return_value=True),
                   patch.object(self.trader, 'ensure_strategy_current'), patch.object(self.trader, 'release_task'),
@@ -171,18 +172,87 @@ class OpportunityAITests(unittest.TestCase):
         post.assert_not_called(); alerts.assert_not_called()
         self.assertEqual([c.args[1] for c in snapshots.call_args_list], ['entry_candidate', 'local_prefilter'])
 
-    def test_one_actual_post_for_pool_and_selected_not_localwinner(self):
+    def test_new_m15_still_posts_low_score_failed_plan_pool_and_selects_nonwinner(self):
         calls = []
         def finalize(value, reference, *args, **kwargs):
             calls.append((reference, kwargs))
             return None, '观望止于测试'
-        post, _, _ = self.run_entry(iter([pool(), pool()]), [Response(payload())], finalize)
+        post, snapshots, _ = self.run_entry(iter([pool(), pool()]), [Response(payload())], finalize)
         self.assertEqual(post.call_count, 1)
+        initial = next(call.args[2] for call in snapshots.call_args_list if call.args[1] == 'entry_candidate')
+        self.assertEqual(initial['trigger'], 'M15')
+        self.assertEqual(initial['local_result']['action'], 'no')
+        self.assertEqual(initial['local_result']['confidence'], 20)
         request = json.loads(post.call_args.kwargs['json']['messages'][1]['content'].split('\n', 1)[1])
         self.assertEqual(len(request['opportunities']), 2)
         self.assertEqual(calls[0][0], 101.)
         self.assertEqual(calls[0][1]['setup'], 'breakout')
         self.assertEqual(calls[0][1]['strategy_evidence']['buy']['evidence']['event_id'], 'event-B')
+
+    def test_m5_low_score_or_failed_plan_records_pool_without_dispatch(self):
+        for action, score, reason in (('no', 20, 'low score'), ('no', 95, 'reference plan failed'),
+                                     ('buy', 20, 'explicit threshold guard')):
+            with self.subTest(action=action, score=score):
+                item = candidate('B', score=score)
+                local = ai.base.StrategyResult(action, score, False, reason, 97., 109., score, 0,
+                                                {'opportunities': [item]})
+                with patch.object(self.trader, 'get_context', return_value=(frame(), frame(), frame())), \
+                     patch.object(self.trader, 'evaluate_context', return_value=local), \
+                     patch.object(ai.base, 'CONFIDENCE_THRESHOLD', 55), \
+                     patch.object(ai, 'append_decision_snapshot') as snapshots, \
+                     patch.object(self.trader, 'dispatch_entry') as dispatch:
+                    self.trader.dispatch_m5_entry(1000)
+                dispatch.assert_not_called()
+                snapshots.assert_called_once()
+                self.assertEqual(snapshots.call_args.args[1], 'local_evaluation')
+                self.assertEqual(snapshots.call_args.args[2]['local_result']['details']['opportunities'][0]['opportunity_id'], 'B')
+
+    def test_m5_executable_above_threshold_dispatches_once_with_pool_snapshot(self):
+        local = ai.base.StrategyResult('buy', 80, False, 'valid', 97., 109., 80, 0,
+                      {'opportunities': [candidate('B', score=80)]})
+        with patch.object(self.trader, 'get_context', return_value=(frame(), frame(), frame())), \
+             patch.object(self.trader, 'evaluate_context', return_value=local), \
+             patch.object(ai.base, 'CONFIDENCE_THRESHOLD', 55), \
+             patch.object(ai, 'append_decision_snapshot') as snapshots, \
+             patch.object(self.trader, 'dispatch_entry') as dispatch:
+            self.trader.dispatch_m5_entry(1000)
+        dispatch.assert_called_once_with(1000, trigger='M5')
+        snapshots.assert_called_once()
+
+    def test_ai_entry_assembled_numeric_region_reference_runs_real_execution_guard(self):
+        m15, m5, now, evidence = host_fixtures.OpportunityTests().region()
+        frozen = ai.base.verified_region_evidence('buy', m15, m5, now, 0, evidence, P, 'rejection')
+        contract = {'id': 'region_rejection', 'demo_only': True, 'stop_reference': 'region',
+                    'entry_reference': 'closed_m5', 'regime_filter': 'none', 'target_max_reference_r': 2.5,
+                    'parameters': P}
+        selected = candidate('B', 100., 'region_rejection')
+        selected['strategy_contract'] = contract
+        selected['strategy_evidence'] = {'buy': {'blockers': [], 'evidence': frozen}}
+        selected['reference_price'] = {'price': 100., 'source': 'confirmed_closed_m5_close', 'bar_time': int(m5.time.iloc[-1])}
+        request = pool([selected]); request['m15_ema21'] = 100.
+        request['live_quote'] = {'bid': 100., 'ask': 100.1, 'time': 1001}
+        value = payload('B', 0); value.update(stop_loss=97.54, take_profit=104.92)
+        captured = []
+        # This intercept is after actual entry_task assembly. Execution guard and
+        # the region host helper run unchanged; broker send is not performed.
+        def place(result):
+            captured.append(copy.deepcopy(result))
+            self.assertEqual(self.trader.validate_execution_prices(result, SimpleNamespace(bid=100., ask=100.1)), '')
+            return True
+        with patch.object(self.trader, 'ensure_review_bars_current'), \
+             patch.object(self.trader, 'validate_strategy_entry', return_value=''), \
+             patch.object(self.trader, 'get_live_quote', return_value=request['live_quote']), \
+             patch.object(self.trader, 'place_order', side_effect=place), \
+             patch.object(ai.base, 'm5_blocks_entry', return_value=(False, '')), \
+             patch.object(ai.base, 'recent_m5_extreme', return_value=98.6):
+            post, snapshots, _ = self.run_entry(iter([request, request]),
+                    [Response(value), Response({'decision': 'APPROVE', 'defects': [], 'reasoning': 'safe', 'fact_conflicts': []})],
+                    frames=(m15, frame(), m5))
+        self.assertEqual(post.call_count, 2, snapshots.call_args_list)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].details['reference_price'], 100.)
+        self.assertEqual(captured[0].details['reference_price_metadata'], selected['reference_price'])
+        self.assertEqual(captured[0].details['reference_price_source'], 'confirmed_closed_m5_close')
 
     def test_retry_success_pool_replaces_prior_source_and_rejects_stale_id(self):
         first, second = pool([candidate('A')]), pool([candidate('B', 101.)])
@@ -282,6 +352,7 @@ class OpportunityAITests(unittest.TestCase):
         self.assertEqual(context['strategy_contract']['id'], 'breakout')
         self.assertEqual(context['strategy_evidence']['buy']['evidence']['event_id'], 'event-B')
         self.assertEqual(context['event_id'], 'event-B')
+        self.assertEqual(context['reference_price_metadata'], raw['opportunities'][1]['reference_price'])
 
     def test_selected_trigger_only_never_borrows_other_or_shared(self):
         pack = pool(); pack['opportunities'][1]['strategy_evidence']['buy']['evidence']['closed_trigger']['confirmed'] = False

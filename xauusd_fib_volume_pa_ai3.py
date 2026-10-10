@@ -2038,6 +2038,7 @@ class ThreeAITrader(base.FibVolumePATrader):
             "entry_price_source": details.get("entry_price_source"),
             "reference_entry_price": details.get("reference_entry_price", details.get("entry_price")),
             "reference_price_source": details.get("reference_price_source"),
+            "reference_price_metadata": copy.deepcopy(details.get("reference_price_metadata")),
             "coverage": "from_entry",
             "coverage_started_at": time.time(),
             "last_observed_at": time.time(),
@@ -2299,10 +2300,7 @@ class ThreeAITrader(base.FibVolumePATrader):
         if opportunities is not None:
             append_decision_snapshot("%s-m5-local" % bar_time, "local_evaluation", {
                 "local_result": local_result.to_decision(), "trigger": "M5"})
-            if AI_ENABLED and any(base.opportunity_eligible(item) for item in opportunities):
-                self.dispatch_entry(bar_time, trigger="M5")
-                return
-        if local_result.action not in ("buy", "sell"):
+        if local_result.action not in ("buy", "sell") or local_result.confidence < base.CONFIDENCE_THRESHOLD:
             reject = ""
             if "拒绝:" in (local_result.reasoning or ""):
                 reject = " 拒绝:" + local_result.reasoning.split("拒绝:", 1)[1].strip().replace("\n", " ")[:160]
@@ -2501,7 +2499,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "source": "ai1",
                     "opportunity_id": pack.get("opportunity_id"),
                     "event_id": pack.get("strategy_evidence", {}).get(proposal.action, {}).get("evidence", {}).get("event_id"),
-                    "reference_price": copy.deepcopy(pack.get("reference_price")),
+                    "reference_price": entry_price,
+                    "reference_price_metadata": copy.deepcopy(pack.get("reference_price")),
                     "decision_id": decision_id,
                     "local_action_before_ai": local_result.action,
                     "local_confidence": local_result.confidence,
