@@ -12,7 +12,7 @@ import tempfile
 import time
 import uuid
 
-VERSION = "crypto-manual-entry-v1"
+VERSION = "crypto-manual-entry-v2"
 HEARTBEAT_AGE = 30
 
 
@@ -174,8 +174,8 @@ class ManualQueue:
 
 def manual_contract(asset, profile):
     """Human intent is a separate source; never impersonate an audited AI proposal."""
-    return dict(id="manual_"+asset.lower(), version="1", demo_only=True, manual_entry=True,
-                analysis_mode=False, one_entry_per_event=True, stop_reference="m5_extreme",
+    return dict(id="manual_"+asset.lower(), version="2", demo_only=True, manual_entry=True,
+                analysis_mode=False, one_entry_per_event=True, stop_reference="human_fixed",
                 max_hold_minutes=profile["max_hold_minutes"], cooldown_seconds=profile["cooldown_seconds"],
                 ai_rules={"guardian": (
                     "原入场是用户决策，不是AI1/AI2已审核结论。理由、失效条件及目标依据保留用户原文，未知则明确未知。"
@@ -200,18 +200,12 @@ def prepare_result(base, trader, request):
     for frame, name in zip(frames, ("M15", "H1", "M5")):
         _rows(frame, name, now, offset)
     side, sl, tp = request["side"], request["sl"], request["tp"]
-    if base.trend_from_ema(h1, 50) != ("bull" if side == "buy" else "bear"):
-        raise ManualOrderError("H1方向不许可")
     atr = base.calculate_atr(m15)
     ema = base.ema_last(m15["close"], 21)
     entry = ask if side == "buy" else bid
     if not trader.validate_order_prices(side, entry, sl, tp):
         raise ManualOrderError("SL/TP方向非法")
-    if base.directional_stop_distance(side, entry, sl) < base.entry_risk_limits(atr, entry)[0]:
-        raise ManualOrderError("原SL距离低于M15 ATR生成下限")
     extreme = base.recent_m5_extreme(m5, side)
-    if extreme is None or not base.stop_covers_m5_extreme(side, sl, extreme, atr):
-        raise ManualOrderError("原SL未覆盖最近三根M5极值及缓冲，未移动SL")
     snapshot = base.STRATEGIES.snapshot()
     strategy = snapshot.get(base.ASSET.lower()+"_adaptive")
     if snapshot.error or strategy is None or not strategy.enabled:

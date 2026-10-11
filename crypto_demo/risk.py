@@ -86,22 +86,29 @@ def quote_prices(tick, now=None, server_offset_hours=0):
     return bid, ask
 
 
-def execution_prices(asset, action, atr, ema, sl, tp, tick, spec, server_offset_hours=0):
+def execution_prices(asset, action, atr, ema, sl, tp, tick, spec, server_offset_hours=0, *, manual=False):
     if action not in ("buy", "sell"):
         raise RiskError("invalid direction")
     values = spec_values(spec)
     bid, ask = quote_prices(tick, server_offset_hours=server_offset_hours)
-    atr, ema, sl, tp = map(number, (atr, ema, sl, tp))
+    sl, tp = map(number, (sl, tp))
     sign = 1 if action == "buy" else -1
     entry, trigger = (ask, bid) if sign == 1 else (bid, ask)
     distance, reward = sign*(entry-sl), sign*(tp-entry)
-    cap, buf = price_cap(asset, atr, entry), buffer(atr, values["trade_tick_size"])
-    if not 0 < distance <= cap or reward <= 0 or reward/distance < 1.5:
-        raise RiskError("price cap / direction / gross RR rejected")
-    if abs(entry-ema) > 1.5*atr or ask-bid > .25*atr:
-        raise RiskError("EMA chase or spread rejected")
-    minimum = max(2*buf, values["trade_stops_level"]*values["point"])
-    if sign*(trigger-sl) < minimum or sign*(tp-trigger) < values["trade_stops_level"]*values["point"]:
+    if manual:
+        if distance <= 0 or reward <= 0:
+            raise RiskError("manual SL/TP direction rejected")
+        minimum = values["trade_stops_level"]*values["point"]
+    else:
+        atr, ema = map(number, (atr, ema))
+        cap, buf = price_cap(asset, atr, entry), buffer(atr, values["trade_tick_size"])
+        if not 0 < distance <= cap or reward <= 0 or reward/distance < 1.5:
+            raise RiskError("price cap / direction / gross RR rejected")
+        if abs(entry-ema) > 1.5*atr or ask-bid > .25*atr:
+            raise RiskError("EMA chase or spread rejected")
+        minimum = max(2*buf, values["trade_stops_level"]*values["point"])
+    if (sign*(trigger-sl) <= 0 or sign*(trigger-sl) < minimum
+            or sign*(tp-trigger) < values["trade_stops_level"]*values["point"]):
         raise RiskError("trigger clearance rejected")
     for value in (sl, tp):
         ratio = Decimal(str(value))/Decimal(str(values["trade_tick_size"]))
@@ -112,10 +119,10 @@ def execution_prices(asset, action, atr, ema, sl, tp, tick, spec, server_offset_
 
 def size_order(mt5, account, spec, asset, symbol, action, atr, ema, sl, tp, tick,
                commission_per_lot=0., slippage_ticks=0., commission_bps=0., server_offset_hours=0,
-               requested_volume=None):
+               requested_volume=None, *, manual=False):
     account_ready(mt5, account, empty=True)
     values = spec_values(spec)
-    entry = execution_prices(asset, action, atr, ema, sl, tp, tick, spec, server_offset_hours)
+    entry = execution_prices(asset, action, atr, ema, sl, tp, tick, spec, server_offset_hours, manual=manual)
     fee_lot, slip, bps = map(lambda x: number(x, False),
                             (commission_per_lot, slippage_ticks, commission_bps))
     if bps and getattr(spec, "currency_profit", None) != "USD":
@@ -125,20 +132,23 @@ def size_order(mt5, account, spec, asset, symbol, action, atr, ema, sl, tp, tick
     adverse = entry + sign*slip*values["trade_tick_size"]
     adverse_sl = sl - sign*slip*values["trade_tick_size"]
     adverse_tp = tp - sign*slip*values["trade_tick_size"]
-    limit = budget(account.equity)
+    # Explicit human volume is checked against broker volume and margin, not an AI strategy cash cap.
+    # An omitted volume still uses the existing bounded risk sizing.
+    limit = None if manual and requested_volume is not None else budget(account.equity)
     # Broker estimates constrain both risk and margin; never shrink the structural SL.
     probe = values["volume_min"]
     loss = mt5.order_calc_profit(order_type, symbol, probe, adverse, adverse_sl)
     win = mt5.order_calc_profit(order_type, symbol, probe, adverse, adverse_tp)
-    if loss is None or not math.isfinite(loss) or loss >= 0 or win is None or not math.isfinite(win) or win <= 0:
+    if loss is None or not math.isfinite(loss) or loss >= 0 or win is None or not math.isfinite(win) or (not manual and win <= 0):
         raise RiskError("broker cash profit calculation unavailable")
     fee = probe*(fee_lot + bps/10000*entry*values["trade_contract_size"])
     unit_loss = (-loss+fee)/probe
     free = .9 * number(getattr(account, "margin_free", None), False)
     probe_margin = number(mt5.order_calc_margin(order_type, symbol, probe, entry))
-    if probe_margin > free or -loss+fee > limit:
+    if probe_margin > free or (limit is not None and -loss+fee > limit):
         raise RiskError("minimum volume exceeds cash or margin budget")
-    volume = quantize(min(values["volume_max"], limit/unit_loss, free*probe/probe_margin), values["volume_step"])
+    cash_volume = values["volume_max"] if limit is None else limit/unit_loss
+    volume = quantize(min(values["volume_max"], cash_volume, free*probe/probe_margin), values["volume_step"])
     if volume < probe:
         raise RiskError("minimum broker volume exceeds cash budget")
     # Establish monotonic positive margin estimates, then reduce when exact margin exceeds budget.
@@ -173,11 +183,12 @@ def size_order(mt5, account, spec, asset, symbol, action, atr, ema, sl, tp, tick
         volume = requested
     final_loss = mt5.order_calc_profit(order_type, symbol, volume, adverse, adverse_sl)
     final_win = mt5.order_calc_profit(order_type, symbol, volume, adverse, adverse_tp)
-    if final_loss is None or not math.isfinite(final_loss) or final_loss >= 0 or final_win is None or not math.isfinite(final_win) or final_win <= 0:
+    if (final_loss is None or not math.isfinite(final_loss) or final_loss >= 0
+            or final_win is None or not math.isfinite(final_win) or (not manual and final_win <= 0)):
         raise RiskError("final broker cash calculation unavailable")
     costs = volume*(fee_lot + bps/10000*entry*values["trade_contract_size"])
     cash_loss, cash_reward = -final_loss+costs, final_win-costs
-    if cash_loss > limit + 1e-9 or cash_reward/cash_loss < 1.5:
+    if (limit is not None and cash_loss > limit + 1e-9) or (not manual and cash_reward/cash_loss < 1.5):
         raise RiskError("cash budget or cost adjusted RR rejected")
     margin = mt5.order_calc_margin(order_type, symbol, volume, entry)
     margin = number(margin)

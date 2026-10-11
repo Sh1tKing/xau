@@ -118,7 +118,9 @@ class ManualIntegrationTests(unittest.TestCase):
         self.trader.manual_queue = self.queue
         self.queue.publish(self.trader._manual_session, self.now)
         sign = 1 if side == "buy" else -1
-        return self.queue.submit(side, self.price-sign*3*self.unit, self.price+sign*9*self.unit,
+        sl = kwargs.pop("sl", self.price-sign*3*self.unit)
+        tp = kwargs.pop("tp", self.price+sign*9*self.unit)
+        return self.queue.submit(side, sl, tp,
                                  reason="原M5位置支持进场", invalidation="原M5保护结构收盘失效", now=self.now, **kwargs)
 
     def execute(self):
@@ -173,7 +175,7 @@ class ManualIntegrationTests(unittest.TestCase):
         self.trader._entry_inflight = False
         self.assertFalse(self.trader.process_manual_requests())
 
-    def test_spread_or_requested_risk_rejected_unchanged(self):
+    def test_invalid_requested_volume_rejected_but_spread_ratio_does_not_filter_manual(self):
         request = self.prepare(volume=1.)
         self.execute()
         response = self.queue.result(request["request_id"])
@@ -183,8 +185,60 @@ class ManualIntegrationTests(unittest.TestCase):
         request = self.queue.submit("buy", self.price-3*self.unit, self.price+9*self.unit, now=self.now)
         self.tick.ask = self.tick.bid+2*self.unit
         self.execute()
-        self.assertEqual(self.queue.result(request["request_id"])["status"], "rejected")
-        self.assertEqual(self.sent, [])
+        self.assertEqual(self.queue.result(request["request_id"])["status"], "filled")
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0]["sl"], request["sl"])
+        self.assertEqual(self.sent[0]["tp"], request["tp"])
+
+    def test_eth_user_sell_prices_execute_and_existing_ai3_takes_over(self):
+        request = self.prepare("ETH", "sell", sl=2503., tp=2490., volume=.01)
+        self.tick.bid, self.tick.ask = 2500., 2502.
+        for frame in self.frames:
+            for key in ("open", "high", "low", "close"):
+                frame[key] -= 500.
+        self.execute()
+        self.assertEqual(self.queue.result(request["request_id"])["status"], "filled")
+        self.assertEqual((self.sent[0]["price"], self.sent[0]["sl"], self.sent[0]["tp"], self.sent[0]["volume"]),
+                         (2500., 2503., 2490., .01))
+        self.assertEqual(self.run_ai3_hold().call_count, 1)
+
+    def test_manual_user_plan_bypasses_ema_and_atr_m5_minimum(self):
+        request = self.prepare(sl=99999.5, tp=100020., volume=.01)
+        for key in ("open", "high", "low", "close"):
+            self.frames[0][key] -= 20*self.unit
+        self.execute()
+        response = self.queue.result(request["request_id"])
+        self.assertEqual(response["status"], "filled", response)
+        self.assertEqual(self.sent[0]["sl"], request["sl"])
+        self.assertEqual(self.sent[0]["tp"], request["tp"])
+        self.assertEqual(self.sent[0]["volume"], .01)
+
+    def test_explicit_manual_volume_and_rr_are_user_decisions(self):
+        request = self.prepare(sl=96000., tp=101000., volume=.01)
+        self.execute()
+        response = self.queue.result(request["request_id"])
+        self.assertEqual(response["status"], "filled", response)
+        self.assertEqual(self.sent[0]["volume"], .01)
+        self.assertEqual(self.sent[0]["sl"], request["sl"])
+        self.assertEqual(self.sent[0]["tp"], request["tp"])
+
+    def test_manual_broker_price_lattice_stops_and_margin_still_reject(self):
+        for change in ("direction", "lattice", "stops", "margin"):
+            with self.subTest(change=change):
+                case = ManualIntegrationTests()
+                case.setUp()
+                try:
+                    sl = 100020. if change == "direction" else 99400.01 if change == "lattice" else 99400.
+                    request = case.prepare(sl=sl, volume=.01)
+                    if change == "stops":
+                        case.spec.trade_stops_level = 100000
+                    elif change == "margin":
+                        case.acct.margin_free = .001
+                    case.execute()
+                    self.assertEqual(case.queue.result(request["request_id"])["status"], "rejected")
+                    self.assertEqual(case.sent, [])
+                finally:
+                    case.doCleanups()
 
     def test_uncertain_broker_receipt_is_never_replayed_and_context_recovers(self):
         request = self.prepare()
@@ -229,7 +283,7 @@ class ManualIntegrationTests(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertEqual(self.queue.result(request["request_id"])["status"], "rejected")
 
-    def test_h1_m5_account_and_clock_guards_still_reject(self):
+    def test_manual_h1_m5_are_context_but_account_and_clock_still_guard(self):
         for change in ("h1", "m5", "account", "tick"):
             with self.subTest(change=change):
                 case = ManualIntegrationTests()
@@ -248,8 +302,9 @@ class ManualIntegrationTests(unittest.TestCase):
                         case.tick.time -= 60
                         case.tick.time_msc -= 60000
                     case.execute()
-                    self.assertEqual(case.queue.result(request["request_id"])["status"], "rejected")
-                    self.assertEqual(case.sent, [])
+                    self.assertEqual(case.queue.result(request["request_id"])["status"],
+                                     "filled" if change in ("h1", "m5") else "rejected")
+                    self.assertEqual(len(case.sent), 1 if change in ("h1", "m5") else 0)
                 finally:
                     case.doCleanups()
 

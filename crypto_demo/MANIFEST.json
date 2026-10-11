@@ -8,18 +8,18 @@
   "sha256": {
     ".env.example": "d52f74113a37e6b7adcac23a183d2f326ffb32ecacd286d4287f81047c0a7158",
     ".gitignore": "11aa96c5f85644b81f7dbbdfc0fe124708f96fc2d68f23de999266224bebe03c",
-    "AGENTS.md": "59fba82bc66bc84ee70891cc9b4f520ed00bccf0dcea53b4c93e01a5da8729f6",
-    "README.md": "81115e2a4e93f86db9b0a80eda02bbed60d6c55130afe28b07620bdc984ab791",
+    "AGENTS.md": "6e6681393535962fa92273906f0e1244c3010fffffa0c5d42ad1b4f44a8cf3d5",
+    "README.md": "4ff80fc918ba8c42af7ea200438eb225e8614f8ff016801445c3dca4ab3658d8",
     "__init__.py": "a8a0632a9d790c8a0ce1b0bda1914d5770cbdcb9feda10d894e4efd1d8718e03",
     "crypto_ai3.py": "4148fb82c09175c1912b43953ab1d655708a3265fa626e02bfe7c04d19d274eb",
     "crypto_backtest.py": "72a1080cd0401f8bbd33d697bbad88fd5cbdecf389c900b1b7810cbfab567b34",
-    "crypto_trader.py": "6ac73be7b05fe376024ce923aed70ae1a52de31605a066467994b27351dde874",
+    "crypto_trader.py": "0c82566a259783eaf0b05ebc8bbe30a1a992e6b18adbba985327c55b77df62ab",
     "instance_lock.py": "1f8b0bc5fce2cd1a0381daff37d99da127c8a19ffdc6669fa55aba2f4881fab9",
     "manual_order.py": "312e14512e6398a0c633cecff237a0ac5bb5f679c1c0bc57ca5a5e683ef760db",
-    "manual_orders.py": "0524ed637b4a6e56ee141b8d6c98dc25ed86b20c478a31e1962438da4402fae9",
+    "manual_orders.py": "b4f0c679a28a00b850c9ee8b9a728495cebcef9683fd25d1e676446a417a9a0d",
     "pending.py": "2a90f0c53174dc4a31769908fe4808dae9d4301c18995d9e56b9b918d4f5a9ee",
     "requirements.txt": "cd22ece579d9b77ef70dcedd51a4239501d075fca28462b76dc85b3c4ea4de4a",
-    "risk.py": "96def532a1c1cf4803823db92c9e4a47dc188db1bb9237e43e09ee3041435095",
+    "risk.py": "284dbe357b0aa596e4c56ee88887541193ac311ebbc2df3186335b934a2b235f",
     "run.py": "d2ed114088ac7edf667d1791dcd9e000b735c4efc65888b00a9ce1d5e6310b47",
     "strategies/__init__.py": "9acef57cb947d753a21b26fdfca4ae427403c99b2748230a5aa20e4b0faa40e3",
     "strategies/adaptive.py": "e43b6d74d49681bd95cf6ac4b77e1c5d2514e3647adaf876ccd7242c2279ab5a",
@@ -51,8 +51,8 @@
     "tests/test_crypto_feishu.py": "b1cc748bdedf12b3dd59dfbd4985c7fa0c30fbed889d2c13514c57c3a757f3ff",
     "tests/test_crypto_integration.py": "81337a719bc37fe72f93ab0b5144b6d7d3a50ed37fae41d1c337f4881ef54a82",
     "tests/test_crypto_risk.py": "cd6ddf5a2b99ac53f4f435cc855397cdf3be1a46bea112546b4d49dee70e6a26",
-    "tests/test_manual_orders.py": "d6cb8d21e4e33752117b79a16f14cde4fb8f8d2240ef23e6fee02be9dfe76f10"
+    "tests/test_manual_orders.py": "fe0364910d101aa4ae277f83e175fd6b117ad988a8cfffcb3586b304b2bfd5d2"
   },
   "manual_order_entrypoint": "manual_order.py",
-  "manual_order_version": "crypto-manual-entry-v1"
+  "manual_order_version": "crypto-manual-entry-v2"
 }

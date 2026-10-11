@@ -206,6 +206,13 @@ def closed_entry_readiness(m15_marker, m5_marker, tick, observed_at):
 def research_execution_error(result, tick):
     """Shared executable-price guard for the demo research policy and replay."""
     details = result.details or {}
+    if details.get("source") == "manual" and details.get("strategy_contract", {}).get("manual_entry"):
+        try:
+            risk.execution_prices(ASSET, result.action, None, None, result.stop_loss, result.take_profit,
+                                  tick, contract_spec(), configured_server_offset(), manual=True)
+            return ""
+        except (risk.RiskError, AttributeError, KeyError, TypeError, ValueError) as exc:
+            return "用户订单执行检查失败: " + str(exc)
     if not details.get("strategy_contract", {}).get("demo_only"):
         return ""
     try:
@@ -221,10 +228,10 @@ def research_execution_error(result, tick):
         return "研究策略方向无效"
     entry = ask if action == "buy" else bid
     trigger_price = bid if action == "buy" else ask
-    risk = directional_stop_distance(action, entry, sl)
+    risk_distance = directional_stop_distance(action, entry, sl)
     clearance = directional_stop_distance(action, trigger_price, sl)
     cap_tolerance = 0 if details.get("strategy_contract", {}).get("stop_reference") == "region" else .001
-    if risk <= 0 or risk > price_cap(atr, entry) + cap_tolerance:
+    if risk_distance <= 0 or risk_distance > price_cap(atr, entry) + cap_tolerance:
         return "研究策略实时止损距离超出上限"
     if clearance < 2 * stop_buffer(atr):
         return "研究策略实时止损触发侧余量不足"
@@ -1902,7 +1909,8 @@ class FibVolumePATrader:
             details["entry_guard_atr"], details["entry_guard_ema21"], result.stop_loss, result.take_profit, tick,
             commission_per_lot=env_float("CRYPTO_COMMISSION_PER_LOT", 0),
             slippage_ticks=env_float("CRYPTO_SLIPPAGE_TICKS", 0), commission_bps=env_float("CRYPTO_COMMISSION_BPS", 0), server_offset_hours=configured_server_offset(),
-            requested_volume=details.get("manual_volume") if details.get("source") == "manual" else None)
+            requested_volume=details.get("manual_volume") if details.get("source") == "manual" else None,
+            manual=details.get("source") == "manual" and details.get("strategy_contract", {}).get("manual_entry", False))
         result.details["cash_risk"] = facts
         return facts
 
@@ -2659,7 +2667,7 @@ class FibVolumePATrader:
             return False
 
         live_risk = directional_stop_distance(action, price, result.stop_loss)
-        if live_risk <= 0 or live_risk > price_cap(float(result.details["entry_guard_atr"]), price) + 0.001:
+        if not manual and (live_risk <= 0 or live_risk > price_cap(float(result.details["entry_guard_atr"]), price) + 0.001):
             logger.info(
                 f"二审拒绝下单: 实时止损距离 {live_risk:.2f} > {price_cap(float(result.details["entry_guard_atr"]), price):.2f}, "
                 f"action={action}, price={price}, SL={result.stop_loss}"
@@ -2667,7 +2675,7 @@ class FibVolumePATrader:
             return False
 
         live_rr = reward_risk_ratio(action, price, result.stop_loss, result.take_profit)
-        if live_rr < MIN_REWARD_RISK:
+        if not manual and live_rr < MIN_REWARD_RISK:
             logger.info(
                 f"二审拒绝下单: 实时盈亏比 {live_rr:.2f} < {MIN_REWARD_RISK:.2f}, "
                 f"price={price}, SL={result.stop_loss}, TP={result.take_profit}"
