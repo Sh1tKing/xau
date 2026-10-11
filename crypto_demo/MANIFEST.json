@@ -10,9 +10,9 @@
     ".gitignore": "11aa96c5f85644b81f7dbbdfc0fe124708f96fc2d68f23de999266224bebe03c",
     "__init__.py": "a8a0632a9d790c8a0ce1b0bda1914d5770cbdcb9feda10d894e4efd1d8718e03",
     "AGENTS.md": "00a848f775dd115b62fc4985b726e527727a269a3a9106e7580abb6b22209b31",
-    "crypto_ai3.py": "525fe0524fc8902722e04cf88bb5859b76ae5f6634cae81e34be3a7502c4b743",
+    "crypto_ai3.py": "2d5aee1149bd9fc61908196d5749cc75002ed70e414efd0d2b84ad495c17b574",
     "crypto_backtest.py": "72a1080cd0401f8bbd33d697bbad88fd5cbdecf389c900b1b7810cbfab567b34",
-    "crypto_trader.py": "52d17526057a0daf891b69948ada4a191d82d3ed25d20b4399961096da6a3671",
+    "crypto_trader.py": "656bd7ea1fc2f6259927b17835f5d601289b662f0e1b4be91f25fd508531ff8a",
     "instance_lock.py": "1f8b0bc5fce2cd1a0381daff37d99da127c8a19ffdc6669fa55aba2f4881fab9",
     "pending.py": "2a90f0c53174dc4a31769908fe4808dae9d4301c18995d9e56b9b918d4f5a9ee",
     "README.md": "1632acf4e837cac0fe8beb492277b6075934a3ac814fda8f28e15e86d69dab8e",
@@ -46,7 +46,7 @@
     "tests/test_ai_cost_control.py": "766de4244e299f7930baee533a707587a4df81789bf311df62136b375edfd8a5",
     "tests/test_ai_quality_scorecard.py": "ea13e9b52c61bcd55d4cdf1ecb5919b05d64f63cd4f95a30e6afbcf899115d12",
     "tests/test_ai_response_contract.py": "e291b3b654a6b8afd17bbd111c4ee70950d628466333e2d7f8d865c77b03739f",
-    "tests/test_crypto_integration.py": "c08b6f1d1f218f3affd1928fa59f63c82ddbecf25dccb9ae4498447bafcb2903",
+    "tests/test_crypto_integration.py": "2bfc0a8d413d89d7cd74edcb34cc76ff9aa993c1d5eb866db8891f2efc708bbe",
     "tests/test_crypto_risk.py": "cd6ddf5a2b99ac53f4f435cc855397cdf3be1a46bea112546b4d49dee70e6a26"
   }
 }

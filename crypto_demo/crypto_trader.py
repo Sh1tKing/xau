@@ -1855,18 +1855,30 @@ class FibVolumePATrader:
         if str(getattr(account, "login", "")) != str(MT5_LOGIN) or getattr(account, "server", None) != MT5_SERVER:
             raise risk.RiskError("account login/server changed")
         if empty:
-            positions = mt5.positions_get()
+            positions = self.query_account_positions()
             if self.pending_order.unresolved(positions):
                 raise risk.RiskError("unresolved account-wide order receipt; reconcile exact token before BTC/ETH entry")
             if positions is None or len(positions):
                 raise risk.RiskError("account positions unknown or nonempty")
         return account
 
+    def query_account_positions(self, **filters):
+        """A native None or identity change is unknown, never an empty account."""
+        self.positions_known = False
+        self.crypto_account_ready()
+        positions = mt5.positions_get(**filters)
+        # Recheck after the native query before accepting or reconciling its result.
+        self.crypto_account_ready()
+        if positions is None:
+            raise risk.RiskError("account positions unknown")
+        self.positions_known = True
+        return positions
+
     def crypto_position_ready(self, position):
         self.crypto_account_ready()
         if getattr(position, "magic", None) != MAGIC or getattr(position, "symbol", None) != SYMBOL:
             raise risk.RiskError("position not owned by this crypto instance")
-        live = mt5.positions_get(ticket=int(getattr(position, "ticket", 0)))
+        live = self.query_account_positions(ticket=int(getattr(position, "ticket", 0)))
         if live is None or len(live) != 1:
             raise risk.RiskError("owned position missing/unknown")
         current = live[0]
@@ -2002,6 +2014,11 @@ class FibVolumePATrader:
             self.strategy_ledger.closed_positions({int(t) for t in saved if int(t) != int(ticket)}, time.time())
 
     def guard_strategy_lifecycle(self, positions):
+        # Public callers cannot reconcile a stale list from another account/query.
+        positions = self.get_positions()
+        if positions:
+            risk.spec_values(contract_spec())
+            crypto_quote_prices(mt5.symbol_info_tick(SYMBOL))
         now = time.time()
         saved = self.strategy_ledger.snapshot()
         recovered_due = set()
@@ -2096,13 +2113,11 @@ class FibVolumePATrader:
         return df_m15, df_h1, df_m5
 
     def current_position_count(self):
-        positions = mt5.positions_get()
-        return 1 if positions is None else len(positions)
+        return len(self.query_account_positions())
 
     def get_positions(self):
-        positions = mt5.positions_get(symbol=SYMBOL)
-        self.positions_known = positions is not None
-        return [p for p in positions if getattr(p, "magic", None) == MAGIC and getattr(p, "symbol", None) == SYMBOL] if positions else []
+        positions = self.query_account_positions(symbol=SYMBOL)
+        return [p for p in positions if getattr(p, "magic", None) == MAGIC and getattr(p, "symbol", None) == SYMBOL]
 
     def create_position_snapshot(self, position) -> PositionSnapshot:
         ticket = int(getattr(position, "ticket", 0) or 0)
@@ -2267,6 +2282,7 @@ class FibVolumePATrader:
             self.notify_position_closed(ticket, snapshot, deal)
             self.notified_close_tickets.add(ticket)
             self.entry_confidence.pop(ticket, None)
+        return positions
 
     def validate_order_prices(self, action, entry_price, stop_loss, take_profit):
         if action == "buy":
@@ -2327,6 +2343,7 @@ class FibVolumePATrader:
             return False
         try:
             position = self.crypto_position_ready(position)
+            risk.spec_values(contract_spec())
             crypto_quote_prices(mt5.symbol_info_tick(SYMBOL))
         except risk.RiskError:
             return False
@@ -2433,31 +2450,36 @@ class FibVolumePATrader:
         return state
 
     def run_guardian(self):
-        positions = self.guard_strategy_lifecycle(self.get_positions())
+        # Validate the observation before lifecycle reconciliation or price-state writes.
+        try:
+            positions = self.guard_strategy_lifecycle(None)
+        except risk.RiskError as exc:
+            logger.warning("护盘跳过：%s", exc)
+            return
+        # Frozen deadlines above remain independent of the optional ATR guardian.
         if not GUARDIAN_ENABLED:
             return
+        if positions:
+            try:
+                tick = mt5.symbol_info_tick(SYMBOL)
+                crypto_quote_prices(tick)
+                spec = risk.spec_values(contract_spec())
+                df_m5 = self.get_rates(mt5.TIMEFRAME_M5, 120, shift=1)
+                atr = risk.number(calculate_atr(df_m5) if len(df_m5) >= 20 else 0.0)
+                self.crypto_account_ready()
+            except risk.RiskError as exc:
+                logger.warning("护盘跳过：%s", exc)
+                return
         active_tickets = {int(pos.ticket) for pos in positions}
         for ticket in list(self.guardian_states.keys()):
             if ticket not in active_tickets:
                 self.guardian_states.pop(ticket, None)
-
         if not positions:
             return
 
-        tick = mt5.symbol_info_tick(SYMBOL)
-        if tick is None:
-            logger.warning("护盘跳过：无法获取当前报价")
-            return
-
-        df_m5 = self.get_rates(mt5.TIMEFRAME_M5, 120, shift=1)
-        atr = calculate_atr(df_m5) if len(df_m5) >= 20 else 0.0
-        if atr <= 0:
-            logger.warning("护盘跳过：ATR无效")
-            return
-
         now_ts = time.time()
-        disaster_buffer = max(2*tick_size(), REAL_SL_DISASTER_ATR * atr)
-        min_modify_step = max(tick_size(), MIN_SL_MODIFY_ATR * atr)
+        disaster_buffer = max(2*spec["trade_tick_size"], REAL_SL_DISASTER_ATR * atr)
+        min_modify_step = max(spec["trade_tick_size"], MIN_SL_MODIFY_ATR * atr)
 
         for position in positions:
             state = self.get_or_create_guardian_state(position, tick)
@@ -2582,8 +2604,8 @@ class FibVolumePATrader:
             if self.positions_known is not True:
                 logger.info("持仓查询失败，研究策略停止新下单")
                 return False
-            all_positions = mt5.positions_get()
-            if all_positions is None or len(all_positions) >= MAX_POSITIONS:
+            all_positions = self.query_account_positions()
+            if len(all_positions) >= MAX_POSITIONS:
                 logger.info("研究策略持仓状态不明或全品种持仓已达到上限")
                 return False
 

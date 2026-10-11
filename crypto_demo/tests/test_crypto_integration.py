@@ -3,6 +3,7 @@ from contextlib import ExitStack
 import copy
 from datetime import datetime, timezone
 import json
+import hashlib
 import logging
 logging.disable(logging.CRITICAL)
 from pathlib import Path
@@ -281,6 +282,255 @@ class CryptoIntegrationTests(unittest.TestCase):
             self.assertEqual(self.sent,[])
             self.assertFalse(self.trader.modify_position_sl(NS(),1,"test"))
             self.assertFalse(self.trader.close_position_by_ticket(NS(),"test"))
+
+    def observe_once(self, occupied=False):
+        self.configure()
+        if occupied:
+            self.run_entry()
+        before = copy.deepcopy(self.sent)
+        self.snapshots.clear()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(base, "MODE", "observe"))
+            stack.enter_context(patch.object(base, "ENABLE_TRADING", False))
+            stack.enter_context(patch.object(ai, "AI_ENABLED", False))
+            stack.enter_context(patch.object(self.trader, "connect_mt5", return_value=True))
+            stack.enter_context(patch.object(ai, "attach_ai_logger", return_value="offline"))
+            stack.enter_context(patch.object(self.trader, "notify_lines"))
+            stack.enter_context(patch.object(self.trader, "latest_bar_time", side_effect=lambda tf: int(self.now//({base.mt5.TIMEFRAME_M15:900, base.mt5.TIMEFRAME_M5:300}.get(tf,60)))*({base.mt5.TIMEFRAME_M15:900,base.mt5.TIMEFRAME_M5:300}.get(tf,60))))
+            post = stack.enter_context(patch.object(ai.requests, "post"))
+            shutdown = stack.enter_context(patch.object(base.mt5, "shutdown"))
+            submit = stack.enter_context(patch.object(base.mt5, "order_send"))
+            self.assertEqual(self.trader.run(once=True), 0)
+            post.assert_not_called()
+            submit.assert_not_called()
+            shutdown.assert_called_once_with()
+        candidates = [args for args in self.snapshots if args[1] == "entry_candidate"]
+        self.assertEqual(len(candidates), 1, self.snapshots)
+        self.assertEqual(candidates[0][2]["market_evidence"]["live_quote"]["bid"], self.tick.bid)
+        self.assertEqual(self.sent, before)
+        self.assertTrue(self.trader._stop.is_set())
+
+    def test_observe_full_startup_local_snapshot_shutdown(self):
+        self.observe_once()
+
+    def test_observe_existing_demo_position_still_collects_local_snapshot(self):
+        self.observe_once(occupied=True)
+
+    def test_observe_readonly_backup_and_actual_request_boundary(self):
+        self.configure()
+        with patch.object(base, "MODE", "observe"), patch.object(ai.requests, "post") as post:
+            self.assertEqual(ai.backup_chat_config("AI-1", "mock", "low", "https://mock.test/v1/messages", "offline")["model"], "mock")
+            with self.assertRaises(ai.AIRequestError):
+                ai.call_chat("AI-1", "mock", "low", "rules", "prompt", 1, "https://mock.test/v1/messages", "offline")
+            post.assert_not_called()
+
+    def test_observe_after_request_refresh_still_never_posts(self):
+        self.configure()
+        def refresh():
+            base.MODE = "observe"
+            return {"prompt": "fresh prompt"}
+        with patch.object(base, "MODE", "dry-run"), patch.object(ai.requests, "post") as post:
+            with self.assertRaises(ai.AIRequestError):
+                ai.call_chat("AI-1", "mock", "low", "rules", "prompt", 1,
+                             "https://mock.test/v1/messages", "offline", refresh_request=refresh)
+            post.assert_not_called()
+
+    def test_observe_invalid_startup_query_shutdown_preserves_context(self):
+        self.seed_protected_position()
+        before = self.protected_state()
+        with patch.object(base, "MODE", "observe"), patch.object(self.trader, "connect_mt5", return_value=True), patch.object(base.mt5, "positions_get", return_value=None), patch.object(base.mt5, "shutdown") as shutdown, patch.object(ai.requests, "post") as post:
+            with self.assertRaises(risk.RiskError):
+                self.trader.run(once=True)
+            shutdown.assert_called_once_with()
+            post.assert_not_called()
+        self.assertEqual(self.protected_state(), before)
+
+    def protected_state(self):
+        paths = (Path(ai.AI3_STATE_FILE), self.trader.strategy_ledger.path, self.trader.pending_order.path)
+        return copy.deepcopy((self.trader.position_snapshots, self.trader.guardian_states,
+                              self.trader.entry_contexts, self.trader.entry_confidence,
+                              self.trader.notified_close_tickets, self.trader.strategy_ledger.snapshot(),
+                              {str(path): hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None for path in paths}))
+
+    def seed_protected_position(self, side="buy"):
+        self.configure(side=side)
+        self.run_entry()
+        self.trader.sync_position_close_notifications()
+        self.trader.get_or_create_guardian_state(self.positions[0], self.tick)
+        self.trader.pending_order.reserve(dict(comment="unresolved", symbol=base.SYMBOL, magic=base.MAGIC, type=self.positions[0].type))
+        self.assertIn("123", self.trader.strategy_ledger.snapshot()["positions"])
+
+    def assert_poll_failure_preserves_state(self, native_none=False, during_query=False):
+        self.seed_protected_position()
+        before = self.protected_state()
+        original = copy.deepcopy(self.positions)
+        if native_none:
+            query = lambda **kwargs: None
+        elif during_query:
+            def query(**kwargs):
+                self.acct.login = 2
+                return []
+        else:
+            self.acct.login = 2
+            query = lambda **kwargs: []
+        with patch.object(base.mt5, "positions_get", side_effect=query):
+            for operation in (self.trader.sync_position_close_notifications,
+                              self.trader.reconcile_entry_contexts,
+                              self.trader.run_guardian,
+                              lambda: self.trader.guard_strategy_lifecycle([]),
+                              lambda: self.trader.crypto_account_ready(empty=True)):
+                try:
+                    operation()
+                except (risk.RiskError, ai.MarketSnapshotError):
+                    pass
+                self.assertEqual(self.protected_state(), before, operation)
+            self.assertIs(self.trader.positions_known, False)
+        self.acct.login = 1
+        self.positions[:] = original
+        self.trader.sync_position_close_notifications()
+        self.assertEqual(self.trader.entry_contexts["123"], before[2]["123"])
+        self.assertIs(self.trader.positions_known, True)
+
+    def test_switched_demo_polling_preserves_memory_and_disk(self):
+        self.assert_poll_failure_preserves_state()
+
+    def test_native_none_polling_preserves_memory_and_disk(self):
+        self.assert_poll_failure_preserves_state(native_none=True)
+
+    def test_identity_switch_during_query_preserves_memory_and_disk(self):
+        self.assert_poll_failure_preserves_state(during_query=True)
+
+    def test_identity_switch_during_query_cannot_resolve_matching_pending(self):
+        self.seed_protected_position()
+        self.positions[0].comment = "unresolved"
+        before = self.protected_state()
+        def switched(**kwargs):
+            self.acct.login = 2
+            return list(self.positions)
+        with patch.object(base.mt5, "positions_get", side_effect=switched):
+            with self.assertRaises(risk.RiskError):
+                self.trader.crypto_account_ready(empty=True)
+        self.assertEqual(self.protected_state(), before)
+
+    def test_known_empty_configured_account_reconciles_close_and_cooldown(self):
+        self.seed_protected_position()
+        self.positions.clear()
+        self.now += 31
+        self.trader.sync_position_close_notifications()
+        self.trader.run_guardian()
+        self.assertEqual(self.trader.entry_contexts, {})
+        self.assertEqual(self.trader.position_snapshots, {})
+        self.assertEqual(self.trader.guardian_states, {})
+        saved = self.trader.strategy_ledger.snapshot()
+        self.assertEqual(saved["positions"], {})
+        self.assertEqual(saved["cooldown_until"], self.now+60)
+        self.assertIsNotNone(self.trader.pending_order.read())
+
+    def test_invalid_quote_spec_block_frozen_deadline_even_guard_disabled(self):
+        self.seed_protected_position()
+        self.now += 91*60
+        self.tick.time = int(self.now-31)
+        before = self.protected_state()
+        with patch.object(base, "GUARDIAN_ENABLED", False), patch.object(self.trader, "close_position_by_ticket", return_value=False) as close:
+            self.trader.run_guardian()
+            close.assert_not_called()
+            self.assertEqual(self.protected_state(), before)
+            self.tick.time = int(self.now)
+            with patch.object(base.mt5, "symbol_info", return_value=specification(trade_tick_size=0)):
+                self.trader.run_guardian()
+                close.assert_not_called()
+                self.assertEqual(self.protected_state(), before)
+            self.trader.run_guardian()
+            close.assert_called_once()
+
+    def guardian_invalid_then_fresh(self, side, failure):
+        self.seed_protected_position(side)
+        before = self.protected_state()
+        fresh = copy.deepcopy(self.tick)
+        if failure == "infinite":
+            self.tick.bid = float("inf") if side == "buy" else self.tick.bid
+            self.tick.ask = float("inf")
+        elif failure == "nan":
+            self.tick.bid = self.tick.ask = float("nan")
+        elif failure == "crossed":
+            self.tick.ask = self.tick.bid - 1
+        elif failure == "stale":
+            self.tick.time -= 31
+        elif failure == "future":
+            self.tick.time += 1
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(base, "GUARDIAN_ENABLED", True))
+            stack.enter_context(patch.object(base, "is_structure_failure", return_value=(False, "")))
+            close = stack.enter_context(patch.object(self.trader, "close_position_by_ticket", return_value=False))
+            modify = stack.enter_context(patch.object(self.trader, "modify_position_sl", return_value=False))
+            invalid = ExitStack()
+            if failure == "spec":
+                invalid.enter_context(patch.object(base.mt5, "symbol_info", return_value=specification(trade_tick_size=float("nan"))))
+            elif failure in ("atr_nan", "atr_infinite", "atr_zero", "atr_negative"):
+                invalid.enter_context(patch.object(base, "calculate_atr", return_value={"atr_nan":float("nan"), "atr_infinite":float("inf"), "atr_zero":0, "atr_negative":-1}[failure]))
+            with invalid:
+                try:
+                    self.trader.run_guardian()
+                except risk.RiskError:
+                    pass
+                self.assertEqual(self.protected_state(), before, failure)
+                close.assert_not_called()
+                modify.assert_not_called()
+            self.tick = fresh
+            sign = 1 if side == "buy" else -1
+            self.tick.bid += sign*1000
+            self.tick.ask += sign*1000
+            self.trader.run_guardian()
+            state = self.trader.guardian_states[123]
+            self.assertNotEqual(state, before[1][123])
+            self.assertTrue(base.math.isfinite(state.virtual_sl))
+            self.assertGreater(state.virtual_sl, 0)
+            self.assertTrue(modify.called)
+            close.assert_not_called()
+
+    def test_invalid_quotes_preserve_buy_guard_and_resume_fresh(self):
+        for failure in ("infinite", "nan", "crossed", "stale", "future"):
+            with self.subTest(failure=failure):
+                try:
+                    self.guardian_invalid_then_fresh("buy", failure)
+                finally:
+                    self.tearDown_guardian_case()
+
+    def test_invalid_quotes_preserve_sell_guard_and_resume_fresh(self):
+        for failure in ("infinite", "nan", "crossed", "stale", "future"):
+            with self.subTest(failure=failure):
+                try:
+                    self.guardian_invalid_then_fresh("sell", failure)
+                finally:
+                    self.tearDown_guardian_case()
+
+    def tearDown_guardian_case(self):
+        # Isolate subcases while retaining this test's temporary mocked environment.
+        self.trader.pending_order.clear()
+        self.trader.strategy_ledger.path.unlink(missing_ok=True)
+        Path(ai.AI3_STATE_FILE).unlink(missing_ok=True)
+        self.positions.clear()
+        self.trader = ai.ThreeAITrader()
+        self.trader.pending_order = PendingOrder(self.dir/"pending.json", "offline-identity")
+
+    def test_invalid_spec_atr_preserve_guard_and_resume_fresh(self):
+        for side in ("buy", "sell"):
+            for failure in ("spec", "atr_nan", "atr_infinite", "atr_zero", "atr_negative"):
+                with self.subTest(side=side, failure=failure):
+                    try:
+                        self.guardian_invalid_then_fresh(side, failure)
+                    finally:
+                        self.tearDown_guardian_case()
+
+    def test_frozen_deadline_runs_with_guard_disabled_and_no_atr(self):
+        self.seed_protected_position()
+        self.now += 91*60
+        self.tick.time = int(self.now)
+        with patch.object(base, "GUARDIAN_ENABLED", False), patch.object(base, "calculate_atr", return_value=float("nan")) as atr, patch.object(self.trader, "close_position_by_ticket", return_value=False) as close:
+            self.trader.run_guardian()
+            close.assert_called_once()
+            self.assertEqual(close.call_args.args[0].ticket, 123)
+            atr.assert_not_called()
 
     def test_uncertain_send_retains_account_latch(self):
         self.configure()

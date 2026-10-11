@@ -1312,8 +1312,6 @@ class AIRequestError(RuntimeError):
 
 
 def backup_chat_config(role, model, effort, url, api_key):
-    if base.MODE == "observe":
-        raise AIRequestError(role, "observe mode forbids AI requests")
     primary = {"model": model, "effort": effort, "url": str(url or "").strip(),
                "key": str(api_key or "").strip()}
     role_id = {"AI-1": "1", "AI-2": "2", "AI-3": "3"}.get(role)
@@ -1413,6 +1411,8 @@ def chat_finish_reason(result):
 
 def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, still_current=None,
               request_context=None, refresh_request=None):
+    if base.MODE == "observe":
+        raise AIRequestError(role, "observe mode forbids AI requests")
     primary = {"model": model, "effort": effort, "url": str(url or "").strip(),
                "key": str(api_key or "").strip()}
     backup = backup_chat_config(role, model, effort, url, api_key)
@@ -1555,6 +1555,8 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             })
 
         try:
+            if base.MODE == "observe":
+                raise AIRequestError(role, "observe mode forbids AI requests")
             response = requests.post(active["url"], headers=headers, json=data, timeout=request_timeout,
                                      hooks={"response": response_headers_received})
         except (requests.Timeout, requests.ConnectionError) as exc:
@@ -2142,10 +2144,11 @@ class ThreeAITrader(base.FibVolumePATrader):
             return quote_from_tick(tick)
 
     def ensure_entry_account_ready(self, contract):
-        if base.MODE == "observe":
-            raise MarketSnapshotError("observe mode forbids paid AI")
+        observing = base.MODE == "observe"
         try:
-            self.crypto_account_ready(empty=True)
+            self.crypto_account_ready(empty=not observing)
+            if observing:
+                self.query_account_positions()
             base.risk.spec_values(base.contract_spec())
             base.crypto_quote_prices(base.mt5.symbol_info_tick(base.SYMBOL))
         except base.risk.RiskError as exc:
@@ -2153,9 +2156,9 @@ class ThreeAITrader(base.FibVolumePATrader):
         account = base.mt5.account_info()
         if account is None or getattr(account, "trade_mode", None) != base.mt5.ACCOUNT_TRADE_MODE_DEMO:
             raise MarketSnapshotError("研究策略仅允许模拟账户，不请求AI或下单")
-        if contract.get("analysis_mode"):
-            positions = base.mt5.positions_get()
-            if positions is None or len(positions) >= base.MAX_POSITIONS:
+        if contract.get("analysis_mode") and not observing:
+            positions = self.query_account_positions()
+            if len(positions) >= base.MAX_POSITIONS:
                 raise MarketSnapshotError("自主分析持仓状态未知或已达到单仓上限，AI not called")
 
     def collect_entry_snapshot(self, decision_id):
@@ -2306,8 +2309,8 @@ class ThreeAITrader(base.FibVolumePATrader):
             return closed
 
     def sync_position_close_notifications(self):
-        super().sync_position_close_notifications()
-        active = {str(int(item.ticket)) for item in self.get_positions()}
+        positions = super().sync_position_close_notifications()
+        active = {str(int(item.ticket)) for item in positions}
         with self._state_lock:
             stale = [ticket for ticket in self.entry_contexts if ticket not in active]
             for ticket in stale:
@@ -2478,6 +2481,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                     reject,
                 )
             )
+            if base.MODE == "observe":
+                return
             if not AI_ENABLED:
                 if local_result.action in ("buy", "sell"):
                     local_result.details.update(
@@ -2969,6 +2974,15 @@ class ThreeAITrader(base.FibVolumePATrader):
     def run(self, once=False):
         if not self.connect_mt5():
             return 1
+        try:
+            return self._run_connected(once)
+        finally:
+            self._stop.set()
+            with self._mt5_lock:
+                base.mt5.shutdown()
+            base.logger.info("MT5 已关闭")
+
+    def _run_connected(self, once=False):
         self.reconcile_entry_contexts()
         log_path = attach_ai_logger()
         strategies = base.STRATEGIES.snapshot()
@@ -3082,11 +3096,6 @@ class ThreeAITrader(base.FibVolumePATrader):
         except KeyboardInterrupt:
             base.logger.info("收到人工停止信号")
             return 0
-        finally:
-            self._stop.set()
-            with self._mt5_lock:
-                base.mt5.shutdown()
-            base.logger.info("MT5 已关闭")
 
 
 def run_http_retry_self_test():
