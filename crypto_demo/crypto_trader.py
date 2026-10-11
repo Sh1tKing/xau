@@ -2567,6 +2567,11 @@ class FibVolumePATrader:
         """Optional execution checks for subclasses using independently reviewed plans."""
         return research_execution_error(result, tick)
 
+    def entry_submission_metadata(self, result, request_body, event_id, token):
+        """Original account binding persisted with event consumption before send."""
+        account = self.crypto_account_ready()
+        return {"account_identity": {"login": str(account.login), "server": account.server}}
+
     def place_order(self, result: StrategyResult):
         if MODE == "observe":
             return False
@@ -2720,7 +2725,13 @@ class FibVolumePATrader:
             offset = tick_clock_offset(tick, observed)
             token = execution_token(event_id, SYMBOL, MAGIC, action)
             original_evidence = assessments.get(action, {}).get("evidence", {})
+            try:
+                entry_metadata = self.entry_submission_metadata(result, request_body, event_id, token)
+            except (risk.RiskError, TypeError, ValueError, OSError) as exc:
+                logger.info("原入场上下文无法冻结，停止提交订单: %s", exc)
+                return False
             if offset is None or offset != original_evidence.get("server_offset_hours") or not self.strategy_ledger.reserve(event_id, observed, {
+                    **entry_metadata,
                     "execution_token": token, "symbol": SYMBOL, "magic": MAGIC, "action": action,
                     "event_id": event_id, "evidence": copy.deepcopy(original_evidence),
                     "server_utc_offset": offset, "contract": contract,

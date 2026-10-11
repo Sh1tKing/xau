@@ -2025,6 +2025,7 @@ class ThreeAITrader(base.FibVolumePATrader):
 
     def reconcile_entry_contexts(self):
         positions = self.get_positions()
+        self.restore_entry_contexts(positions)
         active = {str(int(position.ticket)): position for position in positions}
         changed = False
         with self._state_lock:
@@ -2063,21 +2064,18 @@ class ThreeAITrader(base.FibVolumePATrader):
         if changed:
             self.save_entry_contexts()
 
-    def record_entry_context(self, result, position):
-        ticket = int(getattr(position, "ticket", 0) or 0)
-        if ticket <= 0:
-            return
+    def build_entry_context(self, result, entry_price):
+        """Freeze the audited thesis and SL/TP before any broker submission."""
         details = dict(result.details or {})
-        entry_price = float(getattr(position, "price_open", 0.0) or details.get("entry_price", 0.0) or 0.0)
-        initial_sl = float(getattr(position, "sl", 0.0) or result.stop_loss or 0.0)
-        initial_tp = float(getattr(position, "tp", 0.0) or result.take_profit or 0.0)
+        initial_sl = float(result.stop_loss)
+        initial_tp = float(result.take_profit)
         risk = abs(entry_price - initial_sl) if initial_sl > 0 else None
         context = {
             "status": "complete",
-            "ticket": ticket,
-            "identifier": int(getattr(position, "identifier", 0) or 0),
-            "symbol": getattr(position, "symbol", base.SYMBOL),
-            "direction": "BUY" if position.type == base.mt5.POSITION_TYPE_BUY else "SELL",
+            "ticket": None,
+            "identifier": None,
+            "symbol": base.SYMBOL,
+            "direction": result.action.upper(),
             "entry_price": entry_price,
             "initial_sl": initial_sl,
             "initial_tp": initial_tp,
@@ -2113,9 +2111,69 @@ class ThreeAITrader(base.FibVolumePATrader):
             "coverage_started_at": time.time(),
             "last_observed_at": time.time(),
         }
-        with self._state_lock:
-            self.entry_contexts[str(ticket)] = context
-        self.save_entry_contexts()
+        return copy.deepcopy(context)
+
+    def entry_submission_metadata(self, result, request_body, event_id, token):
+        metadata = super().entry_submission_metadata(result, request_body, event_id, token)
+        context = self.build_entry_context(result, float(request_body["price"]))
+        context["event_id"] = event_id
+        context["execution_binding"] = dict(account_identity=metadata["account_identity"],
+            event_id=event_id, execution_token=token, symbol=base.SYMBOL, magic=base.MAGIC, action=result.action)
+        # Fail before reserve/order_send for non-JSON or non-finite original state.
+        json.dumps(context, allow_nan=False)
+        metadata["ai3_entry_context"] = context
+        return metadata
+
+    def restore_entry_contexts(self, positions):
+        """Recover only one exact original submission; never consult definitions."""
+        account = self.crypto_account_ready()
+        identity = {"login": str(account.login), "server": account.server}
+        saved = self.strategy_ledger.snapshot()
+        changed = False
+        for position in positions:
+            ticket = str(int(position.ticket))
+            with self._state_lock:
+                current = self.entry_contexts.get(ticket)
+                if current and current.get("status") == "complete":
+                    continue
+            action = "buy" if position.type == base.mt5.POSITION_TYPE_BUY else "sell" if position.type == base.mt5.POSITION_TYPE_SELL else None
+            matches = []
+            for event_id, event in saved["events"].items():
+                meta = event["metadata"]
+                original = meta.get("ai3_entry_context")
+                binding = dict(account_identity=identity, event_id=event_id,
+                    execution_token=base.execution_token(event_id, base.SYMBOL, base.MAGIC, action),
+                    symbol=base.SYMBOL, magic=base.MAGIC, action=action)
+                if (action is None or not isinstance(original, dict)
+                        or meta.get("account_identity") != identity
+                        or original.get("execution_binding") != binding
+                        or any(meta.get(key) != binding[key] for key in ("event_id", "execution_token", "symbol", "magic", "action"))
+                        or original.get("strategy_contract") != meta.get("contract")
+                        or original.get("strategy_evidence", {}).get(action, {}).get("evidence") != meta.get("evidence")
+                        or original.get("event_id") != event_id
+                        or original.get("direction") != action.upper()
+                        or getattr(position, "symbol", None) != base.SYMBOL or getattr(position, "magic", None) != base.MAGIC
+                        or getattr(position, "comment", None) not in (binding["execution_token"], "_SR_"+binding["execution_token"])):
+                    continue
+                same_token = [p for p in positions if getattr(p, "comment", None) in (binding["execution_token"], "_SR_"+binding["execution_token"])
+                              and getattr(p, "symbol", None) == base.SYMBOL and getattr(p, "magic", None) == base.MAGIC and p.type == position.type]
+                bound = [t for t, p in saved["positions"].items() if p["event_id"] == event_id]
+                if len(same_token) == 1 and (not bound or bound == [ticket]):
+                    matches.append((event_id, meta, original))
+            if len(matches) != 1:
+                continue
+            event_id, meta, original = matches[0]
+            opened = float(position.time)-meta["server_utc_offset"]*3600
+            if not self.strategy_ledger.record_position(int(ticket), event_id, opened, meta["max_hold_minutes"], meta["cooldown_seconds"]):
+                continue
+            context = copy.deepcopy(original)
+            context.update(ticket=int(ticket), identifier=int(getattr(position, "identifier", 0) or 0), entry_price=float(position.price_open))
+            context["initial_risk"] = abs(context["entry_price"]-context["initial_sl"])
+            with self._state_lock:
+                self.entry_contexts[ticket] = context
+            changed = True
+        if changed:
+            self.save_entry_contexts()
 
     def remove_entry_context(self, ticket):
         with self._state_lock:
@@ -2269,31 +2327,9 @@ class ThreeAITrader(base.FibVolumePATrader):
             if not placed:
                 return False
             positions = self.get_positions()
-            ticket = int(getattr(self, "last_order_ticket", 0) or 0)
-            position = next(
-                (item for item in positions if int(getattr(item, "ticket", 0) or 0) == ticket),
-                None,
-            )
-            evidence = (result.details or {}).get("strategy_evidence", {}).get(result.action, {}).get("evidence", {})
-            event_id = evidence.get("event_id")
-            if event_id:
-                token = base.execution_token(event_id, base.SYMBOL, base.MAGIC, result.action)
-                def exact_identity(item):
-                    return (getattr(item, "comment", "") in (token, "_SR_" + token)
-                            and getattr(item, "symbol", None) == base.SYMBOL
-                            and getattr(item, "magic", None) == base.MAGIC
-                            and getattr(item, "type", None) == (base.mt5.POSITION_TYPE_BUY if result.action == "buy" else base.mt5.POSITION_TYPE_SELL))
-                if position is not None and not exact_identity(position):
-                    position = None
-                if position is None:
-                    state = self.strategy_ledger.snapshot()
-                    matches = [item for item in positions if exact_identity(item)
-                               and (base.recovery_event(item, state, base.SYMBOL, base.MAGIC) or (None,))[0] == event_id]
-                    position = matches[0] if len(matches) == 1 else None
-            if position is None:
-                base.logger.warning("开仓成功但暂未找到持仓，AI-3上下文将在下次启动/轮询标记未知")
-            else:
-                self.record_entry_context(result, position)
+            self.restore_entry_contexts(positions)
+            if not positions:
+                base.logger.warning("开仓成功但持仓尚未传播，原AI-3上下文已预提交保存，等待精确token恢复")
             return True
 
     def modify_position_sl(self, position, new_sl, reason):
@@ -2310,6 +2346,7 @@ class ThreeAITrader(base.FibVolumePATrader):
 
     def sync_position_close_notifications(self):
         positions = super().sync_position_close_notifications()
+        self.restore_entry_contexts(positions)
         active = {str(int(item.ticket)) for item in positions}
         with self._state_lock:
             stale = [ticket for ticket in self.entry_contexts if ticket not in active]
@@ -2776,7 +2813,14 @@ class ThreeAITrader(base.FibVolumePATrader):
         tick = None
         with self._mt5_lock:
             tick = base.mt5.symbol_info_tick(base.SYMBOL)
+        # The final quote, spec and account are the exact evidence sent to AI-3.
+        # Validate after rates and before any context/observation mutation.
+        self.crypto_account_ready()
+        base.risk.spec_values(base.contract_spec())
+        base.crypto_quote_prices(tick)
         quote = quote_from_tick(tick)
+        self.crypto_account_ready()
+        self.restore_entry_contexts(positions)
         payload = {
             "symbol": base.SYMBOL,
             "snapshot_id": request_trace_id("ai3"),

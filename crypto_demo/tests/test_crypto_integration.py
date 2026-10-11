@@ -169,6 +169,219 @@ class CryptoIntegrationTests(unittest.TestCase):
         self.assertEqual(self.run_entry().call_count, 2, self.snapshots)
         self.assertEqual(len(self.sent), 1, self.snapshots)
 
+    def run_ai3_hold(self):
+        stamp = int(self.now//60)*60
+        seq = self.trader.claim_task("ai3", stamp, 220)
+        with patch.object(ai.requests, "post", return_value=Response(dict(action="hold", ticket=123, reasoning="原理由继续"))) as post:
+            self.trader.ai3_task(stamp, seq)
+        return post
+
+    def assert_final_ai3_guard(self, failure, at_refresh=False):
+        self.configure()
+        self.run_entry()
+        self.trader.get_or_create_guardian_state(self.positions[0], self.tick)
+        if at_refresh:
+            self.trader.collect_ai3_snapshot({123})
+        before = self.protected_state()
+        fresh = copy.deepcopy(self.tick)
+        calls = 0
+        def rates(tf, count, shift=1):
+            nonlocal calls
+            calls += 1
+            if calls == (8 if at_refresh else 4):
+                if failure == "account":
+                    self.acct.login = 2
+                elif failure == "spec":
+                    self.spec.trade_tick_size = 0
+                else:
+                    self.tick = copy.deepcopy(fresh)
+                    self.tick.time += -3601 if failure == "stale" else 1
+            return self.frames[{base.mt5.TIMEFRAME_H1:1, base.mt5.TIMEFRAME_M15:0}.get(tf,2)]
+        with patch.object(self.trader, "get_rates", side_effect=rates):
+            self.assertEqual(self.run_ai3_hold().call_count, 0)
+        self.assertEqual(self.protected_state(), before)
+        self.acct.login = 1
+        self.spec.trade_tick_size = .5
+        self.tick = fresh
+        self.assertEqual(self.run_ai3_hold().call_count, 1)
+
+    def test_ai3_final_stale_tick_zero_posts_and_fresh_resume(self):
+        self.assert_final_ai3_guard("stale")
+
+    def test_ai3_final_future_tick_zero_posts_and_fresh_resume(self):
+        self.assert_final_ai3_guard("future")
+
+    def test_ai3_post_refresh_final_tick_zero_posts(self):
+        self.assert_final_ai3_guard("stale", at_refresh=True)
+
+    def test_ai3_post_refresh_final_future_tick_zero_posts(self):
+        self.assert_final_ai3_guard("future", at_refresh=True)
+
+    def test_ai3_final_spec_change_preserves_context(self):
+        self.assert_final_ai3_guard("spec")
+
+    def test_ai3_final_account_change_preserves_context(self):
+        self.assert_final_ai3_guard("account")
+
+    def test_ai3_final_explicit_three_hour_offset_is_fresh(self):
+        self.configure()
+        self.run_entry()
+        with patch.dict(ai.os.environ, {"CRYPTO_SERVER_UTC_OFFSET_HOURS": "3"}):
+            self.tick.time += 10800
+            self.tick.time_msc += 10800000
+            self.assertEqual(self.run_ai3_hold().call_count, 1)
+
+    def reload_original_definition(self):
+        directory = self.dir/"reload"
+        directory.mkdir(exist_ok=True)
+        source = Path(base.BASE_DIR)/("strategies/definitions/"+self.asset.lower()+"/adaptive.py")
+        text = source.read_text(encoding="utf-8")
+        text = text.replace("max_hold_minutes=90", "max_hold_minutes=180").replace("max_hold_minutes=60", "max_hold_minutes=180")
+        (directory/"adaptive.py").write_text(text, encoding="utf-8")
+        self.stack.enter_context(patch.object(base, "STRATEGIES", Registry(directory)))
+        self.assertEqual(base.STRATEGIES.snapshot().get(self.asset.lower()+"_adaptive").max_hold_minutes, 180)
+
+    def delayed_original_context(self, uncertain=False, restart=False, side="buy", polling=False):
+        self.configure("BTC" if side == "buy" else "ETH", side)
+        original = copy.deepcopy(self.registry.snapshot().get(self.asset.lower()+"_adaptive").manifest())
+        original_hold = original["max_hold_minutes"]
+        def delayed(request):
+            self.sent.append(copy.deepcopy(request))
+            return None if uncertain else NS(retcode=base.mt5.TRADE_RETCODE_DONE, order=123, price=request["price"], comment="mock")
+        with patch.object(base.mt5, "order_send", side_effect=delayed):
+            self.assertEqual(self.run_entry().call_count, 2)
+        self.assertEqual(len(self.sent), 1, self.snapshots)
+        saved = self.trader.strategy_ledger.snapshot()
+        event_id = next(iter(saved["events"]))
+        meta = saved["events"][event_id]["metadata"]
+        self.assertTrue("ai3_entry_context" in meta, "original AI-3 thesis was not persisted before submission")
+        self.assertEqual(meta["ai3_entry_context"]["strategy_contract"], original)
+        if uncertain:
+            self.assertIsNotNone(self.trader.pending_order.read())
+        else:
+            self.assertIsNone(self.trader.pending_order.read())
+        self.reload_original_definition()
+        request = self.sent[0]
+        self.now += 45
+        self.tick.time = int(self.now)
+        # Broker SL has already tightened: recovery must keep the original SL.
+        self.positions[:] = [NS(ticket=123, identifier=456, symbol=base.SYMBOL, magic=base.MAGIC,
+                                type=request["type"], comment=request["comment"], price_open=request["price"]+(.5 if side == "buy" else -.05),
+                                sl=request["sl"]+(10 if side == "buy" else -1), tp=request["tp"],
+                                time=int(self.now-45), volume=request["volume"], profit=0.)]
+        if restart:
+            self.trader = ai.ThreeAITrader()
+            self.trader.pending_order = PendingOrder(self.dir/"pending.json", "offline-identity")
+            self.trader.reconcile_entry_contexts()
+        elif polling:
+            self.trader.sync_position_close_notifications()
+        snapshot = self.trader.collect_ai3_snapshot({123})
+        pack = json.loads(snapshot["prompt"].split("\n", 1)[1])
+        context = pack["positions"][0]["entry_context"]
+        self.assertEqual(context["status"], "complete")
+        self.assertEqual(context["strategy_contract"], original)
+        self.assertEqual(context["initial_sl"], request["sl"])
+        self.assertEqual(context["initial_tp"], request["tp"])
+        self.assertEqual(context["entry_price"], self.positions[0].price_open)
+        self.assertEqual(context["identifier"], 456)
+        self.assertEqual(context["trigger_evidence"], "近期M5收盘位置及实体，H1许可的自主确认")
+        self.assertEqual(context["invalidation"], "原保护结构收盘失效")
+        self.assertEqual(context["target_basis"], "现有结构空间")
+        self.assertEqual(snapshot["profile_rules"], ai.role_rules("AI-3", [original]))
+        lifetime = self.trader.strategy_ledger.snapshot()["positions"]["123"]
+        self.assertEqual(lifetime["max_hold_minutes"], original_hold)
+        self.assertEqual(lifetime["cooldown_seconds"], original["cooldown_seconds"])
+        self.assertEqual(lifetime["opened_at_utc"], self.now-45)
+        complete_saved = copy.deepcopy(self.trader.entry_contexts["123"])
+        self.trader.reconcile_entry_contexts()
+        self.trader.sync_position_close_notifications()
+        self.assertEqual(self.trader.entry_contexts["123"], complete_saved)
+        posts = self.run_ai3_hold()
+        self.assertEqual(posts.call_count, 1)
+        paid = json.loads(posts.call_args.kwargs["json"]["messages"][-1]["content"].split("\n",1)[1])
+        self.assertEqual(paid["positions"][0]["entry_context"]["strategy_contract"], original)
+        self.assertEqual(self.trader.strategy_ledger.snapshot()["events"][event_id], saved["events"][event_id])
+
+    def test_done_delayed_visibility_polling_keeps_original_context(self):
+        self.delayed_original_context(polling=True)
+
+    def test_done_delayed_visibility_restart_keeps_original_context(self):
+        self.delayed_original_context(restart=True)
+
+    def test_uncertain_visibility_ai3_keeps_original_sell_context(self):
+        self.delayed_original_context(uncertain=True, side="sell")
+
+    def test_uncertain_visibility_restart_keeps_original_sell_context(self):
+        self.delayed_original_context(uncertain=True, restart=True, side="sell")
+
+    def test_ai3_recovery_refuses_nonmatching_bindings_and_historical_unknown(self):
+        self.configure()
+        def uncertain(request):
+            self.sent.append(copy.deepcopy(request))
+            return None
+        with patch.object(base.mt5, "order_send", side_effect=uncertain):
+            self.run_entry()
+        request = self.sent[0]
+        position = NS(ticket=123, identifier=456, symbol=base.SYMBOL, magic=base.MAGIC,
+                      type=request["type"], comment=request["comment"], price_open=request["price"],
+                      sl=request["sl"], tp=request["tp"], time=int(self.now), volume=request["volume"], profit=0.)
+        original_state = self.trader.strategy_ledger.snapshot()
+        event_id = next(iter(original_state["events"]))
+        for mismatch in ("token", "symbol", "magic", "direction", "account", "event", "historical", "duplicate"):
+            with self.subTest(mismatch=mismatch):
+                self.trader.entry_contexts.clear()
+                self.positions[:] = [copy.deepcopy(position)]
+                changed = copy.deepcopy(original_state)
+                meta = changed["events"][event_id]["metadata"]
+                if mismatch == "token":
+                    self.positions[0].comment = "unrelated"
+                elif mismatch == "symbol":
+                    self.positions[0].symbol = "ETHUSD.mock"
+                elif mismatch == "magic":
+                    self.positions[0].magic += 1
+                elif mismatch == "direction":
+                    self.positions[0].type = base.mt5.POSITION_TYPE_SELL
+                elif mismatch == "account":
+                    meta["account_identity"]["server"] = "other-account-server"
+                elif mismatch == "event":
+                    meta["ai3_entry_context"]["execution_binding"]["event_id"] = "other-event"
+                elif mismatch == "historical":
+                    meta.pop("ai3_entry_context")
+                else:
+                    duplicate = copy.deepcopy(position)
+                    duplicate.ticket = 124
+                    self.positions.append(duplicate)
+                self.assertTrue(self.trader.strategy_ledger._persist(changed))
+                self.trader.reconcile_entry_contexts()
+                self.assertFalse(any(c.get("status") == "complete" for c in self.trader.entry_contexts.values()))
+                self.assertEqual(self.trader.strategy_ledger.snapshot()["positions"], {})
+        self.assertTrue(self.trader.strategy_ledger._persist(original_state))
+        self.positions[:] = [position]
+        self.trader.reconcile_entry_contexts()
+        self.assertEqual(self.trader.entry_contexts["123"]["status"], "complete")
+
+    def test_original_context_serialization_failure_stops_actual_send(self):
+        self.configure()
+        original = self.trader.build_entry_context
+        def unsafe(*args):
+            context = original(*args)
+            context["trigger_evidence"] = object()
+            return context
+        with patch.object(self.trader, "build_entry_context", side_effect=unsafe):
+            self.assertEqual(self.run_entry().call_count, 2)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.trader.strategy_ledger.snapshot()["events"], {})
+        self.assertIsNone(self.trader.pending_order.read())
+
+    def test_original_context_atomic_write_failure_stops_actual_send(self):
+        self.configure()
+        with patch("crypto_demo.strategies.lifecycle.os.replace", side_effect=OSError("offline write failure")):
+            self.assertEqual(self.run_entry().call_count, 2)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.trader.strategy_ledger.snapshot()["events"], {})
+        self.assertIsNone(self.trader.pending_order.read())
+        self.assertIn("write failed", self.trader.strategy_ledger.error)
+
     def test_every_quote_refreshed_fixed_sl_tp_through_submit(self):
         self.configure()
         def change(amount):
