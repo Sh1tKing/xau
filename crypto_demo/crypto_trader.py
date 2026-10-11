@@ -399,7 +399,7 @@ ENTRY_BAR_TIMEFRAME = mt5.TIMEFRAME_M15
 
 FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL", "").strip()
 FEISHU_WEBHOOK_SECRET = os.getenv("FEISHU_WEBHOOK_SECRET", "").strip()
-FEISHU_NOTIFY_ENABLED = False
+FEISHU_NOTIFY_ENABLED = env_bool("FEISHU_NOTIFY_ENABLED", False)
 
 TIMEFRAME_MAP = {
     "M1": mt5.TIMEFRAME_M1,
@@ -510,14 +510,22 @@ def send_feishu_notification(title, lines):
         with request.urlopen(req, timeout=10) as response:
             body = response.read().decode("utf-8", errors="replace")
         if 200 <= response.status < 300:
-            logger.info("✅ 飞书通知发送成功")
-            return True
-        logger.warning(f"⚠️ 飞书通知发送失败: HTTP {response.status} - {body[:200]}")
+            try:
+                result = json.loads(body)
+            except (TypeError, ValueError):
+                logger.warning("⚠️ 飞书通知返回无效JSON")
+                return False
+            code = result.get("code", result.get("StatusCode")) if isinstance(result, dict) else None
+            if type(code) is int and code == 0:
+                logger.info("✅ 飞书通知发送成功")
+                return True
+            logger.warning("⚠️ 飞书通知被拒绝: code=%s", code if type(code) is int else "未知")
+            return False
+        logger.warning("⚠️ 飞书通知发送失败: HTTP %s", response.status)
     except error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        logger.warning(f"⚠️ 飞书通知发送失败: HTTP {exc.code} - {body[:200]}")
+        logger.warning("⚠️ 飞书通知发送失败: HTTP %s", exc.code)
     except Exception as exc:
-        logger.warning(f"⚠️ 飞书通知异常: {type(exc).__name__}: {exc}")
+        logger.warning("⚠️ 飞书通知异常: %s", type(exc).__name__)
     return False
 
 

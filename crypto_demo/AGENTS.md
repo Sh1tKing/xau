@@ -9,3 +9,5 @@ Gold SL8 is a gold price distance. Here8USD is bounded account cash loss includi
 USD DEMO only. Observe/dry-run prohibit all order mutations. Entry inspects all account positions; guardian owns exact symbol/magic. Identity switches and unresolved account receipts block entries across assets. Gold does not participate in the crypto account lock; use a separate demo account/terminal.
 
 Tests use explicit mocks/placeholders, no actual .env/network. Engineering paths are not actual AI results or returns.
+
+Feishu notifications are opt-in through private .env, independent of the trading mode. Never send a real test notification unless the user explicitly requests it; use mocked transport to verify the switch, signing and delivery results.

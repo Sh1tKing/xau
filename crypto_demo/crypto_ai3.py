@@ -3067,6 +3067,10 @@ class ThreeAITrader(base.FibVolumePATrader):
             "AI keys: AI1=%s AI2=%s AI3=%s"
             % ("set" if AI1_KEY else "missing", "set" if AI2_KEY else "missing", "set" if AI3_KEY else "missing")
         )
+        base.logger.info("飞书通知: %s webhook=%s signature=%s",
+                         "ON" if base.FEISHU_NOTIFY_ENABLED else "OFF",
+                         "set" if base.FEISHU_WEBHOOK_URL else "missing",
+                         "set" if base.FEISHU_WEBHOOK_SECRET else "missing")
         for role, model, effort, url, key, timeout in (
             ("AI-1", AI1_MODEL, AI1_EFFORT, AI1_URL, AI1_KEY, AI1_TIMEOUT),
             ("AI-2", AI2_MODEL, AI2_EFFORT, AI2_URL, AI2_KEY, AI2_TIMEOUT),

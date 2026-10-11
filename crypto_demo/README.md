@@ -21,6 +21,8 @@ python crypto_demo/run.py --asset BTC --mode demo --symbol BTCUSD.your-suffix
 
 默认 `observe` 不请求AI、不下单、不修改或关闭持仓。`dry-run` 允许付费AI分析，仍不修改任何订单。只有显式 `demo` 可对USD模拟账户操作。建议与黄金用不同模拟账户/终端；黄金不参加本副本锁。一账号只能运行一个副本且最多一个账户持仓，手动仓/黄金仓/其他品种仓都会挡新入场。
 
+飞书通知由本目录 `.env` 的 `FEISHU_NOTIFY_ENABLED=true` 开启，填写 `FEISHU_WEBHOOK_URL` 及机器人启用签名校验时的 `FEISHU_WEBHOOK_SECRET`。通知沿用启动、AI决策、API失败、开仓及平仓事件，标题标明当前合约；`observe` / `dry-run` 也可在明确开启通知时发送对应状态。未配置开关默认关闭，离线 `--check` / `--self-test` 不读取私有配置或发送通知。日志只显示开关和配置是否存在；HTTP成功后仍核对机器人业务返回码，错误/未知响应不报发送成功。参见[飞书自定义机器人文档](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)。更新需替换 `run.py`、`crypto_trader.py`、`crypto_ai3.py` 及私有 `.env`，由用户重启生效。
+
 BTC参考3R/90分钟，ETH参考2.5R/60分钟，两者冷却60秒；来自币种定义并冻结到原持仓。BTC观察自身趋势、压缩扩张和回踩回收；ETH观察自身证据、ATR归一化波动、失败突破、延伸和费用空间。菜单仅参考，AI-1自主选择有真实收盘证据的打法，本地no/低分或无固定形态不禁止分析。H1方向许可、M15风险、三根M5保护保留；ETH不能只因BTC上涨开多，联动无同期来源则未知。资金费率/OI/订单簿/清算/新闻未知，tick_volume仅经纪商代理。
 
 8USD是估计现金亏损预算，不是币价距离；预算 `min(8,8%*min(实际正净值,100))`。BTC价格距离上限 `min(2.5*M15ATR,1.5%参考价)`，ETH为2%；近三根M5极值加 `max(.15ATR,2tick)` 缓冲，生成至少.6ATR；不能裁短SL凑预算。实时RR1.5、EMA21偏离1.5ATR、触发侧余量2buffer、价差.25ATR硬门保留。按真实合约 `order_calc_profit` 向下取手数，同时满足现金和90%可用保证金；最小手数不行就拒绝。tick精度、broker stops/freeze/filling和 `order_check` 校验。AI-2到提交SL/TP固定，新报价或规格变化可拒绝。

@@ -26,7 +26,7 @@ def configure(asset, mode, symbol=None, offline=False):
     os.environ["FIB_PA_ENABLE_TRADING"] = "true" if mode == "demo" else "false"
     os.environ["FIB_PA_AI_ENABLE_TRADING"] = os.environ["FIB_PA_ENABLE_TRADING"]
     os.environ["FIB_PA_AI_ENABLED"] = "false" if mode == "observe" else "true"
-    os.environ["FEISHU_NOTIFY_ENABLED"] = "false"
+    os.environ.setdefault("FEISHU_NOTIFY_ENABLED", "false")
     return exact
 
 
