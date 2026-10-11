@@ -80,3 +80,9 @@ AI1候选池只暴露可引用的公共生成风险与候选本身的参考/目�
 固定人类SLTP逐次对最新买卖报价核方向，SELL SL>Ask、TP<Bid，BUY SL<Bid、TP>Ask；broker最小距离及tick精度仍执行。方向错误显示报价和原参数，禁止把83700低于Ask83755的SELL止损静默改成合法价格。
 
 平仓诊断仅改可观测性与精确历史归属，不改退出策略。按`DEAL_POSITION_ID`原持仓identifier（缺失时ticket）直接查历史，账户前后核验、symbol/exit-entry/position_id精确匹配；移除本地datetime时间窗口和同品种近时成交猜测。查询期间账户变动不删除原护盘状态。通知前记录本地原因/服务器原因/成交价等，历史不明不称AI3平仓；AI3旧票号回复丢弃日志明确没有执行交易。截断日志显示本次实际发送档位与上限、可见正文长度及思考块计数，不记录思考内容，不自动追加预算或付费重审。实际私有配置和黄金代码保持。
+
+## 2026-10-12 AI-3扩展思考控制补充
+
+新增`crypto-ai3-thinking-v1`，仅作用于crypto副本的AI-3 HTTP配置。`FIB_PA_AI3_THINKING`支持空白或`disabled`；空白保留原provider默认行为，disabled发送顶层`thinking:{type:disabled}`，本次不发送effort，原配置值保留。备用`FIB_PA_AI3_BACKUP_THINKING`空白继承主配置，可仅备用关闭。参数非法在POST前停止；接口明确拒绝thinking时在原总预算内可切独立备用，否则结束，不删开关后重试。协议仍按各URL决定，Messages/Chat不会因此自动互换，生成上限及JSON校验保留。
+
+low是思考强度提示，不是硬思考预算；DeepSeek官方支持思考开关但忽略budget_tokens。请求日志及usage分别写requested/sent effort及thinking_mode，统计不保存思考正文。AI-1/2、原入场/护盘事实、期限、单仓/送单防重放及实际.env保持；不自动扩大上限、不付费重审截断、不宣称关闭扩展思考保证完整或已被上游履行。用户同步代码、自行添加配置和重启原程序。

@@ -93,6 +93,7 @@ _USAGE_LOCK = threading.RLock()
 _CHAT_OPTIONS_LOCK = threading.RLock()
 _CHAT_OPTIONS = {}
 COST_CONTROL_VERSION = "cost-latency-v2"
+AI3_THINKING_CONTROL_VERSION = "crypto-ai3-thinking-v1"
 MARKET_FRESHNESS_VERSION = "request-freshness-v2"
 RESPONSE_CONTRACT_VERSION = "response-contract-v3"
 QUALITY_LEVEL_POINTS = {"strong": 20, "adequate": 16, "weak": 8, "missing": 0}
@@ -1458,6 +1459,26 @@ def response_content_stats(result):
     return {"visible_text_chars": len(extract_chat_text(result)), "thinking_blocks": thinking}
 
 
+def request_thinking_mode(role, using_backup=False):
+    """An explicit AI-3 switch; blank preserves the provider's existing default."""
+    if role != "AI-3":
+        return None
+
+    def configured(name):
+        return os.getenv(name, "").strip().strip('"').strip("'").strip().lower()
+
+    name = "FIB_PA_AI3_THINKING"
+    value = configured(name)
+    if using_backup:
+        backup_name = "FIB_PA_AI3_BACKUP_THINKING"
+        backup_value = configured(backup_name)
+        if backup_value:
+            name, value = backup_name, backup_value
+    if value not in ("", "disabled"):
+        raise AIRequestError(role, "%s只支持空白（原接口默认行为）或disabled；low是EFFORT档位，不是思考开关" % name)
+    return value or None
+
+
 def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, still_current=None,
               request_context=None, refresh_request=None):
     if base.MODE == "observe":
@@ -1502,6 +1523,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
         request_timeout = chat_request_timeout(role, timeout, using_backup)
         label = channel
         protocol = request_protocol(active["url"])
+        thinking_mode = request_thinking_mode(role, using_backup)
         option_key = (active["url"], active["model"])
         default_token_field = "max_completion_tokens" if active["model"].lower().startswith(("gpt-", "o1", "o3", "o4")) else "max_tokens"
         with _CHAT_OPTIONS_LOCK:
@@ -1545,12 +1567,14 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             token_field: AI_MAX_TOKENS.get(role, 4096),
         }
         this_effort = "low" if low_retry else active["effort"]
+        if thinking_mode:
+            data["thinking"] = {"type": thinking_mode}
         headers = {"Content-Type": "application/json", "Authorization": "Bearer " + active["key"]}
         if protocol == "anthropic":
             data["system"] = request_instructions
             data["messages"] = [{"role": "user", "content": request_prompt}]
             output_config = {}
-            if this_effort and not omit_reasoning:
+            if this_effort and not omit_reasoning and thinking_mode != "disabled":
                 output_config["effort"] = this_effort
             if json_mode == "schema":
                 output_config["format"] = {"type": "json_schema", "schema": schema}
@@ -1559,7 +1583,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             headers["anthropic-version"] = "2023-06-01"
             headers["x-api-key"] = active["key"]
         else:
-            if this_effort and not omit_reasoning:
+            if this_effort and not omit_reasoning and thinking_mode != "disabled":
                 data["reasoning_effort"] = this_effort
             if json_mode == "schema":
                 data["response_format"] = {"type": "json_schema", "json_schema": {
@@ -1567,9 +1591,12 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             elif json_mode == "object":
                 data["response_format"] = {"type": "json_object"}
         attempted = attempt
-        base.logger.info("%s 请求准备 model=%s effort=%s max_tokens=%s refresh=%.2fs prompt_chars=%s system_chars=%s (%s %s/%s)",
-                         role, active["model"], this_effort if not omit_reasoning else "omitted",
-                         data[token_field], refresh_elapsed, len(request_prompt), len(request_instructions), label, attempt, AI_HTTP_RETRIES)
+        sent_effort = (data.get("output_config", {}).get("effort") if protocol == "anthropic"
+                       else data.get("reasoning_effort"))
+        base.logger.info("%s 请求准备 model=%s effort=%s requested_effort=%s thinking=%s max_tokens=%s refresh=%.2fs prompt_chars=%s system_chars=%s (%s %s/%s)",
+                         role, active["model"], sent_effort or "omitted", this_effort,
+                         thinking_mode or "provider_default", data[token_field], refresh_elapsed,
+                         len(request_prompt), len(request_instructions), label, attempt, AI_HTTP_RETRIES)
         started = time.monotonic()
         response_progress = {}
 
@@ -1602,8 +1629,10 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 "snapshot_id": snapshot.get("snapshot_id"), "request_quote": snapshot.get("quote"),
                 "protocol": protocol, "response_contract_version": RESPONSE_CONTRACT_VERSION,
                 "json_mode_sent": json_mode, "json_error": json_error,
-                "reasoning_effort_sent": (data.get("output_config", {}).get("effort") if protocol == "anthropic"
-                                          else data.get("reasoning_effort")),
+                "reasoning_effort_sent": sent_effort,
+                "reasoning_effort_requested": this_effort,
+                "thinking_mode_sent": thinking_mode,
+                "thinking_control_version": AI3_THINKING_CONTROL_VERSION if role == "AI-3" else None,
                 "token_limit": data[token_field], "token_limit_field": token_field,
                 "finish_reason": finish, "usage": normalized_chat_usage(result),
                 **response_content_stats(result),
@@ -1652,14 +1681,20 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
         if finish_reason in ("length", "max_tokens"):
             record_attempt("truncated", result, response)
             stats, usage = response_content_stats(result), normalized_chat_usage(result) or {}
-            raise AIRequestError(role, "输出达到token上限，拒绝不完整决策且不重复付费请求：max_tokens=%s effort=%s output=%s 正文字符=%s 思考块=%s；查看ai_usage，本地护盘继续"
-                                 % (data[token_field], this_effort if not omit_reasoning else "omitted",
-                                    usage.get("output_tokens"), stats["visible_text_chars"], stats["thinking_blocks"]))
+            raise AIRequestError(role, "输出达到token上限，拒绝不完整决策且不重复付费请求：max_tokens=%s effort=%s requested_effort=%s thinking=%s output=%s 正文字符=%s 思考块=%s；查看ai_usage，本地护盘继续"
+                                 % (data[token_field], sent_effort or "omitted", this_effort,
+                                    thinking_mode or "provider_default", usage.get("output_tokens"),
+                                    stats["visible_text_chars"], stats["thinking_blocks"]))
         error_object = result.get("error") if isinstance(result, dict) else None
         error_text = (str(error_object.get("message", "")) + " " + str(error_object.get("param", ""))
                       if isinstance(error_object, dict) else response.text).lower()
         unsupported_parameter = any(word in error_text for word in (
             "unsupported", "unknown", "unrecognized", "not supported", "unexpected", "not allowed", "not permitted", "extra_forbidden"))
+        if response.status_code == 400 and unsupported_parameter and thinking_mode and "thinking" in error_text:
+            record_attempt("unsupported_thinking", result, response)
+            if switch_to_backup():
+                continue
+            raise AIRequestError(role, "接口拒绝thinking=disabled；停止本轮，不移除用户的思考开关或取消token上限，本地护盘继续")
         if response.status_code == 400 and unsupported_parameter:
             format_rejected = (json_mode != "prompt" and any(name in error_text for name in (
                 "response_format", "json_schema", "output_config.format")))
@@ -3281,10 +3316,12 @@ class ThreeAITrader(base.FibVolumePATrader):
                          MARKET_FRESHNESS_VERSION)
         base.logger.info("入场时钟=%s 本地时钟到达M15/M5收盘边界前等待，同根K线下轮重查，护盘继续", base.ENTRY_CLOCK_VERSION)
         base.logger.info("护盘时钟=crypto-guardian-clock-v2 UTC偏移=%s，未来/超过30秒/交叉报价拒绝；未提交的M1同根重查", base.configured_server_offset())
-        base.logger.info("AI协议与JSON=%s 按主备URL分别适配；支持时优先Schema，DeepSeek官方Messages仅发送effort；格式错误不执行",
+        base.logger.info("AI协议与JSON=%s 按主备URL分别适配；支持时优先Schema，DeepSeek官方Messages不发送不支持的format；格式错误不执行",
                          RESPONSE_CONTRACT_VERSION)
         base.logger.info("AI成本控制=%s token上限=%s 同通道读超时补发=%s 用量目录=%s",
                          COST_CONTROL_VERSION, AI_MAX_TOKENS, AI_READ_TIMEOUT_RETRIES, AI_USAGE_DIR)
+        base.logger.info("AI-3思考开关=%s 空白保持接口默认；disabled显式关闭扩展思考，备用空白继承主配置",
+                         AI3_THINKING_CONTROL_VERSION)
         base.logger.info("手动报价=%s 原请求60秒内等待有效报价，只重采数据；进入持久送单阶段后不自动重发",
                          manual_orders.QUOTE_WAIT_VERSION)
         base.logger.info("平仓诊断=%s 按原持仓编号查历史；原因/成交价写日志，未知不归因于AI-3",

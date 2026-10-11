@@ -51,6 +51,10 @@ HTTP日志的`请求准备`记录角色实际模型、档位、token上限、行
 
 截断告警还会显示实际发送的`max_tokens`、`effort`、上游报告输出量、可见正文字符数和思考块数量；计数不保存思考原文。`crypto-close-audit-v1`按原持仓编号直接查成交历史，将平仓原因和开仓价→平仓价写入交易日志。没有匹配成交时原因保持未知。“AI-3返回时原持仓已改变”表示丢弃旧决策，日志会显示原/当前票号并注明未执行平仓或改SL；这行本身不会关闭持仓。
 
+AI-3使用DeepSeek时，`low`控制思考强度，不等于关闭扩展思考，也不保证每次在4096内生成完整JSON。需要关闭扩展思考时，在自己的`crypto_demo/.env`添加`FIB_PA_AI3_THINKING=disabled`，保留原模型、EFFORT和MAX_TOKENS，再自行重启原主程序。新开关空白时保持原接口默认行为；`FIB_PA_AI3_BACKUP_THINKING`空白继承主配置，也可只给备用设置disabled。请求显式发送`thinking:{type:disabled}`并省略本次effort参数，原EFFORT配置仍保留供恢复默认模式使用。当前支持空白或disabled，不把low/medium当作开关，不能用DeepSeek会忽略的budget_tokens限制思考预算。说明依据[官方思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)及[Messages兼容文档](https://api-docs.deepseek.com/zh-cn/guides/anthropic_api/)。
+
+请求准备日志显示`thinking=disabled`或`provider_default`，usage记录实际开关及请求/发送的effort，截断告警同时显示开关。接口不支持thinking参数时可按原预算切独立备用，否则明确停止；不删除用户开关后重新思考。JSON、生成上限、最新报价和同分钟不重复付费请求规则保持，未改AI-1/AI-2或原护盘规则。接口是否履行开关仍看实际返回；`reasoning=None`仅表示未报告拆分，关闭扩展思考也不保证所有上游回复都完整。
+
 日志/策略状态在 `crypto_logs/<账号服务器哈希>/<asset>`。OS账号锁跨BTC/ETH及目录副本；不确定订单回执先写入稳定用户状态 `%LOCALAPPDATA%/MYQCryptoDemo/<哈希>/pending_order.json`（无LOCALAPPDATA时 `~/.local/state/MYQCryptoDemo`）。切换账户立即阻止请求/交易/护盘，不能清除原账户状态。模糊回执会在重启或换目录后继续挡两币入场，只有精确token/symbol/magic的持仓可自动核对；没有持仓不代表没成交。无法核实时需用户调查经纪商历史并有意处理状态，不猜最新ticket。
 
 黄金旧盈亏换算回放已禁用。`crypto_backtest.py --csv <文件>` 只检查研究OHLC，不计算CFD/AI收益。公开现货行情不能冒充CFD可执行报价。离线mock只证明代码通路，不证明实际AI频率、费用、收益或盈利。

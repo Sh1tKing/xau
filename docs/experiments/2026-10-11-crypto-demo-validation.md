@@ -101,3 +101,13 @@ BTC/ETH `--check` 分别只发现 `btc_adaptive` / `eth_adaptive`，默认模式
 `crypto-evidence-scope-v2`同步公共叶子、压缩输入和提示词；`crypto-guardian-clock-v2`拒绝未知/未来/超过30秒/交叉报价，不猜偏移或扩大时效。QuoteError记录Bid/Ask、raw time/time_msc、offset、observed UTC、tick UTC和age，数据错误按可恢复等待处理。M1预派发/首次或最后快照失败不消费分钟，正常poll同根重查；有效刷新后准备POST则消费分钟，主备/兼容共用原预算，同分钟HTTP失败或截断不增加新调用。护盘读取K线后校验最终tick，状态、极值、虚拟SL及原冻结期限保留，恢复有明确日志；同原因等待最多30秒打印一次。`ai_usage`新增行情刷新时长，已有response hook保留响应头时长和完整HTTP耗时；请求准备日志显示真实模型/档位/token上限/输入字符数。
 
 报价/M1关键8项红测出现5失败3错误，修后通过。新增证据/完整两币入场到AI2、M1边界/重采失效/同分钟超时不重付费、本地最终tick/状态恢复、各HTTP阶段独立计时等共17项相对手动修复增量；源目录完整CLI曾182项通过、53.428秒，最终本地交付目录 `F:/project_file/MYQ` 独立运行 `python crypto_demo/run.py --self-test` **182项通过，56.077秒**。测试使用临时状态与构造行情，HTTP/MT5/Feishu全部mock，不读取实际配置或启动交易。工程通过证明这些路径，实际交易次数、完整AI决策、供应商时延及收益仍由新运行日志验证。实际.env/模型/密钥/档位/门槛/超时/用户token配置和黄金系统保持，交付须完整同步crypto_demo代码后由用户重启现有进程。
+
+## 2026-10-12 AI-3可选关闭扩展思考
+
+用户报告low/4096仍触顶，补充文本实际可见00:45/00:48/00:49三轮均success，输出3231/1229/2074，末尾00:50只有请求准备；没有提供这轮4096截断回复，不能将正常成功解释为超限。max_tokens限制输出，不是输入3798加输出3231的总和。reasoning=None表示接口未报告拆分，不代表零思考。新成交诊断已确认600085782为止盈+1.62，600086371为移动端手动平仓−10.98；这两笔不改写较早600082405未知原因。
+
+官方[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)及[Messages兼容](https://api-docs.deepseek.com/zh-cn/guides/anthropic_api/)说明effort与thinking开关分开、budget_tokens被忽略。原代码只发effort，新增crypto-ai3-thinking-v1可选FIB_PA_AI3_THINKING=disabled，备用空白继承，空白主配置保留现状；显式thinking.type=disabled时不发送effort，保留用户原EFFORT/MAX_TOKENS。请求日志/usage区分requested_effort、sent_effort及thinking_mode；参数拒绝不得静默移除、截断不重审，原HTTP预算/报价/JSON/护盘保持。本次实际.env不变、无付费请求或真实通知；用户同步代码后自行开启及重启，不能宣称已由供应商验证关闭效果或保证完整输出。
+
+新增10项mock回归，最初8项在修前3失败3错误；修后成本/传输36项通过，完整CLI207项通过58.223秒。覆盖主/备开关和空白继承、仅备用关闭、默认行为及AI1/2不变、Chat/Messages实际字段、格式降级保留开关/预算、非法配置零POST、拒绝开关不删后重发、截断仍拒绝。没有改变入场/退出策略或启动交易。
+
+直接同步本地后，最终独立CLI207项通过60.207秒。复核修正原有通知测试子进程：mock logger避免把模拟通知写入占位账户日志，通知9项单测通过；本轮已追加的一行模拟通知仅在原日志前缀SHA匹配时恢复，真实服务器日志不变。用户期间自行在本地.env新增thinking=disabled，交付保留其最新low/4096/disabled配置，不覆盖私有文件。52文件字节同步、46项Manifest、82文件公开白名单、黄金22运行与453私有文件检查通过；51个crypto私有文件按用户最新配置核验。无交易、付费HTTP或实际通知，实际上游是否履行关闭开关仍待服务器新日志。

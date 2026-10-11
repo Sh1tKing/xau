@@ -95,7 +95,7 @@ os.environ.update(FEISHU_NOTIFY_ENABLED='true', FEISHU_WEBHOOK_URL='https://bot.
 from crypto_demo import crypto_trader as runtime
 from unittest.mock import patch
 assert runtime.FEISHU_NOTIFY_ENABLED is True
-with patch.object(runtime.request, 'urlopen') as transport:
+with patch.object(runtime.request, 'urlopen') as transport, patch.object(runtime, 'logger'):
     response = transport.return_value.__enter__.return_value
     response.status = 200
     response.read.return_value = b'{"code":0}'
