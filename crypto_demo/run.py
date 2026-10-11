@@ -1,4 +1,4 @@
-"""Only operational entry; offline options never import/initialize MT5."""
+"""Account owner and guardian entry; offline options never import/initialize MT5."""
 import argparse
 import json
 import os

@@ -111,7 +111,8 @@ def execution_prices(asset, action, atr, ema, sl, tp, tick, spec, server_offset_
 
 
 def size_order(mt5, account, spec, asset, symbol, action, atr, ema, sl, tp, tick,
-               commission_per_lot=0., slippage_ticks=0., commission_bps=0., server_offset_hours=0):
+               commission_per_lot=0., slippage_ticks=0., commission_bps=0., server_offset_hours=0,
+               requested_volume=None):
     account_ready(mt5, account, empty=True)
     values = spec_values(spec)
     entry = execution_prices(asset, action, atr, ema, sl, tp, tick, spec, server_offset_hours)
@@ -162,6 +163,14 @@ def size_order(mt5, account, spec, asset, symbol, action, atr, ema, sl, tp, tick
         volume = float(Decimal(low)*Decimal(str(values["volume_step"])))
     if volume < probe:
         raise RiskError("minimum volume cannot satisfy margin budget")
+    if requested_volume is not None:
+        requested = number(requested_volume)
+        lattice = Decimal(str(requested))/Decimal(str(values["volume_step"]))
+        if (abs(lattice-lattice.to_integral_value()) > Decimal("0.00000001")
+                or requested < probe or requested > values["volume_max"]
+                or requested > volume + 1e-12):
+            raise RiskError("requested volume exceeds cash/margin budget or broker volume lattice; unchanged")
+        volume = requested
     final_loss = mt5.order_calc_profit(order_type, symbol, volume, adverse, adverse_sl)
     final_win = mt5.order_calc_profit(order_type, symbol, volume, adverse, adverse_tp)
     if final_loss is None or not math.isfinite(final_loss) or final_loss >= 0 or final_win is None or not math.isfinite(final_win) or final_win <= 0:

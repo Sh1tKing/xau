@@ -32,6 +32,7 @@ os.environ["FIB_PA_ORDER_TAG"] = "FIB_AI3"
 os.environ["FIB_PA_TITLE_TAG"] = "三AI"
 
 from crypto_demo import crypto_trader as base
+from crypto_demo import manual_orders
 
 
 def env_int(name, default):
@@ -2008,7 +2009,88 @@ class ThreeAITrader(base.FibVolumePATrader):
         self._ai3_started = 0.0
         self._stop = threading.Event()
         self._last_api_alert = 0.0
+        self.manual_queue = manual_orders.ManualQueue(
+            os.path.join(base.LOG_DIR, "manual_orders"), base.account_id(base.MT5_LOGIN, base.MT5_SERVER),
+            base.ASSET, base.SYMBOL, base.MAGIC, base.MODE)
+        self._manual_session = uuid.uuid4().hex
+        self._manual_published = 0.0
+        self._active_manual_request = None
         self.load_entry_contexts()
+
+    def process_manual_requests(self):
+        """One account owner consumes commands; the CLI never opens MT5 or guards."""
+        if base.MODE != "demo" or not base.ENABLE_TRADING or self._stop.is_set():
+            return False
+        now = time.time()
+        if now-self._manual_published >= 2:
+            self.manual_queue.publish(self._manual_session, now)
+            self._manual_published = now
+        if not self.manual_queue.pending():
+            return False
+        # Wait for an existing AI decision instead of racing its broker submission.
+        with self._entry_lock:
+            if self._entry_inflight:
+                self.manual_queue.reject_invalid(self._manual_session, now)
+                return True
+            self._entry_seq += 1
+            seq = self._entry_seq
+            self._entry_inflight = True
+            self._entry_started = now
+        identifier = None
+        submission_started = False
+        try:
+            claimed = self.manual_queue.claim()
+            if claimed is None:
+                return True
+            identifier, path = claimed
+            self.last_order_ticket = 0
+            request = manual_orders.read_json(path)
+            if not isinstance(request, dict) or request.get("request_id") != identifier:
+                raise manual_orders.ManualOrderError("请求文件与订单编号不一致")
+            with self._mt5_lock:
+                self._active_manual_request = copy.deepcopy(request)
+                result = manual_orders.prepare_result(base, self, request)
+                error = self.validate_strategy_entry(result)
+                if error:
+                    raise manual_orders.ManualOrderError(error)
+                tick = base.mt5.symbol_info_tick(base.SYMBOL)
+                error = self.validate_execution_prices(result, tick)
+                if error:
+                    raise manual_orders.ManualOrderError(error)
+                self.crypto_sizing(result, tick)
+                submission_started = True
+                placed = self.place_order(result)
+                uncertain = self.pending_order.read() is not None
+            status = "filled" if placed else "uncertain" if uncertain else "rejected"
+            message = ("开仓成功，已保存AI3护盘信息，现有主程序继续管理" if placed else
+                       "经纪商回执未确认，请核对MT5；本请求不会自动重发" if uncertain else
+                       "下单未放行或经纪商拒单，查看主程序同一时刻的执行日志")
+            self.manual_queue.finish(identifier, status, message, self.last_order_ticket)
+            base.logger.info("订单请求=%s status=%s ticket=%s %s", identifier, status, self.last_order_ticket, message)
+        except Exception as exc:
+            base.logger.warning("订单请求失败 id=%s: %s: %s", identifier, type(exc).__name__, exc)
+            if identifier:
+                try:
+                    uncertain = submission_started and (self.pending_order.read() is not None or self.last_order_ticket > 0)
+                    self.manual_queue.finish(identifier, "uncertain" if uncertain else "rejected",
+                        str(exc) if not uncertain else "回执或状态待核对，不会自动重发；"+str(exc))
+                except Exception as save_error:
+                    base.logger.error("订单请求回执无法保存 id=%s: %s", identifier, save_error)
+        finally:
+            self._active_manual_request = None
+            self.release_task("entry", seq)
+        return True
+
+    def entry_confidence_line(self, ticket):
+        with self._state_lock:
+            context = self.entry_contexts.get(str(int(ticket)), {})
+        if not context:
+            # Covers an immediately closed fill before native position propagation.
+            saved = self.strategy_ledger.snapshot()
+            position = saved.get("positions", {}).get(str(int(ticket)), {})
+            context = saved.get("events", {}).get(position.get("event_id"), {}).get(
+                "metadata", {}).get("ai3_entry_context", {})
+        return "" if context.get("source") == "manual" else super().entry_confidence_line(ticket)
 
     def load_entry_contexts(self):
         with self._state_lock:
@@ -2122,7 +2204,7 @@ class ThreeAITrader(base.FibVolumePATrader):
             "entry_reasoning": result.reasoning,
             "local_action_before_ai": details.get("local_action_before_ai"),
             "local_confidence": details.get("local_confidence"),
-            "ai_confidence": result.confidence,
+            "ai_confidence": None if details.get("source") == "manual" else result.confidence,
             "quality_score": details.get("quality_score"),
             "quality_version": details.get("quality_version"),
             "quality_assessment": details.get("quality_assessment"),
@@ -3144,6 +3226,14 @@ class ThreeAITrader(base.FibVolumePATrader):
                 except Exception as exc:
                     base.logger.error("平仓监听异常: %s: %s" % (type(exc).__name__, exc))
 
+                try:
+                    manual_pending = self.process_manual_requests()
+                except Exception as exc:
+                    manual_pending = True
+                    base.logger.error("订单接收入口异常: %s: %s", type(exc).__name__, exc)
+                if once and manual_pending:
+                    return 0
+
                 m15_time = self.latest_bar_time(base.ENTRY_BAR_TIMEFRAME)
                 m5_time = self.latest_bar_time(base.mt5.TIMEFRAME_M5)
                 m1_time = self.latest_bar_time(base.mt5.TIMEFRAME_M1)
@@ -3151,7 +3241,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 if (m15_time and m15_time != last_m15) or (m5_time and m5_time != last_m5):
                     with self._mt5_lock:
                         entry_ready = self.entry_clock_ready(m15_time, m5_time)
-                if entry_ready and m15_time and m15_time != last_m15:
+                if not manual_pending and entry_ready and m15_time and m15_time != last_m15:
                     trigger = "startup" if not last_m15 else "M15"
                     last_m15 = m15_time
                     if m5_time == m15_time:
@@ -3162,7 +3252,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                             self.entry_task(m15_time, seq, trigger)
                         return 0
                     self.dispatch_entry(m15_time, trigger)
-                if entry_ready and m5_time and m5_time != last_m5 and m5_time != m15_time and not once:
+                if not manual_pending and entry_ready and m5_time and m5_time != last_m5 and m5_time != m15_time and not once:
                     last_m5 = m5_time
                     self.dispatch_m5_entry(m5_time)
                 if m1_time and m1_time != last_m1:

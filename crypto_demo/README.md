@@ -1,6 +1,6 @@
 # BTC / ETH 独立 CFD 模拟副本
 
-黄金7f3df37框架的独立复制版本。先复制整个 `crypto_demo` 目录，Windows/Python3.12可用 `python -m pip install -r crypto_demo/requirements.txt` 安装本次验证依赖；经纪商合约仍须在自己的MT5模拟账户核对。唯一运行入口是 `run.py`，本轮没有启动交易、登录账户或付费请求。
+黄金7f3df37框架的独立复制版本。先复制整个 `crypto_demo` 目录，Windows/Python3.12可用 `python -m pip install -r crypto_demo/requirements.txt` 安装本次验证依赖；经纪商合约仍须在自己的MT5模拟账户核对。账户交易及护盘运行入口是 `run.py`；`manual_order.py` 仅向它提交一笔订单。本轮没有启动交易、登录账户或付费请求。
 
 ```powershell
 python crypto_demo/run.py --asset BTC --check
@@ -20,6 +20,18 @@ python crypto_demo/run.py --asset BTC --mode demo --symbol BTCUSD.your-suffix
 ```
 
 默认 `observe` 不请求AI、不下单、不修改或关闭持仓。`dry-run` 允许付费AI分析，仍不修改任何订单。只有显式 `demo` 可对USD模拟账户操作。建议与黄金用不同模拟账户/终端；黄金不参加本副本锁。一账号只能运行一个副本且最多一个账户持仓，手动仓/黄金仓/其他品种仓都会挡新入场。
+
+需要自己决定一笔交易时，在当前 `crypto_demo` 目录的另一个命令窗口执行：
+
+```powershell
+python manual_order.py --asset ETH
+```
+
+按提示输入 `buy` / `sell`、止损和止盈价格。也支持一次提供 `--side buy --sl <止损价格> --tp <止盈价格>`（替换占位符，不输入尖括号）；`--volume <手数>` 可指定手数，不填由现有现金风控计算。可用 `--reason "进场理由" --invalidation "原理由失效条件" --target-basis "目标依据"` 保存自己的判断给AI3。未提供的形态依据明确为未知，不补造AI1/AI2评分。
+
+`manual_order.py` 只提交请求、等待结果然后退出，不连接MT5、不调用AI、不运行护盘循环。必须让**同目录、同账户、同币种**的新版 `run.py --asset ETH --mode demo` 持续运行。账户拥有进程执行订单，跳过AI1/AI2；H1许可、闭合行情、三M5极值、ATR/价格上限、点差、EMA追价、实时RR、现金及保证金风控仍校验。固定SL/TP和指定手数不自动改写，超限拒绝。AI3和本地护盘接管，原持仓期限和冷却沿用入场时冻结的币种规则。飞书沿用正常开仓/平仓标题，不标注手动来源，也不显示不存在的AI入场评分。
+
+本地请求记录在对应日志目录 `manual_orders/`；控制器每2秒更新心跳。请求60秒失效，只绑定当前进程会话；主程序正在处理AI入场时等待，不并行抢单。已领取请求及不确定经纪商回执不自动重发，CLI等不到确认时须核对主程序/MT5，不能把退出等待当撤单。重启后不会执行旧会话请求。首次使用须同步本目录代码后由用户重启现有主程序一次，保留 `.env` 和原状态。
 
 飞书通知由本目录 `.env` 的 `FEISHU_NOTIFY_ENABLED=true` 开启，填写 `FEISHU_WEBHOOK_URL` 及机器人启用签名校验时的 `FEISHU_WEBHOOK_SECRET`。通知沿用启动、AI决策、API失败、开仓及平仓事件，标题标明当前合约；`observe` / `dry-run` 也可在明确开启通知时发送对应状态。未配置开关默认关闭，离线 `--check` / `--self-test` 不读取私有配置或发送通知。日志只显示开关和配置是否存在；HTTP成功后仍核对机器人业务返回码，错误/未知响应不报发送成功。参见[飞书自定义机器人文档](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)。更新需替换 `run.py`、`crypto_trader.py`、`crypto_ai3.py` 及私有 `.env`，由用户重启生效。
 

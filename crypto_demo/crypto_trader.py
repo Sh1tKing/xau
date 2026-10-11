@@ -1901,7 +1901,8 @@ class FibVolumePATrader:
         facts = risk.size_order(mt5, account, contract_spec(), ASSET, SYMBOL, result.action,
             details["entry_guard_atr"], details["entry_guard_ema21"], result.stop_loss, result.take_profit, tick,
             commission_per_lot=env_float("CRYPTO_COMMISSION_PER_LOT", 0),
-            slippage_ticks=env_float("CRYPTO_SLIPPAGE_TICKS", 0), commission_bps=env_float("CRYPTO_COMMISSION_BPS", 0), server_offset_hours=configured_server_offset())
+            slippage_ticks=env_float("CRYPTO_SLIPPAGE_TICKS", 0), commission_bps=env_float("CRYPTO_COMMISSION_BPS", 0), server_offset_hours=configured_server_offset(),
+            requested_volume=details.get("manual_volume") if details.get("source") == "manual" else None)
         result.details["cash_risk"] = facts
         return facts
 
@@ -1945,6 +1946,12 @@ class FibVolumePATrader:
     def validate_strategy_entry(self, result):
         details = result.details or {}
         contract = details.get("strategy_contract", {})
+        if details.get("source") == "manual" or contract.get("manual_entry"):
+            from crypto_demo.manual_orders import entry_error
+            if (MODE != "demo" or not ENABLE_TRADING or details.get("source") != "manual"
+                    or not contract.get("manual_entry") or contract.get("id") != "manual_"+ASSET.lower()):
+                return "用户订单来源或模拟运行模式无效"
+            return entry_error(sys.modules[__name__], self, result)
         if contract.get("demo_only"):
             account = mt5.account_info()
             if account is None or getattr(account, "trade_mode", None) != mt5.ACCOUNT_TRADE_MODE_DEMO:
@@ -2596,7 +2603,8 @@ class FibVolumePATrader:
             logger.info("策略执行拒绝: %s", strategy_error)
             return False
         contract = (result.details or {}).get("strategy_contract", {})
-        if not contract.get("analysis_mode") or contract.get("id") != ASSET.lower()+"_adaptive":
+        manual = (result.details or {}).get("source") == "manual" and contract.get("manual_entry")
+        if not manual and (not contract.get("analysis_mode") or contract.get("id") != ASSET.lower()+"_adaptive"):
             return False
         fingerprint = (result.details or {}).get("strategy_fingerprint")
         if fingerprint:
@@ -2799,7 +2807,7 @@ class FibVolumePATrader:
             if not self.strategy_ledger.record_position(order_ticket, event_id, time.time(),
                                                        contract["max_hold_minutes"], contract["cooldown_seconds"]):
                 logger.error("策略持仓期限绑定失败，保留预提交事件供护盘恢复: %s", self.strategy_ledger.error)
-        if order_ticket > 0:
+        if order_ticket > 0 and not manual:
             self.entry_confidence[order_ticket] = (
                 f"{result.confidence} (BUY={result.score_buy} SELL={result.score_sell})"
             )
@@ -2817,9 +2825,8 @@ class FibVolumePATrader:
                 f"止损: {result.stop_loss}",
                 f"止盈: {result.take_profit}",
                 f"提交报价盈亏比: {live_rr:.2f}",
-                f"置信度: {result.confidence}",
-                f"BUY评分: {result.score_buy}",
-                f"SELL评分: {result.score_sell}",
+                *([] if manual else [f"置信度: {result.confidence}",
+                                     f"BUY评分: {result.score_buy}", f"SELL评分: {result.score_sell}"]),
                 f"理由: {result.reasoning}",
                 f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             ],

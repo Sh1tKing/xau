@@ -40,6 +40,7 @@ class CryptoIntegrationTests(unittest.TestCase):
         self.positions, self.sent, self.requests, self.snapshots = [], [], [], []
         for item in (patch.dict(ai.os.environ, {"FIB_PA_STRATEGY_STATE_FILE": str(self.dir/"events.json"), "CRYPTO_SERVER_UTC_OFFSET_HOURS": "0", "LOCALAPPDATA": self.temp.name}, clear=True),
                      patch.object(ai, "AI3_STATE_FILE", str(self.dir/"ai3.json")),
+                     patch.object(base, "LOG_DIR", str(self.dir/"logs")),
                      patch.object(ai, "AI_USAGE_DIR", str(self.dir/"usage")),
                      patch.object(ai, "append_decision_snapshot", side_effect=lambda *args: self.snapshots.append(args)),
                      patch.object(ai, "AI_ENABLED", True), patch.object(base, "MODE", "demo"),
