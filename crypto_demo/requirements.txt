@@ -1,0 +1,6 @@
+# Offline validation runtime: Windows Python3.12.5.
+MetaTrader5==5.0.5735
+pandas==3.0.2
+numpy==2.2.1
+requests==2.32.3
+tzdata==2023.3

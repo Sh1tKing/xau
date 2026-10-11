@@ -1,0 +1,4 @@
+.env
+crypto_logs/
+__pycache__/
+*.pyc
