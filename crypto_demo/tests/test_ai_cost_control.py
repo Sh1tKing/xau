@@ -205,6 +205,28 @@ class CostControlTests(unittest.TestCase):
         self.assertIn("不完整决策", caught.exception.detail)
         self.assertEqual(self.events()[0]["outcome"], "truncated")
 
+    def test_ai3_truncation_reports_actual_low_cap_and_text_without_rejudging(self):
+        response = Response()
+        response.result = {"type":"message", "stop_reason":"max_tokens",
+                           "content":[{"type":"thinking", "thinking":"private internal text"},
+                                      {"type":"text", "text":'{"action":"hold"'}],
+                           "usage":{"input_tokens":3000, "output_tokens":4072}}
+        with patch.dict(ai.AI_MAX_TOKENS, {"AI-3":4072}), \
+             patch.object(ai.requests, "post", return_value=response) as post:
+            with self.assertRaises(ai.AIRequestError) as caught:
+                ai.call_chat("AI-3", "deepseek-flash", "low", "guardian", "current owned position", 60,
+                             "https://api.deepseek.com/anthropic/v1/messages", "SECRET-KEY")
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.kwargs["json"]["max_tokens"], 4072)
+        self.assertEqual(post.call_args.kwargs["json"]["output_config"], {"effort":"low"})
+        for value in ("max_tokens=4072", "effort=low", "output=4072", "正文字符=16"):
+            self.assertIn(value, caught.exception.detail)
+        event = self.events()[0]
+        self.assertEqual(event["visible_text_chars"], 16)
+        self.assertEqual(event["thinking_blocks"], 1)
+        self.assertNotIn("private internal text", json.dumps(event))
+        self.assertEqual(event["outcome"], "truncated")
+
     def test_other_400_errors_do_not_silently_disable_reasoning(self):
         with patch.object(ai.requests, "post", side_effect=[Response(status=400, body="max_tokens must exceed reasoning budget"), Response()]) as post:
             self.call()

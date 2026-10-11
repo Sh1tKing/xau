@@ -211,6 +211,8 @@ def research_execution_error(result, tick):
             risk.execution_prices(ASSET, result.action, None, None, result.stop_loss, result.take_profit,
                                   tick, contract_spec(), configured_server_offset(), manual=True)
             return ""
+        except risk.QuoteError:
+            raise
         except (risk.RiskError, AttributeError, KeyError, TypeError, ValueError) as exc:
             return "用户订单执行检查失败: " + str(exc)
     if not details.get("strategy_contract", {}).get("demo_only"):
@@ -394,6 +396,7 @@ MIN_SL_MODIFY_ABS = 0.0
 MIN_REWARD_RISK = 1.5
 
 STOP_PRICE_VERSION = "protective-stop-v1"
+CLOSE_AUDIT_VERSION = "crypto-close-audit-v1"
 H4_HARD_FILTER = False
 ALIGN_HARD_FILTER = True
 CHASE_MAX_ATR = 1.5
@@ -2177,26 +2180,20 @@ class FibVolumePATrader:
         return reason_map.get(reason, f"外部/未知平仓(reason={reason})")
 
     def find_recent_close_deal(self, ticket: int, snapshot: PositionSnapshot):
-        start_time = datetime.now() - timedelta(days=3)
-        if snapshot.open_time > 0:
-            start_time = datetime.fromtimestamp(snapshot.open_time) - timedelta(minutes=5)
-
-        deals = mt5.history_deals_get(start_time, datetime.now())
+        # DEAL_POSITION_ID is authoritative, independent of raw broker/local
+        # clock offsets. Never guess a nearby same-symbol trade as this exit.
+        position_id = int(snapshot.identifier or ticket)
+        if position_id <= 0:
+            return None
+        self.crypto_account_ready()
+        deals = mt5.history_deals_get(position=position_id)
+        self.crypto_account_ready()
         if not deals:
             return None
-
-        position_ids = {int(ticket)}
-        if snapshot.identifier:
-            position_ids.add(int(snapshot.identifier))
-
-        out_entries = {
-            getattr(mt5, "DEAL_ENTRY_OUT", None),
-            getattr(mt5, "DEAL_ENTRY_INOUT", None),
-            getattr(mt5, "DEAL_ENTRY_OUT_BY", None),
-        }
+        out_entries = {getattr(mt5, name) for name in ("DEAL_ENTRY_OUT", "DEAL_ENTRY_INOUT", "DEAL_ENTRY_OUT_BY")
+                       if hasattr(mt5, name)}
 
         candidates = []
-        fallback_candidates = []
         for deal in deals:
             if getattr(deal, "symbol", None) != snapshot.symbol:
                 continue
@@ -2206,21 +2203,13 @@ class FibVolumePATrader:
                 continue
 
             deal_position_id = int(getattr(deal, "position_id", 0) or 0)
-            deal_order = int(getattr(deal, "order", 0) or 0)
-            if deal_position_id in position_ids or deal_order == int(ticket):
+            if deal_position_id == position_id:
                 candidates.append(deal)
-                continue
-
-            deal_time = int(getattr(deal, "time", 0) or 0)
-            if deal_time and abs(deal_time - int(snapshot.last_seen_at)) <= 3600:
-                fallback_candidates.append(deal)
-
-        matched = candidates or fallback_candidates
-        if not matched:
+        if not candidates:
             return None
 
         return sorted(
-            matched,
+            candidates,
             key=lambda item: (getattr(item, "time_msc", 0), getattr(item, "time", 0)),
             reverse=True,
         )[0]
@@ -2235,6 +2224,10 @@ class FibVolumePATrader:
     ):
         balance_lines = account_balance_lines()
         if deal is None:
+            logger.warning("平仓记录 ticket=%s position_id=%s source=%s reason=%s；平仓原因未知，未查到对应历史成交，"
+                           "price_open=%s last_sl=%s last_tp=%s last_profit=%s",
+                           ticket, snapshot.identifier or ticket, "program" if close_reason else "unknown",
+                           close_reason or "持仓已消失", snapshot.price_open, snapshot.sl, snapshot.tp, snapshot.profit)
             send_feishu_notification(
                 f"⚠️ {snapshot.symbol} {snapshot.direction}平仓",
                 [
@@ -2242,7 +2235,7 @@ class FibVolumePATrader:
                     "本次盈亏: 未知（未查到历史成交）",
                     *balance_lines,
                     "【平仓信息】",
-                    f"平仓原因: {close_reason or '持仓已消失'}",
+                    f"平仓原因: {close_reason or '持仓已消失（原因未知，未查到对应历史成交）'}",
                     f"最后浮动盈亏: {format_signed_money(snapshot.profit)}",
                     "【开仓信息】",
                     self.entry_confidence_line(ticket),
@@ -2261,6 +2254,12 @@ class FibVolumePATrader:
         swap = float(getattr(deal, "swap", 0.0) or 0.0)
         fee = float(getattr(deal, "fee", 0.0) or 0.0)
         net_profit = profit + commission + swap + fee
+        logger.info("平仓记录 ticket=%s position_id=%s source=%s reason=%s server_reason=%s "
+                    "price_open=%s price_close=%s last_sl=%s last_tp=%s net_profit=%s deal=%s",
+                    ticket, getattr(deal, "position_id", snapshot.identifier or ticket),
+                    "program" if close_reason else "broker_history", reason, server_reason,
+                    snapshot.price_open, getattr(deal, "price", None), snapshot.sl, snapshot.tp,
+                    net_profit, getattr(deal, "ticket", None))
 
         send_feishu_notification(
             f"{title_prefix} {snapshot.symbol} {snapshot.direction}平仓",
@@ -2294,17 +2293,21 @@ class FibVolumePATrader:
 
         disappeared_tickets = set(self.position_snapshots.keys()) - current_tickets
         for ticket in disappeared_tickets:
-            snapshot = self.position_snapshots.pop(ticket, None)
-            self.guardian_states.pop(ticket, None)
+            snapshot = self.position_snapshots.get(ticket)
             if snapshot is None:
                 continue
 
             if ticket in self.notified_close_tickets:
                 self.notified_close_tickets.discard(ticket)
+                self.position_snapshots.pop(ticket, None)
+                self.guardian_states.pop(ticket, None)
                 continue
 
             deal = self.find_recent_close_deal(ticket, snapshot)
             self.notify_position_closed(ticket, snapshot, deal)
+            # A failed/changed-account history read must not erase the old state.
+            self.position_snapshots.pop(ticket, None)
+            self.guardian_states.pop(ticket, None)
             self.notified_close_tickets.add(ticket)
             self.entry_confidence.pop(ticket, None)
         return positions
@@ -2675,6 +2678,9 @@ class FibVolumePATrader:
         if contract.get("one_entry_per_event"):
             comment = f"{ORDER_TAG}_SR_{action.upper()}"
 
+        if manual:
+            bid, ask = crypto_quote_prices(tick)
+            risk.check_manual_order_prices(action, bid, ask, result.stop_loss, result.take_profit)
         if not self.validate_order_prices(action, price, result.stop_loss, result.take_profit):
             logger.error(
                 f"❌ SL/TP方向非法，拒绝下单: action={action}, price={price}, "
@@ -2705,6 +2711,11 @@ class FibVolumePATrader:
 
         try:
             sizing = self.crypto_sizing(result, tick)
+        except risk.QuoteError as exc:
+            if manual:
+                raise
+            logger.info("Crypto cash risk rejected: %s", exc)
+            return False
         except (risk.RiskError, KeyError) as exc:
             logger.info("Crypto cash risk rejected: %s", exc)
             return False
@@ -2757,6 +2768,11 @@ class FibVolumePATrader:
             if self.validate_execution_prices(result, tick):
                 return False
             risk.order_check(mt5, request_body)
+        except risk.QuoteError as exc:
+            if manual:
+                raise
+            logger.info("Crypto pre-submit rejected: %s", exc)
+            return False
         except (risk.RiskError, KeyError) as exc:
             logger.info("Crypto pre-submit rejected: %s", exc)
             return False
@@ -2775,6 +2791,13 @@ class FibVolumePATrader:
             except (risk.RiskError, TypeError, ValueError, OSError) as exc:
                 logger.info("原入场上下文无法冻结，停止提交订单: %s", exc)
                 return False
+            if manual:
+                from crypto_demo.manual_orders import validate_request
+                validate_request(result.details["manual_request"], self.manual_queue.binding,
+                                 self._manual_session, time.time())
+                # No automatic manual retry from this boundary onward, even if
+                # reservation/send/receipt handling later raises a quote error.
+                self._manual_submission_started = True
             if offset is None or offset != original_evidence.get("server_offset_hours") or not self.strategy_ledger.reserve(event_id, observed, {
                     **entry_metadata,
                     "execution_token": token, "symbol": SYMBOL, "magic": MAGIC, "action": action,

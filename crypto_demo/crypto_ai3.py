@@ -1303,7 +1303,10 @@ def extract_chat_text(result):
     if not isinstance(result, dict):
         return ""
     if result.get("type") == "message":
-        return "\n".join(block["text"].strip() for block in result.get("content", [])
+        blocks = result.get("content")
+        if not isinstance(blocks, list):
+            return ""
+        return "\n".join(block["text"].strip() for block in blocks
                          if isinstance(block, dict) and block.get("type") == "text"
                          and isinstance(block.get("text"), str) and block["text"].strip())
     for choice in result.get("choices") or []:
@@ -1443,6 +1446,16 @@ def chat_finish_reason(result):
         return result.get("stop_reason")
     choices = result.get("choices") if isinstance(result, dict) else None
     return choices[0].get("finish_reason") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+
+
+def response_content_stats(result):
+    """Record output shape only; private thinking text is never saved here."""
+    if not isinstance(result, dict):
+        return {"visible_text_chars": None, "thinking_blocks": None}
+    blocks = result.get("content")
+    thinking = (sum(isinstance(block, dict) and block.get("type") in ("thinking", "redacted_thinking")
+                    for block in blocks) if result.get("type") == "message" and isinstance(blocks, list) else None)
+    return {"visible_text_chars": len(extract_chat_text(result)), "thinking_blocks": thinking}
 
 
 def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, still_current=None,
@@ -1593,6 +1606,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                                           else data.get("reasoning_effort")),
                 "token_limit": data[token_field], "token_limit_field": token_field,
                 "finish_reason": finish, "usage": normalized_chat_usage(result),
+                **response_content_stats(result),
                 "cost": None,  # Rates and timeout billing belong to the provider, not guesses.
             })
 
@@ -1637,7 +1651,10 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             return ""
         if finish_reason in ("length", "max_tokens"):
             record_attempt("truncated", result, response)
-            raise AIRequestError(role, "输出达到token上限，拒绝不完整决策且不重复付费请求；查看ai_usage调整本角色MAX_TOKENS")
+            stats, usage = response_content_stats(result), normalized_chat_usage(result) or {}
+            raise AIRequestError(role, "输出达到token上限，拒绝不完整决策且不重复付费请求：max_tokens=%s effort=%s output=%s 正文字符=%s 思考块=%s；查看ai_usage，本地护盘继续"
+                                 % (data[token_field], this_effort if not omit_reasoning else "omitted",
+                                    usage.get("output_tokens"), stats["visible_text_chars"], stats["thinking_blocks"]))
         error_object = result.get("error") if isinstance(result, dict) else None
         error_text = (str(error_object.get("message", "")) + " " + str(error_object.get("param", ""))
                       if isinstance(error_object, dict) else response.text).lower()
@@ -2031,6 +2048,10 @@ class ThreeAITrader(base.FibVolumePATrader):
         self._manual_session = uuid.uuid4().hex
         self._manual_published = 0.0
         self._active_manual_request = None
+        self._manual_waiting = None
+        self._manual_submission_started = False
+        self._manual_quote_wait = None
+        self._manual_quote_wait_at = 0.0
         self.load_entry_contexts()
 
     def process_manual_requests(self):
@@ -2041,7 +2062,7 @@ class ThreeAITrader(base.FibVolumePATrader):
         if now-self._manual_published >= 2:
             self.manual_queue.publish(self._manual_session, now)
             self._manual_published = now
-        if not self.manual_queue.pending():
+        if self._manual_waiting is None and not self.manual_queue.pending():
             return False
         # Wait for an existing AI decision instead of racing its broker submission.
         with self._entry_lock:
@@ -2054,15 +2075,20 @@ class ThreeAITrader(base.FibVolumePATrader):
             self._entry_started = now
         identifier = None
         submission_started = False
+        keep_waiting = False
         try:
-            claimed = self.manual_queue.claim()
-            if claimed is None:
-                return True
-            identifier, path = claimed
+            if self._manual_waiting is None:
+                claimed = self.manual_queue.claim()
+                if claimed is None:
+                    return True
+                identifier, path = claimed
+                request = manual_orders.read_json(path)
+                if not isinstance(request, dict) or request.get("request_id") != identifier:
+                    raise manual_orders.ManualOrderError("请求文件与订单编号不一致")
+                self._manual_waiting = (identifier, copy.deepcopy(request))
+                self._manual_submission_started = False
+            identifier, request = self._manual_waiting
             self.last_order_ticket = 0
-            request = manual_orders.read_json(path)
-            if not isinstance(request, dict) or request.get("request_id") != identifier:
-                raise manual_orders.ManualOrderError("请求文件与订单编号不一致")
             with self._mt5_lock:
                 self._active_manual_request = copy.deepcopy(request)
                 result = manual_orders.prepare_result(base, self, request)
@@ -2082,7 +2108,30 @@ class ThreeAITrader(base.FibVolumePATrader):
                        "经纪商回执未确认，请核对MT5；本请求不会自动重发" if uncertain else
                        "下单未放行或经纪商拒单，查看主程序同一时刻的执行日志")
             self.manual_queue.finish(identifier, status, message, self.last_order_ticket)
+            if self._manual_quote_wait is not None:
+                base.logger.info("订单报价恢复 id=%s status=%s，原SL/TP与手数未改", identifier, status)
             base.logger.info("订单请求=%s status=%s ticket=%s %s", identifier, status, self.last_order_ticket, message)
+        except base.risk.QuoteError as exc:
+            waitable = exc.reason in {"future", "stale", "crossed", "missing_quote", "invalid_bid_ask", "invalid_tick_time"}
+            if identifier and waitable and not self._manual_submission_started:
+                try:
+                    manual_orders.validate_request(request, self.manual_queue.binding,
+                                                   self._manual_session, time.time())
+                    keep_waiting = True
+                except manual_orders.ManualOrderError as expired:
+                    self.manual_queue.finish(identifier, "rejected", str(expired)+"；最后报价: "+str(exc))
+            if keep_waiting:
+                signature = (identifier, exc.reason)
+                if signature != self._manual_quote_wait or now-self._manual_quote_wait_at >= 30:
+                    base.logger.warning("订单等待有效报价 id=%s remaining=%.2fs %s；本轮未送单，下轮重新取价",
+                                        identifier, max(0., request["expires_at"]-time.time()), exc)
+                    self._manual_quote_wait_at = now
+                self._manual_quote_wait = signature
+            elif identifier and self.manual_queue.result(identifier) is None:
+                uncertain = submission_started and (self.pending_order.read() is not None or self.last_order_ticket > 0)
+                self.manual_queue.finish(identifier, "uncertain" if uncertain else "rejected",
+                    str(exc) if not uncertain else "回执或状态待核对，不会自动重发；"+str(exc))
+                base.logger.warning("订单请求失败 id=%s: %s", identifier, exc)
         except Exception as exc:
             base.logger.warning("订单请求失败 id=%s: %s: %s", identifier, type(exc).__name__, exc)
             if identifier:
@@ -2094,6 +2143,9 @@ class ThreeAITrader(base.FibVolumePATrader):
                     base.logger.error("订单请求回执无法保存 id=%s: %s", identifier, save_error)
         finally:
             self._active_manual_request = None
+            if not keep_waiting:
+                self._manual_waiting = None
+                self._manual_quote_wait = None
             self.release_task("entry", seq)
         return True
 
@@ -3118,8 +3170,10 @@ class ThreeAITrader(base.FibVolumePATrader):
             if not raw:
                 self.alert_api_failure("AI-3", "没有可见 JSON，本地护盘继续")
                 return
-            if {int(p.ticket) for p in self.get_positions()} != expected_tickets:
-                base.logger.info("AI-3返回时原持仓已改变，丢弃旧回复")
+            current_tickets = {int(p.ticket) for p in self.get_positions()}
+            if current_tickets != expected_tickets:
+                base.logger.info("AI-3返回时原持仓已改变，丢弃旧回复，不执行平仓或改SL expected=%s current=%s",
+                                 sorted(expected_tickets), sorted(current_tickets))
                 return
             payload, json_error = parse_json_object(raw)
             if json_error:
@@ -3231,6 +3285,10 @@ class ThreeAITrader(base.FibVolumePATrader):
                          RESPONSE_CONTRACT_VERSION)
         base.logger.info("AI成本控制=%s token上限=%s 同通道读超时补发=%s 用量目录=%s",
                          COST_CONTROL_VERSION, AI_MAX_TOKENS, AI_READ_TIMEOUT_RETRIES, AI_USAGE_DIR)
+        base.logger.info("手动报价=%s 原请求60秒内等待有效报价，只重采数据；进入持久送单阶段后不自动重发",
+                         manual_orders.QUOTE_WAIT_VERSION)
+        base.logger.info("平仓诊断=%s 按原持仓编号查历史；原因/成交价写日志，未知不归因于AI-3",
+                         base.CLOSE_AUDIT_VERSION)
         base.logger.info("AI hosts: AI1=%s AI2=%s AI3=%s" % tuple(urlsplit(url).hostname for url in (AI1_URL, AI2_URL, AI3_URL)))
         base.logger.info(
             "AI keys: AI1=%s AI2=%s AI3=%s"

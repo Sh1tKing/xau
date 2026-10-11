@@ -278,6 +278,91 @@ class CryptoIntegrationTests(unittest.TestCase):
             self.tick.time_msc += 10800000
             self.assertEqual(self.run_ai3_hold().call_count, 1)
 
+    def test_close_history_uses_exact_position_identifier_without_time_guess(self):
+        self.configure()
+        self.run_entry()
+        position = self.positions[0]
+        position.identifier = 456
+        snapshot = self.trader.create_position_snapshot(position)
+        close = NS(ticket=789, position_id=456, symbol=base.SYMBOL, entry=base.mt5.DEAL_ENTRY_OUT,
+                   time=int(self.now)+10800, time_msc=int(self.now*1000)+10800000)
+        foreign = NS(ticket=790, position_id=999, symbol=base.SYMBOL, entry=base.mt5.DEAL_ENTRY_OUT,
+                     time=close.time+1, time_msc=close.time_msc+1000)
+        with patch.object(base.mt5, "history_deals_get", return_value=[close, foreign]) as history:
+            self.assertIs(self.trader.find_recent_close_deal(123, snapshot), close)
+        history.assert_called_once_with(position=456)
+
+    def test_foreign_close_deal_with_same_symbol_and_time_never_supplies_reason(self):
+        self.configure()
+        self.run_entry()
+        snapshot = self.trader.create_position_snapshot(self.positions[0])
+        foreign = NS(ticket=789, order=123, position_id=999, symbol=base.SYMBOL,
+                     entry=base.mt5.DEAL_ENTRY_OUT, time=int(self.now), time_msc=int(self.now*1000))
+        with patch.object(base.mt5, "history_deals_get", return_value=[foreign]) as history:
+            self.assertIsNone(self.trader.find_recent_close_deal(123, snapshot))
+        history.assert_called_once_with(position=123)
+
+    def test_close_history_account_change_preserves_state_and_does_not_notify(self):
+        self.configure()
+        self.run_entry()
+        position = self.positions[0]
+        self.trader.position_snapshots[123] = self.trader.create_position_snapshot(position)
+        self.trader.get_or_create_guardian_state(position, self.tick)
+        self.positions[:] = []
+        def history(**kwargs):
+            self.acct.server = "another-server"
+            return []
+        base.send_feishu_notification.reset_mock()
+        with patch.object(base.mt5, "history_deals_get", side_effect=history):
+            with self.assertRaises(risk.RiskError):
+                self.trader.sync_position_close_notifications()
+        self.assertIn(123, self.trader.position_snapshots)
+        self.assertIn(123, self.trader.guardian_states)
+        base.send_feishu_notification.assert_not_called()
+
+    def test_broker_close_reason_and_price_are_logged_even_with_notifications_off(self):
+        self.configure()
+        self.run_entry()
+        snapshot = self.trader.create_position_snapshot(self.positions[0])
+        close = NS(ticket=789, position_id=123, reason=base.mt5.DEAL_REASON_SL, price=snapshot.sl,
+                   profit=-1., commission=-.1, swap=0., fee=0., volume=snapshot.volume)
+        with patch.object(base.logger, "info") as info:
+            self.trader.notify_position_closed(123, snapshot, close)
+        values = str(info.call_args_list)
+        for value in ("平仓记录", "broker_history", "止损触发", "price_open", "price_close", "789"):
+            self.assertIn(value, values)
+        self.assertIn("止损触发", str(base.send_feishu_notification.call_args.args))
+
+    def test_missing_close_history_is_logged_as_unknown_not_ai3_close(self):
+        self.configure()
+        self.run_entry()
+        snapshot = self.trader.create_position_snapshot(self.positions[0])
+        with patch.object(base.logger, "warning") as warning:
+            self.trader.notify_position_closed(123, snapshot)
+        values = str(warning.call_args_list)
+        self.assertIn("平仓原因未知", values)
+        self.assertIn("123", values)
+        self.assertNotIn("AI-3平仓", values)
+
+    def test_ai3_reply_for_disappeared_ticket_never_closes_or_modifies_any_position(self):
+        self.configure()
+        self.run_entry()
+        def response(*args, **kwargs):
+            self.positions[:] = []
+            return Response(dict(action="close", ticket=123, new_stop_loss=None, reasoning="old reply"))
+        with patch.object(ai.requests, "post", side_effect=response) as post, \
+             patch.object(self.trader, "execute_ai3") as execute, \
+             patch.object(base.logger, "info") as info:
+            stamp = int(self.now)
+            seq = self.trader.claim_task("ai3", stamp, 220)
+            self.trader.ai3_task(stamp, seq)
+        self.assertEqual(post.call_count, 1)
+        execute.assert_not_called()
+        self.assertEqual(len(self.sent), 1)  # Only the original opening order.
+        values = str(info.call_args_list)
+        self.assertIn("expected", values)
+        self.assertIn("current", values)
+
     def reload_original_definition(self):
         directory = self.dir/"reload"
         directory.mkdir(exist_ok=True)

@@ -13,6 +13,7 @@ import time
 import uuid
 
 VERSION = "crypto-manual-entry-v2"
+QUOTE_WAIT_VERSION = "crypto-manual-quote-wait-v1"
 HEARTBEAT_AGE = 30
 
 
@@ -192,7 +193,10 @@ def prepare_result(base, trader, request):
     trader.crypto_account_ready(empty=True)
     frames = trader.get_context()
     tick = base.mt5.symbol_info_tick(base.SYMBOL)
-    bid, ask = base.crypto_quote_prices(tick)
+    # The clock preceding native rates reads must not judge a later tick as future.
+    now = time.time()
+    validate_request(request, trader.manual_queue.binding, trader._manual_session, now)
+    bid, ask = base.crypto_quote_prices(tick, now)
     offset = base.tick_clock_offset(tick, now)
     if offset is None:
         raise ManualOrderError("报价或经纪商时钟无效")
@@ -203,8 +207,7 @@ def prepare_result(base, trader, request):
     atr = base.calculate_atr(m15)
     ema = base.ema_last(m15["close"], 21)
     entry = ask if side == "buy" else bid
-    if not trader.validate_order_prices(side, entry, sl, tp):
-        raise ManualOrderError("SL/TP方向非法")
+    base.risk.check_manual_order_prices(side, bid, ask, sl, tp)
     extreme = base.recent_m5_extreme(m5, side)
     snapshot = base.STRATEGIES.snapshot()
     strategy = snapshot.get(base.ASSET.lower()+"_adaptive")
@@ -244,5 +247,8 @@ def entry_error(base, trader, result):
         if result.action != request["side"] or result.stop_loss != request["sl"] or result.take_profit != request["tp"]:
             raise ManualOrderError("订单与原始用户指令不一致")
         return trader.strategy_ledger.entry_error(current.details["event_id"], time.time())
+    except base.risk.QuoteError:
+        # The owner may wait only before the durable broker-submission boundary.
+        raise
     except (ValueError, RuntimeError, KeyError, TypeError, AttributeError, IndexError, OSError) as exc:
         return str(exc)

@@ -202,6 +202,135 @@ class ManualIntegrationTests(unittest.TestCase):
                          (2500., 2503., 2490., .01))
         self.assertEqual(self.run_ai3_hold().call_count, 1)
 
+    def future_tick(self):
+        self.now += .3754342
+        self.stack.enter_context(patch.dict(ai.os.environ, {"CRYPTO_SERVER_UTC_OFFSET_HOURS": "3"}))
+        for frame in self.frames:
+            frame["time"] += 10800
+        self.tick.time = int(self.now)+1+10800
+        self.tick.time_msc = self.tick.time*1000+253
+
+    def test_future_quote_waits_then_uses_new_prices_once_without_ai(self):
+        request = self.prepare("BTC", "sell", sl=83850., tp=83000., volume=.01)
+        self.tick.bid, self.tick.ask = 83741., 83755.
+        self.future_tick()
+        self.execute()
+        self.assertIsNone(self.queue.result(request["request_id"]))
+        self.assertTrue((self.queue.directory/(request["request_id"]+".claimed.json")).is_file())
+        self.assertEqual(self.sent, [])
+        # It is still the original command/TTL, but the market has moved.
+        self.now += .8
+        self.tick.bid, self.tick.ask = 83762., 83776.
+        self.execute()
+        self.assertEqual(self.queue.result(request["request_id"])["status"], "filled")
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual((self.sent[0]["price"], self.sent[0]["sl"], self.sent[0]["tp"]),
+                         (83762., 83850., 83000.))
+        self.assertFalse(self.trader.process_manual_requests())
+        self.assertEqual(len(self.sent), 1)
+
+    def test_reported_sell_sl_stays_invalid_after_quote_recovers(self):
+        request = self.prepare("BTC", "sell", sl=83700., tp=83000., volume=.01)
+        self.tick.bid, self.tick.ask = 83741., 83755.
+        self.future_tick()
+        self.execute()
+        self.assertIsNone(self.queue.result(request["request_id"]))
+        self.now += .8
+        self.execute()
+        result = self.queue.result(request["request_id"])
+        self.assertEqual(result["status"], "rejected")
+        for value in ("SELL", "SL", "Ask", "83700", "83755"):
+            self.assertIn(value, result["message"])
+        self.assertEqual(self.sent, [])
+
+    def test_quote_wait_expiry_and_stale_crossed_are_never_accepted(self):
+        for reason in ("future", "stale", "crossed"):
+            case = ManualIntegrationTests()
+            case.setUp()
+            try:
+                request = case.prepare()
+                if reason == "future":
+                    case.tick.time += 1
+                elif reason == "stale":
+                    case.tick.time -= 60
+                else:
+                    case.tick.ask = case.tick.bid-1
+                case.execute()
+                self.assertIsNone(case.queue.result(request["request_id"]), reason)
+                case.now += 60
+                case.execute()
+                result = case.queue.result(request["request_id"])
+                self.assertEqual(result["status"], "rejected")
+                self.assertIn("expired", result["message"])
+                self.assertEqual(case.sent, [])
+                self.assertFalse(case.trader.process_manual_requests())
+            finally:
+                case.doCleanups()
+
+    def test_quote_observed_after_rate_read_and_expiry_rechecked(self):
+        for delay in (2, 61):
+            case = ManualIntegrationTests()
+            case.setUp()
+            try:
+                request = case.prepare()
+                def rates():
+                    case.now += delay
+                    case.tick.time = int(case.now)
+                    return tuple(case.frames)
+                with patch.object(case.trader, "get_context", side_effect=rates):
+                    case.execute()
+                result = case.queue.result(request["request_id"])
+                self.assertEqual(result["status"], "filled" if delay == 2 else "rejected", result)
+                self.assertEqual(len(case.sent), 1 if delay == 2 else 0)
+                if delay == 61:
+                    self.assertIn("expired", result["message"])
+            finally:
+                case.doCleanups()
+
+    def test_quote_failure_inside_final_preflight_can_wait_before_submission(self):
+        request = self.prepare()
+        sizing = self.trader.crypto_sizing
+        calls = 0
+        def sizing_with_clock_change(result, tick):
+            nonlocal calls
+            calls += 1
+            if calls == 3:  # The actual base place_order final sizing stage.
+                self.tick.time = int(self.now)+1
+            return sizing(result, tick)
+        with patch.object(self.trader, "crypto_sizing", side_effect=sizing_with_clock_change):
+            self.execute()
+            self.assertIsNone(self.queue.result(request["request_id"]))
+            self.assertEqual(self.sent, [])
+            self.assertEqual(self.trader.strategy_ledger.snapshot()["events"], {})
+            self.now += 1.1
+            self.execute()
+        self.assertEqual(self.queue.result(request["request_id"])["status"], "filled")
+        self.assertEqual(len(self.sent), 1)
+
+    def test_waiting_claim_cannot_replay_after_restart_or_account_change(self):
+        request = self.prepare()
+        self.tick.time += 1
+        self.execute()
+        self.assertIsNone(self.queue.result(request["request_id"]))
+        restarted = ai.ThreeAITrader()
+        restarted.manual_queue = self.queue
+        self.assertFalse(restarted.process_manual_requests())
+        self.assertEqual(self.sent, [])
+        self.now += 1.1
+        self.acct.trade_mode = 2
+        self.execute()
+        self.assertEqual(self.queue.result(request["request_id"])["status"], "rejected")
+        self.assertEqual(self.sent, [])
+
+    def test_quote_exception_after_broker_send_never_replays(self):
+        request = self.prepare()
+        with patch.object(base, "send_feishu_notification", side_effect=base.risk.QuoteError("future", {})):
+            self.execute()
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.queue.result(request["request_id"])["status"], "uncertain")
+        self.assertFalse(self.trader.process_manual_requests())
+        self.assertEqual(len(self.sent), 1)
+
     def test_manual_user_plan_bypasses_ema_and_atr_m5_minimum(self):
         request = self.prepare(sl=99999.5, tp=100020., volume=.01)
         for key in ("open", "high", "low", "close"):
@@ -302,6 +431,10 @@ class ManualIntegrationTests(unittest.TestCase):
                         case.tick.time -= 60
                         case.tick.time_msc -= 60000
                     case.execute()
+                    if change == "tick":
+                        self.assertIsNone(case.queue.result(request["request_id"]))
+                        case.now += 61
+                        case.execute()
                     self.assertEqual(case.queue.result(request["request_id"])["status"],
                                      "filled" if change in ("h1", "m5") else "rejected")
                     self.assertEqual(len(case.sent), 1 if change in ("h1", "m5") else 0)
@@ -349,6 +482,28 @@ class ManualIntegrationTests(unittest.TestCase):
              patch.object(base.time, "sleep"), patch.object(base.mt5, "shutdown"):
             self.assertIsNone(self.trader.run())
         self.assertEqual(len(self.sent), 1)
+        entry.assert_not_called()
+        m5_entry.assert_not_called()
+        guardian.assert_called_once()
+        ai3.assert_called_once()
+
+    def test_quote_wait_does_not_block_guardian_or_start_automatic_entry(self):
+        request = self.prepare()
+        self.tick.time += 1
+        with patch.object(self.trader, "connect_mt5", return_value=True), \
+             patch.object(ai, "attach_ai_logger", return_value="offline"), \
+             patch.object(self.trader, "notify_lines"), \
+             patch.object(self.trader, "run_guardian") as guardian, \
+             patch.object(self.trader, "latest_bar_time", return_value=int(self.now)), \
+             patch.object(self.trader, "entry_clock_ready", return_value=True), \
+             patch.object(self.trader, "dispatch_entry") as entry, \
+             patch.object(self.trader, "dispatch_m5_entry") as m5_entry, \
+             patch.object(self.trader, "dispatch_ai3") as ai3, \
+             patch.object(self.trader._stop, "is_set", side_effect=[False, False, True]), \
+             patch.object(base.time, "sleep"), patch.object(base.mt5, "shutdown"):
+            self.assertIsNone(self.trader.run())
+        self.assertIsNone(self.queue.result(request["request_id"]))
+        self.assertEqual(self.sent, [])
         entry.assert_not_called()
         m5_entry.assert_not_called()
         guardian.assert_called_once()

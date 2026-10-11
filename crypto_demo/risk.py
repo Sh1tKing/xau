@@ -123,6 +123,26 @@ def quote_prices(tick, now=None, server_offset_hours=0):
     return bid, ask
 
 
+def check_manual_order_prices(action, bid, ask, sl, tp):
+    """Human prices stay fixed; broker stop direction uses the closing quote side."""
+    failures = []
+    if action == "sell":
+        if sl <= ask:
+            failures.append(f"SELL 止损SL必须高于当前Ask({ask:g})")
+        if tp >= bid:
+            failures.append(f"SELL 止盈TP必须低于当前Bid({bid:g})")
+    elif action == "buy":
+        if sl >= bid:
+            failures.append(f"BUY 止损SL必须低于当前Bid({bid:g})")
+        if tp <= ask:
+            failures.append(f"BUY 止盈TP必须高于当前Ask({ask:g})")
+    else:
+        raise RiskError("invalid direction")
+    if failures:
+        raise RiskError(f"{action.upper()} SL/TP方向非法: Bid={bid:g} Ask={ask:g} SL={sl:g} TP={tp:g}；"
+                        + "；".join(failures))
+
+
 def execution_prices(asset, action, atr, ema, sl, tp, tick, spec, server_offset_hours=0, *, manual=False):
     if action not in ("buy", "sell"):
         raise RiskError("invalid direction")
@@ -133,8 +153,7 @@ def execution_prices(asset, action, atr, ema, sl, tp, tick, spec, server_offset_
     entry, trigger = (ask, bid) if sign == 1 else (bid, ask)
     distance, reward = sign*(entry-sl), sign*(tp-entry)
     if manual:
-        if distance <= 0 or reward <= 0:
-            raise RiskError("manual SL/TP direction rejected")
+        check_manual_order_prices(action, bid, ask, sl, tp)
         minimum = values["trade_stops_level"]*values["point"]
     else:
         atr, ema = map(number, (atr, ema))
