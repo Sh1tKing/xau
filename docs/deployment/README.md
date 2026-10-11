@@ -42,7 +42,7 @@
 
 2026-10-09协议迁移时，私人部署包的AI-1/2/3主路与已填写的备用均统一为Messages：中转站使用 `https://hapiopen.cc/v1/messages`，DeepSeek官网使用 `https://api.deepseek.com/anthropic/v1/messages`。空白备用项仍继承主路，不新增通道。模型、密钥、档位、超时和交易门槛保留各自配置。本次三盘策略更新没有改实际 `.env`；同步时保留服务器当前配置，旧进程需自行重启。
 
-Messages统一使用顶层system、user消息、`anthropic-version`、`x-api-key`（保留中转站要求的Bearer认证）、`max_tokens`及`output_config.effort`。DeepSeek官方只支持effort、不支持format，因此首发直接使用提示词JSON并记录 `json_mode_sent=prompt`，Python仍严格校验JSON和策略契约；其它路线继续优先Schema，明确不支持才降级。历史Chat兼容分支保留，但本包配置没有主备路线走Chat。截断拒绝、5次总预算和每次POST刷新行情保持。详见 [Messages迁移记录](../superpowers/specs/2026-10-09-messages-route-migration.md)。
+Messages统一使用顶层system、user消息、`anthropic-version`、`x-api-key`（保留中转站要求的Bearer认证）、`max_tokens`及兼容的`output_config.effort`；显式关闭AI-3扩展思考时省略effort。DeepSeek官方的output_config支持effort、不支持format，因此首发直接使用提示词JSON并记录 `json_mode_sent=prompt`，Python仍严格校验JSON和策略契约；其它路线继续优先Schema，明确不支持才降级。历史Chat兼容分支保留，但本包配置没有主备路线走Chat。截断拒绝、5次总预算和每次POST刷新行情保持。详见 [Messages迁移记录](../superpowers/specs/2026-10-09-messages-route-migration.md)。
 
 退出脚本使用控制台 `Ctrl+C`。此包是前台运行方式，没有注册Windows服务或开机任务。关闭控制台、注销Windows用户或服务器重启会中断运行，需自行重新启动。
 
@@ -87,7 +87,22 @@ FIB_PA_AI3_MAX_TOKENS=2048
 
 `READ_TIMEOUT_RETRIES`为每通道读超时后的额外补发次数，0代表不重复同一慢请求；仍受HTTP总预算限制。减少重复请求意味着主线路较慢且没有备用时，本轮会较早结束，不再靠第2至5次同线路补发等回复。备用项留空仍没有新服务可用。
 
-当前Messages路线无论模型是Claude、GPT、Grok还是DeepSeek，都发送 `max_tokens` 和 `output_config.effort`，不因GPT模型名改用Chat字段。接口拒绝必填上限时切独立备用或结束，不取消上限。可选effort或Schema明确不兼容时仍可按原预算恢复，并在进程内记住结果。历史Chat兼容分支仍保留自己的字段转换。中转如何映射思考参数及计费需要看实际usage，不能仅凭HTTP200认定档位生效。
+当前Messages路线无论模型是Claude、GPT、Grok还是DeepSeek，都发送 `max_tokens`，兼容时发送`output_config.effort`，不因GPT模型名改用Chat字段；AI-3的显式`thinking=disabled`不同时发送effort。接口拒绝必填上限时切独立备用或结束，不取消上限。可选effort或Schema明确不兼容时仍可按原预算恢复，并在进程内记住结果。历史Chat兼容分支仍保留自己的字段转换。中转如何映射思考参数及计费需要看实际usage，不能仅凭HTTP200认定档位生效。
+
+## 2026-10-12 AI-3思考开关与截断诊断
+
+黄金版请求层同步`xau-ai3-thinking-v1`。`low`是档位，关闭扩展思考使用独立开关。实际`.env`由用户维护，本次没有改模型、档位、输出上限、超时或交易门槛；需要关闭时在运行目录的`.env`填写：
+
+```dotenv
+FIB_PA_AI3_THINKING=disabled
+FIB_PA_AI3_BACKUP_THINKING=
+```
+
+第一项只作用于AI-3，空白或未配置保留接口默认行为；备用空白继承主路。若只关闭备用的扩展思考，主路留空、备用填`disabled`。不支持`low`、`enabled`等开关值，不按模型名自动关闭。开关本身不会创建新的备用通道。Messages/Chat按原URL分别发送顶层`thinking={"type":"disabled"}`，省略effort但保留输出上限和JSON契约；供应商需支持此参数。接口明确拒绝时只允许已有独立备用接手；没有可用备用则本轮失败，本地护盘继续，不移除开关后偷偷重发。
+
+请求准备日志区分配置档位`requested_effort`、实际发送`effort`、`thinking`和`max_tokens`，另记录刷新行情耗时。`ai_usage`新增`reasoning_effort_requested`、`thinking_mode_sent`、`visible_text_chars`、`thinking_blocks`等字段，仅记录思考块数量，不保存私有思考正文。未提供reasoning用量时仍为未知，不能当作0。截断通知显示实际发送上限/档位/开关、报告输出和可见正文长度；仍拒绝不完整决策，不增加付费重审。输入token不占本次输出上限，客户端也不能保证中转实际执行参数或撤回已发生费用。
+
+本机`server_deploy`此前混有币种代码与说明。本次黄金更新以`MANIFEST.json`中黄金文件清单为准，入口仍是`xauusd_fib_volume_pa_ai3.py`，同级策略及辅助模块与根目录黄金版本一致。遗留币种文件不在黄金清单中，不用于黄金启动；独立币种版继续使用`crypto_demo/`。复制清单中的代码后由用户自行重启，保留服务器的`.env`、日志和持仓状态。
 
 回复结束原因是 `length`/`max_tokens` 时视为截断，即使可解析JSON也不执行、不另换模型重审。日志会提示调整对应角色上限；上限在部分模型上包含思考token，因此不要仅按可见JSON长度继续压低。
 

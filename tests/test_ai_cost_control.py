@@ -184,6 +184,171 @@ class CostControlTests(unittest.TestCase):
         self.assertIn("不完整决策", caught.exception.detail)
         self.assertEqual(self.events()[0]["outcome"], "truncated")
 
+    def test_ai3_truncation_reports_actual_low_cap_and_text_without_rejudging(self):
+        response = Response()
+        response.result = {"type":"message", "stop_reason":"max_tokens",
+                           "content":[{"type":"thinking", "thinking":"private internal text"},
+                                      {"type":"text", "text":'{"action":"hold"'}],
+                           "usage":{"input_tokens":3000, "output_tokens":4072}}
+        with patch.dict(ai.AI_MAX_TOKENS, {"AI-3":4072}), \
+             patch.object(ai.requests, "post", return_value=response) as post:
+            with self.assertRaises(ai.AIRequestError) as caught:
+                ai.call_chat("AI-3", "deepseek-flash", "low", "guardian", "current owned position", 60,
+                             "https://api.deepseek.com/anthropic/v1/messages", "SECRET-KEY")
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.kwargs["json"]["max_tokens"], 4072)
+        self.assertEqual(post.call_args.kwargs["json"]["output_config"], {"effort":"low"})
+        for value in ("max_tokens=4072", "effort=low", "output=4072", "正文字符=16"):
+            self.assertIn(value, caught.exception.detail)
+        event = self.events()[0]
+        self.assertEqual(event["visible_text_chars"], 16)
+        self.assertEqual(event["thinking_blocks"], 1)
+        self.assertNotIn("private internal text", json.dumps(event))
+        self.assertEqual(event["outcome"], "truncated")
+
+    def test_ai3_explicit_disabled_thinking_keeps_budget_and_small_decision(self):
+        response = Response()
+        response.result = {"type":"message", "stop_reason":"end_turn",
+                           "content":[{"type":"text", "text":'{"action":"hold","ticket":123,"new_stop_loss":null,"reasoning":"证据不足，持有"}'}],
+                           "usage":{"input_tokens":3800, "output_tokens":90}}
+        with patch.dict(ai.os.environ, {"FIB_PA_AI3_THINKING":"disabled"}), \
+             patch.dict(ai.AI_MAX_TOKENS, {"AI-3":4096}), \
+             patch.object(ai.requests, "post", return_value=response) as post:
+            raw = ai.call_chat("AI-3", "deepseek-flash", "low", "guardian", "fresh owned position", 60,
+                               "https://api.deepseek.com/anthropic/v1/messages", "SECRET-KEY")
+        self.assertEqual(json.loads(raw)["action"], "hold")
+        data = post.call_args.kwargs["json"]
+        self.assertEqual(data["thinking"], {"type":"disabled"})
+        self.assertEqual(data["max_tokens"], 4096)
+        self.assertNotIn("output_config", data)
+        self.assertNotIn("reasoning_effort", data)
+        event = self.events()[0]
+        self.assertEqual(event["thinking_mode_sent"], "disabled")
+        self.assertEqual(event["reasoning_effort_requested"], "low")
+        self.assertIsNone(event["reasoning_effort_sent"])
+
+    def test_ai3_blank_thinking_preserves_provider_default_and_low_effort(self):
+        response = Response()
+        response.result = {"type":"message", "stop_reason":"end_turn",
+                           "content":[{"type":"text", "text":'{"action":"hold"}'}]}
+        for value in ("", " ", '""'):
+            with self.subTest(value=value), patch.dict(ai.os.environ, {"FIB_PA_AI3_THINKING":value}), \
+                 patch.object(ai.requests, "post", return_value=response) as post:
+                ai.call_chat("AI-3", "deepseek-flash", "low", "guardian", "fresh position", 60,
+                             "https://api.deepseek.com/anthropic/v1/messages", "SECRET-KEY")
+            self.assertNotIn("thinking", post.call_args.kwargs["json"])
+            self.assertEqual(post.call_args.kwargs["json"]["output_config"], {"effort":"low"})
+
+    def test_ai3_disabled_thinking_can_use_official_chat_format_without_effort(self):
+        with patch.dict(ai.os.environ, {"FIB_PA_AI3_THINKING":'"disabled"'}), \
+             patch.object(ai.requests, "post", return_value=Response('{"action":"hold"}')) as post:
+            self.call(role="AI-3", model="deepseek-flash")
+        data = post.call_args.kwargs["json"]
+        self.assertEqual(data["thinking"], {"type":"disabled"})
+        self.assertNotIn("reasoning_effort", data)
+        self.assertEqual(data["max_tokens"], ai.AI_MAX_TOKENS["AI-3"])
+
+    def test_ai3_disabled_thinking_inherited_by_backup_and_rejection_never_removed(self):
+        response = Response()
+        response.result = {"type":"message", "stop_reason":"end_turn",
+                           "content":[{"type":"text", "text":'{"action":"hold"}'}]}
+        with patch.dict(ai.os.environ, {"FIB_PA_AI3_THINKING":"disabled", "FIB_PA_AI3_BACKUP_THINKING":"",
+                 "AI3_BACKUP_URL":"https://api.deepseek.com/anthropic/v1/messages", "AI3_BACKUP_KEY":"BACKUP-SECRET"}), \
+             patch.object(ai.requests, "post", side_effect=[Response(status=400, body="Unsupported thinking parameter"), response]) as post:
+            self.call(role="AI-3")
+        self.assertEqual(post.call_count, 2)
+        self.assertTrue(all(call.kwargs["json"]["thinking"] == {"type":"disabled"} for call in post.call_args_list))
+        self.assertEqual([event["outcome"] for event in self.events()], ["unsupported_thinking", "success"])
+        self.assertTrue(all(event["thinking_mode_sent"] == "disabled" for event in self.events()))
+
+    def test_ai3_rejected_thinking_without_backup_stops_after_one_request(self):
+        with patch.dict(ai.os.environ, {"FIB_PA_AI3_THINKING":"disabled"}), \
+             patch.object(ai.requests, "post", return_value=Response(status=400, body="Unsupported thinking.type")) as post:
+            with self.assertRaises(ai.AIRequestError) as caught:
+                self.call(role="AI-3")
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("thinking=disabled", caught.exception.detail)
+        self.assertEqual(self.events()[0]["outcome"], "unsupported_thinking")
+
+    def test_ai3_backup_only_thinking_switch_is_applied_to_that_route(self):
+        response = Response()
+        response.result = {"type":"message", "stop_reason":"end_turn",
+                           "content":[{"type":"text", "text":'{"action":"hold"}'}]}
+        with patch.dict(ai.os.environ, {"FIB_PA_AI3_THINKING":"", "FIB_PA_AI3_BACKUP_THINKING":"disabled",
+                 "AI3_BACKUP_URL":"https://api.deepseek.com/anthropic/v1/messages", "AI3_BACKUP_KEY":"BACKUP-SECRET"}), \
+             patch.object(ai.requests, "post", side_effect=[ai.requests.ReadTimeout("read timed out"), response]) as post:
+            self.call(role="AI-3")
+        first, second = [call.kwargs["json"] for call in post.call_args_list]
+        self.assertNotIn("thinking", first)
+        self.assertEqual(first["reasoning_effort"], "medium")
+        self.assertEqual(second["thinking"], {"type":"disabled"})
+        self.assertNotIn("output_config", second)
+        self.assertEqual(first["max_tokens"], second["max_tokens"])
+
+    def test_ai3_format_compatibility_fallback_keeps_explicit_thinking_switch(self):
+        response = Response()
+        response.result = {"type":"message", "stop_reason":"end_turn",
+                           "content":[{"type":"text", "text":'{"action":"hold"}'}]}
+        with patch.dict(ai.os.environ, {"FIB_PA_AI3_THINKING":"disabled"}), \
+             patch.object(ai.requests, "post", side_effect=[Response(status=400, body="Unsupported output_config.format"), response]) as post:
+            ai.call_chat("AI-3", "relay-model", "low", "guardian", "fresh position", 60,
+                         "https://relay.example.test/v1/messages", "SECRET-KEY")
+        first, second = [call.kwargs["json"] for call in post.call_args_list]
+        self.assertIn("format", first["output_config"])
+        self.assertNotIn("output_config", second)
+        self.assertTrue(all(data["thinking"] == {"type":"disabled"} for data in (first, second)))
+        self.assertEqual(first["max_tokens"], second["max_tokens"])
+
+    def test_invalid_ai3_thinking_config_is_rejected_before_post(self):
+        for value in ("low", "enabled", "typo"):
+            with self.subTest(value=value), patch.dict(ai.os.environ, {"FIB_PA_AI3_THINKING":value}), \
+                 patch.object(ai.requests, "post") as post:
+                with self.assertRaises(ai.AIRequestError):
+                    self.call(role="AI-3")
+            post.assert_not_called()
+
+    def test_ai3_thinking_setting_does_not_change_ai1_or_ai2(self):
+        for role in ("AI-1", "AI-2"):
+            with self.subTest(role=role), patch.dict(ai.os.environ, {"FIB_PA_AI3_THINKING":"disabled"}), \
+                 patch.object(ai.requests, "post", return_value=Response()) as post:
+                self.call(role=role)
+            self.assertNotIn("thinking", post.call_args.kwargs["json"])
+            self.assertEqual(post.call_args.kwargs["json"]["reasoning_effort"], "medium")
+
+    def test_ai3_disabled_thinking_truncation_still_rejects_without_paid_rejudgment(self):
+        with patch.dict(ai.os.environ, {"FIB_PA_AI3_THINKING":"disabled"}), \
+             patch.object(ai.requests, "post", return_value=Response('{"action":"hold"}', finish="length")) as post:
+            with self.assertRaises(ai.AIRequestError) as caught:
+                self.call(role="AI-3")
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("thinking=disabled", caught.exception.detail)
+        self.assertEqual(self.events()[0]["outcome"], "truncated")
+
+    def test_thinking_setting_alone_does_not_create_an_independent_backup(self):
+        with patch.dict(ai.os.environ, {"FIB_PA_AI3_BACKUP_THINKING":"disabled"}), \
+             patch.object(ai.requests, "post", side_effect=ai.requests.ReadTimeout("read timed out")) as post:
+            with self.assertRaises(ai.AIRequestError):
+                self.call(role="AI-3")
+        self.assertEqual(post.call_count, 1)
+        self.assertNotIn("thinking", post.call_args.kwargs["json"])
+
+    def test_response_shape_diagnostics_exclude_hidden_content_and_unknown_reasoning(self):
+        response = {"type":"message", "stop_reason":"end_turn", "content":[
+            {"type":"thinking", "thinking":"private text"},
+            {"type":"redacted_thinking", "data":"private bytes"},
+            {"type":"text", "text":' {"action":"hold"} '}],
+            "usage":{"input_tokens":3000, "output_tokens":80}}
+        stats = ai.response_content_stats(response)
+        self.assertEqual(stats, {"visible_text_chars":17, "thinking_blocks":2})
+        self.assertIsNone(ai.normalized_chat_usage(response)["reasoning_tokens"])
+        self.assertNotIn("private", json.dumps(stats))
+        for content in (None, "malformed", 12):
+            with self.subTest(content=content):
+                self.assertEqual(ai.extract_chat_text({"type":"message", "content":content}), "")
+                self.assertEqual(ai.response_content_stats({"type":"message", "content":content}),
+                                 {"visible_text_chars":0, "thinking_blocks":None})
+        self.assertEqual(ai.response_content_stats(None), {"visible_text_chars":None, "thinking_blocks":None})
+
     def test_other_400_errors_do_not_silently_disable_reasoning(self):
         with patch.object(ai.requests, "post", side_effect=[Response(status=400, body="max_tokens must exceed reasoning budget"), Response()]) as post:
             self.call()
