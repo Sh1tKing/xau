@@ -76,7 +76,7 @@ BTC/ETH `--check` 分别只发现 `btc_adaptive` / `eth_adaptive`，默认模式
 | --- | --- |
 | Claude主路短请求/medium | HTTP200，7.109秒，正确模型、end_turn、完整JSON |
 | GPT备用短请求/medium | HTTP200，31.406秒，完整JSON |
-| Grok主路短请求/low，两次 | HTTP200，8.890/36.782秒，均无有效JSON；第二次正文拒绝echo测试，不据此推断完整AI2一定失败 |
+| Grok主路短请求/low，两次 | HTTP200，8.890/36.782秒；首轮严格JSON检查失败且未保存正文，不能判定生产解析器是否也拒绝；第二次明确拒绝echo且无JSON，不据此推断完整AI2一定失败 |
 | DeepSeek AI2备用短请求/low | HTTP200，3.344秒，完整REJECT JSON |
 | DeepSeek AI3短请求/medium | HTTP200，1.000秒，完整hold JSON |
 | Grok AI2角色测试/low | 诊断限定45秒，45.593秒读超时，无响应头；不能等同生产120秒失败 |
