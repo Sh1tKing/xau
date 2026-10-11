@@ -8,6 +8,15 @@ class RiskError(ValueError):
     pass
 
 
+class QuoteError(RiskError):
+    """Recoverable quote rejection with clock evidence, never credentials."""
+    def __init__(self, reason, facts):
+        self.reason = reason
+        self.facts = facts
+        fields = " ".join(f"{key}={value}" for key, value in facts.items() if value is not None)
+        super().__init__(f"quote rejected: {reason} {fields}")
+
+
 def number(value, positive=True):
     if isinstance(value, bool):
         raise RiskError("boolean numeric value")
@@ -70,19 +79,47 @@ def spec_values(spec):
 
 
 def quote_prices(tick, now=None, server_offset_hours=0):
+    def fact(value):
+        try:
+            parsed = float(value)
+            return parsed if not isinstance(value, bool) and math.isfinite(parsed) else None
+        except (ValueError, TypeError, OverflowError):
+            return None
+    observed = time.time() if now is None else now
+    facts = {"bid": fact(getattr(tick, "bid", None)), "ask": fact(getattr(tick, "ask", None)),
+             "raw_time_sec": fact(getattr(tick, "time", None)),
+             "raw_time_msc": fact(getattr(tick, "time_msc", None)),
+             "offset_hours": fact(server_offset_hours), "observed_utc": fact(observed),
+             "tick_utc": None, "age_sec": None}
     if tick is None:
-        raise RiskError("missing quote")
-    bid, ask = number(getattr(tick, "bid", None)), number(getattr(tick, "ask", None))
-    stamp = number(getattr(tick, "time", None))
+        raise QuoteError("missing_quote", facts)
+    try:
+        bid, ask = number(getattr(tick, "bid", None)), number(getattr(tick, "ask", None))
+    except RiskError as exc:
+        raise QuoteError("invalid_bid_ask", facts) from exc
+    try:
+        stamp = number(getattr(tick, "time", None))
+    except RiskError as exc:
+        raise QuoteError("invalid_tick_time", facts) from exc
     try:
         offset = float(server_offset_hours)
     except (TypeError, ValueError, OverflowError) as exc:
-        raise RiskError("missing configured server UTC offset") from exc
-    if not math.isfinite(offset) or not -12 <= offset <= 14:
-        raise RiskError("invalid configured server UTC offset")
-    age = (time.time() if now is None else now) - (stamp-offset*3600)
-    if ask < bid or not 0 <= age <= 30:
-        raise RiskError("crossed, future or stale quote")
+        raise QuoteError("invalid_configured_offset", facts) from exc
+    if isinstance(server_offset_hours, bool) or not math.isfinite(offset) or not -12 <= offset <= 14:
+        raise QuoteError("invalid_configured_offset", facts)
+    try:
+        observed = number(observed)
+    except RiskError as exc:
+        raise QuoteError("invalid_observed_clock", facts) from exc
+    facts["tick_utc"] = stamp-offset*3600
+    age = observed-facts["tick_utc"]
+    facts["age_sec"] = round(age, 6)
+    if ask < bid:
+        raise QuoteError("crossed", facts)
+    if age < 0:
+        raise QuoteError("future", facts)
+    if age > 30:
+        raise QuoteError("stale", facts)
     return bid, ask
 
 

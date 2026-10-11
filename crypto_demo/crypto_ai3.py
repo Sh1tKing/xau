@@ -100,7 +100,7 @@ QUALITY_DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_e
 QUALITY_CAUSES = {"volume", "shallow_retrace", "trigger_weakness", "opposing_structure", "stop_vulnerability", "target_uncertainty", "execution_drift", "missing_data", "hard_limit"}
 LEGACY_QUALITY_VERSION = "entry-quality-v1"
 QUALITY_VERSION = "entry-quality-v2"
-AI1_EVIDENCE_SCOPE_VERSION = "crypto-evidence-scope-v1"
+AI1_EVIDENCE_SCOPE_VERSION = "crypto-evidence-scope-v2"
 # Pool evidence must distinguish common source facts from winner-specific aliases.
 AI1_SHARED_EVIDENCE_ROOTS = (
     "m15_bars", "m5_bars", "h1_bars", "patterns", "live_quote", "atr",
@@ -109,6 +109,7 @@ AI1_SHARED_EVIDENCE_ROOTS = (
 AI1_SHARED_RULE_PATHS = (
     ("rules", "h1_sets_direction"), ("rules", "max_stop_abs"),
     ("rules", "chase_max_atr"), ("rules", "min_rr"),
+    ("rules", "price_finalization", "generation_min_risk"),
     ("rules", "price_finalization", "execution_min_stop_clearance"),
     ("rules", "price_finalization", "execution_clearance_price"),
     ("rules", "price_finalization", "generation_floor_is_not_execution_floor"),
@@ -154,7 +155,7 @@ AI1_INSTRUCTIONS += (
     "本地分低或参考方案失败不剥夺自主提出安全方案的权限；patterns仅几何与位置事实，不是吞没硬门或首轮趋势判断。"
     "live_quote是本次请求重新采集的报价，不是参考K线收盘价；按当前报价核实方案可执行性，不能把止损贴近现价形成的高RR当作质量提升。"
     "local_plan_feasibility只评价原本地SL/TP，不是否决其他自主方案的全局开关；本地no或该方案不可执行时，仍可提出有证据的其他合法方案。"
-    "Python按rules.price_finalization定稿；按reference_price的模式参考价考虑M15 ATR最小止损宽度及target_max_reference_r目标上限；analysis_mode买用成功请求Ask、卖用Bid，旧模式用其闭合K线参考，再核实实时报价RR，不能按随后会被截短的远目标宣称通过。"
+    "Python按公共rules.price_finalization及所选策略契约定稿；有opportunities时reference_price与target_max_reference_r只取所选候选的对应字段，不引用顶层本地赢家字段；参考价考虑M15 ATR最小止损宽度及该候选目标上限；analysis_mode买用成功请求Ask、卖用Bid，旧模式用其闭合K线参考，再核实实时报价RR，不能按随后会被截短的远目标宣称通过。"
 )
 AI2_INSTRUCTIONS += (
     "ai1_snapshot是原分析报价，market_evidence.live_quote是本次审核新报价；比较变化，按final_plan_feasibility核实当前执行区间、止损触发侧剩余空间及追价。"
@@ -750,6 +751,9 @@ def compact_market_pack(pack):
             for key in ("details", "strategy_evidence", "strategy_contract", "reference_price", "fib", "local_plan_feasibility",
                         "local_stop_loss", "local_take_profit", "local_reasoning", "setup"):
                 result.pop(key, None)
+            finalization = result.get("rules", {}).get("price_finalization", {})
+            finalization.pop("reference", None)
+            finalization.pop("target_max_reference_r", None)
             computed = result.get("computed_evidence", {})
             result["computed_evidence"] = {"price_action": computed.get("price_action", {})}
         else:
@@ -897,6 +901,9 @@ def plan_feasibility(action, reference_entry, stop_loss, take_profit, quote, atr
 
 class MarketSnapshotError(RuntimeError):
     """Fresh evidence is unavailable or the reviewed plan no longer applies."""
+    def __init__(self, message, *, reason=None):
+        super().__init__(message)
+        self.reason = reason or message
 
 
 def quote_from_tick(tick):
@@ -1499,7 +1506,9 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             base.logger.info("%s 任务已过期或已停止，停止重试 (%s %s/%s)",
                              role, label, attempt, AI_HTTP_RETRIES)
             return ""
+        refresh_started = time.monotonic()
         snapshot = refresh_request() if refresh_request is not None else {}
+        refresh_elapsed = time.monotonic()-refresh_started
         if not isinstance(snapshot, dict) or (refresh_request is not None and not snapshot.get("prompt")):
             raise MarketSnapshotError("无法构造新的请求快照，停止本轮，不发送旧提示词")
         request_prompt = snapshot.get("prompt", prompt)
@@ -1545,6 +1554,9 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             elif json_mode == "object":
                 data["response_format"] = {"type": "json_object"}
         attempted = attempt
+        base.logger.info("%s 请求准备 model=%s effort=%s max_tokens=%s refresh=%.2fs prompt_chars=%s system_chars=%s (%s %s/%s)",
+                         role, active["model"], this_effort if not omit_reasoning else "omitted",
+                         data[token_field], refresh_elapsed, len(request_prompt), len(request_instructions), label, attempt, AI_HTTP_RETRIES)
         started = time.monotonic()
         response_progress = {}
 
@@ -1569,6 +1581,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 "request_id": response_headers.get("x-request-id") or response_headers.get("request-id") or response_progress.get("request_id"),
                 "response_id": response_id, "http_status": getattr(response, "status_code", None) or response_progress.get("http_status"),
                 "outcome": outcome, "elapsed_sec": round(time.monotonic() - started, 3),
+                "refresh_elapsed_sec": round(refresh_elapsed, 3),
                 "read_timeout_sec": request_timeout,
                 "headers_elapsed_sec": response_progress.get("headers_elapsed_sec"),
                 "body_complete": response is not None,
@@ -2007,6 +2020,9 @@ class ThreeAITrader(base.FibVolumePATrader):
         self._ai3_seq = 0
         self._ai3_bar_time = 0
         self._ai3_started = 0.0
+        self._ai3_consumed_bar_time = 0
+        self._ai3_data_wait = None
+        self._ai3_data_wait_at = 0.0
         self._stop = threading.Event()
         self._last_api_alert = 0.0
         self.manual_queue = manual_orders.ManualQueue(
@@ -2895,15 +2911,44 @@ class ThreeAITrader(base.FibVolumePATrader):
         finally:
             self.release_task("entry", seq)
 
+    def ai3_data_unavailable(self, bar_time, exc):
+        signature = (bar_time, type(exc).__name__, getattr(exc, "reason", str(exc)))
+        now = time.time()
+        if signature != self._ai3_data_wait or now-self._ai3_data_wait_at >= 30:
+            base.logger.info("AI-3等待有效行情 bar=%s：%s；未发请求时不消费本分钟", bar_time, exc)
+            self._ai3_data_wait_at = now
+        self._ai3_data_wait = signature
+
     def dispatch_ai3(self, bar_time):
-        if not AI_ENABLED or not self.get_positions():
-            return
+        if not AI_ENABLED or self._stop.is_set():
+            return False
+        with self._ai3_lock:
+            if bar_time <= self._ai3_consumed_bar_time:
+                return False
+            if self._ai3_inflight and time.time()-self._ai3_started < AI3_TAKEOVER_SEC:
+                return False
+        try:
+            if not self.get_positions():
+                return False
+            with self._mt5_lock:
+                tick = base.mt5.symbol_info_tick(base.SYMBOL)
+            observed = time.time()
+            base.crypto_quote_prices(tick, observed)
+            marker = float(bar_time)
+            if isinstance(bar_time, bool) or not base.math.isfinite(marker) or marker <= 0 or marker != int(marker):
+                raise MarketSnapshotError("invalid current M1 marker")
+            boundary = marker-base.configured_server_offset()*3600
+            if boundary > observed:
+                raise MarketSnapshotError("local_clock_before_M1_boundary raw=%s boundary_utc=%s observed_utc=%s" % (bar_time,boundary,observed), reason="local_clock_before_M1_boundary")
+        except (base.risk.RiskError, MarketSnapshotError) as exc:
+            self.ai3_data_unavailable(bar_time, exc)
+            return False
         seq = self.claim_task("ai3", bar_time, AI3_TAKEOVER_SEC)
         if seq is None:
-            base.logger.info("AI-3 仍在进行，跳过本根 M1")
-            return
+            return False
         base.logger.info("AI-3 已派发护盘线程 bar=%s seq=%s" % (bar_time, seq))
         threading.Thread(target=self.ai3_task, args=(bar_time, seq), daemon=True).start()
+        return True
 
     def collect_ai3_snapshot(self, expected_tickets=None):
         self.crypto_account_ready()
@@ -3042,6 +3087,18 @@ class ThreeAITrader(base.FibVolumePATrader):
             if initial is None:
                 return
             expected_tickets = initial["tickets"]
+            def refresh_ai3_request():
+                snapshot = self.collect_ai3_snapshot(expected_tickets)
+                with self._ai3_lock:
+                    if not task_is_current(seq, bar_time, self._ai3_seq, self._ai3_bar_time) or self._stop.is_set():
+                        raise MarketSnapshotError("旧AI-3任务已停止，不继续提交")
+                    # Count an actual request preparation, not an early bar/failed quote.
+                    # Compatibility/backup retries stay inside this same call's budget.
+                    self._ai3_consumed_bar_time = max(self._ai3_consumed_bar_time, bar_time)
+                    if self._ai3_data_wait is not None:
+                        base.logger.info("AI-3行情恢复 bar=%s，提交当前持仓快照", bar_time)
+                        self._ai3_data_wait = None
+                return snapshot
             raw = call_chat(
                 "AI-3",
                 AI3_MODEL,
@@ -3053,7 +3110,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI3_KEY,
                 still_current=lambda: self.ai3_is_current(seq, bar_time) and not self._stop.is_set(),
                 request_context={"decision_id": "ai3-%s-%s" % (bar_time, seq), "bar_time": bar_time, "trigger": "M1"},
-                refresh_request=lambda: self.collect_ai3_snapshot(expected_tickets),
+                refresh_request=refresh_ai3_request,
             )
             if not self.ai3_is_current(seq, bar_time) or self._stop.is_set():
                 base.logger.info("AI-3 返回已过期，丢弃 seq=%s" % seq)
@@ -3069,8 +3126,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                 base.logger.warning("AI-3输出格式错误: %s，本地护盘继续", json_error)
                 return
             self.execute_ai3(payload)
-        except MarketSnapshotError as exc:
-            base.logger.info("AI-3行情刷新停止本轮: %s", exc)
+        except (MarketSnapshotError, base.risk.RiskError) as exc:
+            self.ai3_data_unavailable(bar_time, exc)
         except AIRequestError as exc:
             self.alert_api_failure(exc.role, exc.detail)
         except Exception as exc:
@@ -3169,6 +3226,7 @@ class ThreeAITrader(base.FibVolumePATrader):
         base.logger.info("AI行情刷新=%s 每次POST采集新行情，AI-2及下单前复核现价，旧提案不跨收盘K线执行",
                          MARKET_FRESHNESS_VERSION)
         base.logger.info("入场时钟=%s 本地时钟到达M15/M5收盘边界前等待，同根K线下轮重查，护盘继续", base.ENTRY_CLOCK_VERSION)
+        base.logger.info("护盘时钟=crypto-guardian-clock-v2 UTC偏移=%s，未来/超过30秒/交叉报价拒绝；未提交的M1同根重查", base.configured_server_offset())
         base.logger.info("AI协议与JSON=%s 按主备URL分别适配；支持时优先Schema，DeepSeek官方Messages仅发送effort；格式错误不执行",
                          RESPONSE_CONTRACT_VERSION)
         base.logger.info("AI成本控制=%s token上限=%s 同通道读超时补发=%s 用量目录=%s",
@@ -3210,7 +3268,6 @@ class ThreeAITrader(base.FibVolumePATrader):
         # Evaluate the latest closed M15 immediately so a valid signal can place an order.
         last_m15 = 0
         last_m5 = 0
-        last_m1 = 0
         if base.ENABLE_TRADING:
             base.logger.info("下单已开启，启动后立即评估最新已收盘M15")
         else:
@@ -3255,10 +3312,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                 if not manual_pending and entry_ready and m5_time and m5_time != last_m5 and m5_time != m15_time and not once:
                     last_m5 = m5_time
                     self.dispatch_m5_entry(m5_time)
-                if m1_time and m1_time != last_m1:
-                    last_m1 = m1_time
-                    if not once:
-                        self.dispatch_ai3(m1_time)
+                if m1_time and not once:
+                    self.dispatch_ai3(m1_time)
                 time.sleep(base.POLL_SECONDS)
         except KeyboardInterrupt:
             base.logger.info("收到人工停止信号")

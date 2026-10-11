@@ -63,6 +63,26 @@ class CostControlTests(unittest.TestCase):
         self.assertIsNone(event["usage"])
         self.assertIsNone(event["cost"])
 
+    def test_snapshot_header_and_body_wait_are_distinct(self):
+        clock = [100.]
+        def refresh():
+            clock[0] += 2.5
+            return {"prompt":"current evidence","instructions":"current rules"}
+        def post(*args, **kwargs):
+            response = Response()
+            clock[0] += 7
+            kwargs["hooks"]["response"](response)
+            clock[0] += 43
+            return response
+        with patch.object(ai.time,"monotonic",side_effect=lambda:clock[0]), patch.object(ai.requests,"post",side_effect=post):
+            self.call(refresh_request=refresh)
+        event = self.events()[0]
+        self.assertEqual(event["refresh_elapsed_sec"],2.5)
+        self.assertEqual(event["headers_elapsed_sec"],7)
+        self.assertEqual(event["elapsed_sec"],50)
+        self.assertEqual(event["prompt_chars"],len("current evidence"))
+        self.assertTrue(event["body_complete"])
+
     def test_each_backup_can_have_its_own_timeout_and_blank_inherits(self):
         for role, number in (("AI-1", 1), ("AI-2", 2), ("AI-3", 3)):
             name = f"FIB_PA_AI{number}_BACKUP_TIMEOUT"

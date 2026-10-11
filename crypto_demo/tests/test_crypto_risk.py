@@ -117,6 +117,32 @@ class CashRiskTests(unittest.TestCase):
             self.sizing(spec=specification(trade_tick_size=7))
 
 
+class QuoteClockTests(unittest.TestCase):
+    def test_explicit_offset_and_future_boundary_are_not_relaxed(self):
+        tick = NS(bid=2498.6, ask=2500.6, time=1791735000, time_msc=1791735000123)
+        with self.assertRaises(risk.QuoteError) as caught:
+            risk.quote_prices(tick, 1791724199.9191933, 3)
+        self.assertEqual(caught.exception.reason, "future")
+        self.assertAlmostEqual(caught.exception.facts["age_sec"], -.0808067, places=5)
+        self.assertEqual(caught.exception.facts["raw_time_msc"], tick.time_msc)
+        self.assertIn("offset_hours=3", str(caught.exception))
+        self.assertEqual(risk.quote_prices(tick, 1791724200.5, 3), (2498.6, 2500.6))
+        with self.assertRaises(risk.QuoteError) as stale:
+            risk.quote_prices(tick, 1791724230.001, 3)
+        self.assertEqual(stale.exception.reason, "stale")
+
+    def test_quote_diagnostics_distinguish_crossed_and_invalid_clock(self):
+        tick = NS(bid=2500, ask=2499, time=100)
+        with self.assertRaises(risk.QuoteError) as caught:
+            risk.quote_prices(tick, 101)
+        self.assertEqual(caught.exception.reason, "crossed")
+        tick.ask = 2502
+        for now in (True, float("nan"), float("inf"), 0):
+            with self.subTest(now=now), self.assertRaises(risk.QuoteError) as caught:
+                risk.quote_prices(tick, now)
+            self.assertEqual(caught.exception.reason, "invalid_observed_clock")
+
+
 class LatchTests(unittest.TestCase):
     def test_account_lock_conflicts_and_releases(self):
         with tempfile.TemporaryDirectory() as folder:

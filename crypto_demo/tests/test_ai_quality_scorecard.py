@@ -57,7 +57,7 @@ def pooled_sample(direction="sell"):
         {"opportunity_id": "other", "action": direction},
     ]
     pack["rules"] = {"min_rr": 1.5, "price_finalization": {
-        "execution_min_stop_clearance": .3, "target_max_reference_r": 2.5}}
+        "generation_min_risk": .6, "execution_min_stop_clearance": .3, "target_max_reference_r": 2.5}}
     payload["opportunity_id"] = "selected"
     payload["quality_assessment"]["version"] = ai.QUALITY_VERSION
     payload["quality_assessment"].pop("reservations")
@@ -215,6 +215,37 @@ class QualityScorecardTests(unittest.TestCase):
             payload["quality_assessment"]["dimensions"]["structure"]["evidence_refs"] = [pointer]
             self.assertIn("证据路径无效", ai.normalize_ai1_quality(payload, pack)[1])
 
+    def test_pool_accepts_common_generation_floor_for_buy_sell_and_no(self):
+        pointer = "/rules/price_finalization/generation_min_risk"
+        for direction in ("buy", "sell"):
+            for action in (direction, "no"):
+                with self.subTest(direction=direction, action=action):
+                    pack, payload = pooled_sample(direction)
+                    payload["action"] = action
+                    payload["quality_assessment"]["dimensions"]["protection"]["evidence_refs"] = [pointer]
+                    if action == "no":
+                        payload["wait_basis"] = [{"code": "hard_limit", "reason": "Protection cannot cover the required floor",
+                                                 "evidence_refs": [pointer]}]
+                    original = copy.deepcopy(payload)
+                    normalized, error = ai.normalize_ai1_quality(payload, ai.compact_market_pack(pack))
+                    self.assertFalse(error, error)
+                    self.assertEqual(normalized["action"], action)
+                    self.assertEqual(normalized["quality_score"], 80)
+                    self.assertEqual(payload, original)
+
+    def test_generation_floor_ref_requires_present_non_null_sent_fact(self):
+        for missing in (True, False):
+            with self.subTest(missing=missing):
+                pack, payload = pooled_sample()
+                finalization = pack["rules"]["price_finalization"]
+                if missing:
+                    finalization.pop("generation_min_risk")
+                else:
+                    finalization["generation_min_risk"] = None
+                payload["quality_assessment"]["dimensions"]["protection"]["evidence_refs"] = [
+                    "/rules/price_finalization/generation_min_risk"]
+                self.assertIn("证据路径无效", ai.normalize_ai1_quality(payload, pack)[1])
+
     def test_pool_rubric_examples_match_sent_evidence_scope(self):
         pack, payload = pooled_sample()
         pack["quality_rubric"] = ai.quality_rubric(analysis_mode=True)
@@ -222,12 +253,34 @@ class QualityScorecardTests(unittest.TestCase):
         paths = sent["quality_rubric"]["reference_paths"]
         self.assertIn("/m15_ema21_distance_atr", paths)
         self.assertIn("/rules/price_finalization/execution_min_stop_clearance", paths)
+        self.assertIn("/rules/price_finalization/generation_min_risk", paths)
         self.assertNotIn("/local_plan_feasibility", paths)
         self.assertNotIn("/computed_evidence/fib", paths)
         for pointer in paths:
             with self.subTest(pointer=pointer):
                 payload["quality_assessment"]["dimensions"]["structure"]["evidence_refs"] = [pointer]
                 self.assertFalse(ai.normalize_ai1_quality(payload, sent)[1])
+
+    def test_pool_hides_winner_reference_and_target_but_keeps_selected_review_aliases(self):
+        pack, payload = pooled_sample()
+        finalization = pack["rules"]["price_finalization"]
+        finalization["reference"] = "winner_closed_m15"
+        pack["opportunities"][0]["strategy_contract"] = {"target_max_reference_r": 3.0}
+        pack["opportunities"][0]["reference_price"] = {"price": 100.0, "source": "selected_closed_m5"}
+        original = copy.deepcopy(pack)
+        sent = ai.compact_market_pack(pack)
+        self.assertNotIn("reference", sent["rules"]["price_finalization"])
+        self.assertNotIn("target_max_reference_r", sent["rules"]["price_finalization"])
+        self.assertEqual(sent["opportunities"][0]["strategy_contract"]["target_max_reference_r"], 3.0)
+        self.assertEqual(sent["opportunities"][0]["reference_price"]["source"], "selected_closed_m5")
+        self.assertEqual(sent["rules"]["price_finalization"]["generation_min_risk"], .6)
+        self.assertEqual(pack, original)
+        selected = copy.deepcopy(pack)
+        selected["opportunity_id"] = "selected"
+        selected["rules"]["price_finalization"].update(reference="selected_closed_m5", target_max_reference_r=3.0)
+        review = ai.compact_market_pack(selected)
+        self.assertEqual(review["rules"]["price_finalization"]["reference"], "selected_closed_m5")
+        self.assertEqual(review["rules"]["price_finalization"]["target_max_reference_r"], 3.0)
 
 
 if __name__ == "__main__":

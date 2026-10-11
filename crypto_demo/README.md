@@ -43,6 +43,10 @@ BTC参考3R/90分钟，ETH参考2.5R/60分钟，两者冷却60秒；来自币种
 
 `CRYPTO_SERVER_UTC_OFFSET_HOURS` 明确配置原始tick/K线时间偏移（默认0），必须匹配实际经纪商时钟，夏令时变化由用户更新。程序不从旧tick猜偏移；换算UTC后quote必须在30秒内且非未来。周末不固定禁止，仍需新tick及完整闭合K线。
 
+`crypto-guardian-clock-v2`在M1收盘边界和报价尚未有效时等待，同一分钟下一轮重新采集；已有有效请求仍按原主备/重试预算处理，同一分钟不会因HTTP失败或截断重新开启付费分析。报价错误会明确记录`future`、`stale`、`crossed`及原始tick、UTC偏移、本机时间和age；数据恢复会记录恢复，继续原持仓护盘。本地护盘在读取K线后再获取新报价，拒绝用过期观察更新极值/止损。新版本首次同步后须由用户重启原主程序。
+
+HTTP日志的`请求准备`记录角色实际模型、档位、token上限、行情读取时间与输入字符数；`ai_usage`分别记录`refresh_elapsed_sec`、`headers_elapsed_sec`、`elapsed_sec`。短合成请求成功只能证明基本路由连通，完整行情、质量评分及推理仍可能耗时更长。`max_tokens`截断是明确失败，不执行半截JSON，也不自动取消费用上限或付费重审。当前本地实际配置优先，本次修复不代替你手动调整档位、超时和输出预算。
+
 日志/策略状态在 `crypto_logs/<账号服务器哈希>/<asset>`。OS账号锁跨BTC/ETH及目录副本；不确定订单回执先写入稳定用户状态 `%LOCALAPPDATA%/MYQCryptoDemo/<哈希>/pending_order.json`（无LOCALAPPDATA时 `~/.local/state/MYQCryptoDemo`）。切换账户立即阻止请求/交易/护盘，不能清除原账户状态。模糊回执会在重启或换目录后继续挡两币入场，只有精确token/symbol/magic的持仓可自动核对；没有持仓不代表没成交。无法核实时需用户调查经纪商历史并有意处理状态，不猜最新ticket。
 
 黄金旧盈亏换算回放已禁用。`crypto_backtest.py --csv <文件>` 只检查研究OHLC，不计算CFD/AI收益。公开现货行情不能冒充CFD可执行报价。离线mock只证明代码通路，不证明实际AI频率、费用、收益或盈利。

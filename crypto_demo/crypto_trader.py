@@ -1863,6 +1863,8 @@ class FibVolumePATrader:
         self.positions_known = None
         self._entry_clock_defer_markers = None
         self._entry_clock_defer_reasons = set()
+        self._guardian_data_wait = None
+        self._guardian_data_wait_at = 0.0
 
     def crypto_account_ready(self, empty=False):
         account = mt5.account_info()
@@ -2472,15 +2474,29 @@ class FibVolumePATrader:
         logger.info(f"🛡️ 初始化护盘状态 ticket={ticket}, direction={direction}, risk={state.risk:.2f}")
         return state
 
+    def guardian_data_unavailable(self, exc):
+        signature = (type(exc).__name__, getattr(exc, "reason", str(exc)))
+        now = time.time()
+        if signature != self._guardian_data_wait or now-self._guardian_data_wait_at >= 30:
+            logger.warning("护盘等待有效数据：%s；保留原护盘状态，下轮重新采集", exc)
+            self._guardian_data_wait_at = now
+        self._guardian_data_wait = signature
+
+    def guardian_data_ready(self):
+        if self._guardian_data_wait is not None:
+            logger.info("护盘行情恢复，继续原持仓护盘")
+            self._guardian_data_wait = None
+
     def run_guardian(self):
         # Validate the observation before lifecycle reconciliation or price-state writes.
         try:
             positions = self.guard_strategy_lifecycle(None)
         except risk.RiskError as exc:
-            logger.warning("护盘跳过：%s", exc)
+            self.guardian_data_unavailable(exc)
             return
         # Frozen deadlines above remain independent of the optional ATR guardian.
         if not GUARDIAN_ENABLED:
+            self.guardian_data_ready()
             return
         if positions:
             try:
@@ -2490,9 +2506,14 @@ class FibVolumePATrader:
                 df_m5 = self.get_rates(mt5.TIMEFRAME_M5, 120, shift=1)
                 atr = risk.number(calculate_atr(df_m5) if len(df_m5) >= 20 else 0.0)
                 self.crypto_account_ready()
+                # Rates may take time: only the final fresh observation may update extrema/SL.
+                tick = mt5.symbol_info_tick(SYMBOL)
+                crypto_quote_prices(tick)
+                spec = risk.spec_values(contract_spec())
             except risk.RiskError as exc:
-                logger.warning("护盘跳过：%s", exc)
+                self.guardian_data_unavailable(exc)
                 return
+        self.guardian_data_ready()
         active_tickets = {int(pos.ticket) for pos in positions}
         for ticket in list(self.guardian_states.keys()):
             if ticket not in active_tickets:

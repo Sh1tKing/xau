@@ -160,13 +160,12 @@ class CryptoIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 1, self.snapshots)
         self.assertEqual(self.trader.entry_contexts["123"]["strategy_contract"]["max_hold_minutes"], 60)
 
-    def assert_shared_refs_entry(self, asset, side):
+    def assert_shared_refs_entry(self, asset, side, protection_ref="/rules/price_finalization/execution_min_stop_clearance"):
         self.configure(asset, side)
         def cite_shared_facts(value):
             dimensions = value["quality_assessment"]["dimensions"]
             dimensions["structure"]["evidence_refs"] = ["/m15_ema21_distance_atr"]
-            dimensions["protection"]["evidence_refs"] = [
-                "/rules/price_finalization/execution_min_stop_clearance"]
+            dimensions["protection"]["evidence_refs"] = [protection_ref]
             return value
         status = lambda: [(stage, data.get("quality_error")) for _, stage, data in self.snapshots
                           if stage == "ai1_result"]
@@ -178,6 +177,34 @@ class CryptoIntegrationTests(unittest.TestCase):
 
     def test_eth_shared_ema_and_clearance_refs_reach_ai2(self):
         self.assert_shared_refs_entry("ETH", "sell")
+
+    def test_btc_shared_generation_floor_ref_reaches_ai2(self):
+        self.assert_shared_refs_entry("BTC", "buy", "/rules/price_finalization/generation_min_risk")
+
+    def test_eth_shared_generation_floor_ref_reaches_ai2(self):
+        self.assert_shared_refs_entry("ETH", "sell", "/rules/price_finalization/generation_min_risk")
+
+    def assert_candidate_target_refs_entry(self, asset, side):
+        self.configure(asset, side)
+        def cite_selected_target(value):
+            value["quality_assessment"]["dimensions"]["target"]["evidence_refs"] = [
+                "/opportunities/0/strategy_contract/target_max_reference_r"]
+            return value
+        self.assertEqual(self.run_entry(mutate=cite_selected_target).call_count, 2, self.snapshots)
+        entry = json.loads(self.requests[0]["messages"][0]["content"].split("\n", 1)[1])
+        review = json.loads(self.requests[1]["messages"][0]["content"].split("\n", 1)[1])
+        self.assertNotIn("target_max_reference_r", entry["rules"]["price_finalization"])
+        self.assertNotIn("reference", entry["rules"]["price_finalization"])
+        contract = entry["opportunities"][0]["strategy_contract"]
+        self.assertEqual(review["market_evidence"]["rules"]["price_finalization"]["target_max_reference_r"],
+                         contract["target_max_reference_r"])
+        self.assertEqual(len(self.sent), 1, self.snapshots)
+
+    def test_btc_pool_target_is_scoped_then_restored_for_ai2(self):
+        self.assert_candidate_target_refs_entry("BTC", "buy")
+
+    def test_eth_pool_target_is_scoped_then_restored_for_ai2(self):
+        self.assert_candidate_target_refs_entry("ETH", "sell")
 
     def test_btc_sell_actual_chain(self):
         self.configure("BTC", "sell")
@@ -773,6 +800,140 @@ class CryptoIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(self.trader.pending_order.read())
         with self.assertRaises(risk.RiskError):
             self.trader.crypto_account_ready(empty=True)
+
+    def synchronous_ai3_threads(self, target=None, args=(), **kwargs):
+        return NS(start=lambda: target(*args))
+
+    def test_ai3_loop_waits_future_m1_and_retries_same_bar_once(self):
+        self.seed_protected_position("sell")
+        bar_utc = int(self.now//60)*60+60
+        self.now = bar_utc-.081
+        self.tick.time = bar_utc+10800
+        self.tick.time_msc = self.tick.time*1000
+        for frame in self.frames:
+            frame["time"] += 10800
+        self.positions[0].time += 10800
+        polls = []
+        def sleep(_):
+            polls.append(self.trader._ai3_consumed_bar_time)
+            if len(polls) == 1:
+                self.now = bar_utc+.5
+            elif len(polls) == 3:
+                self.trader._stop.set()
+        with patch.dict(ai.os.environ, {"CRYPTO_SERVER_UTC_OFFSET_HOURS":"3"}), \
+             patch.object(ai, "attach_ai_logger", return_value="mock.log"), \
+             patch.object(self.trader, "reconcile_entry_contexts"), \
+             patch.object(self.trader, "notify_lines"), \
+             patch.object(self.trader, "process_manual_requests", return_value=False), \
+             patch.object(self.trader, "latest_bar_time", side_effect=lambda tf: self.tick.time if tf == base.mt5.TIMEFRAME_M1 else 0), \
+             patch.object(base, "is_structure_failure", return_value=(False,"")), \
+             patch.object(ai.threading, "Thread", side_effect=self.synchronous_ai3_threads), \
+             patch.object(ai.time, "sleep", side_effect=sleep), \
+             patch.object(ai.requests, "post", return_value=Response(dict(action="hold",ticket=123,new_stop_loss=0,reasoning="原持仓继续"))) as post, \
+             patch.object(base.logger, "error") as error:
+            self.trader._run_connected()
+        self.assertEqual(polls, [0,self.tick.time,self.tick.time])
+        self.assertEqual(post.call_count,1)
+        error.assert_not_called()
+        self.assertIn("123",self.trader.entry_contexts)
+
+    def test_ai3_invalid_quote_deferred_and_fresh_same_bar_resumes(self):
+        self.seed_protected_position()
+        fresh = copy.deepcopy(self.tick)
+        self.tick.time -= 31
+        before = self.protected_state()
+        bar = int(self.now//60)*60
+        seq = self.trader.claim_task("ai3",bar,ai.AI3_TAKEOVER_SEC)
+        with patch.object(ai.requests,"post") as post, patch.object(self.trader,"alert_api_failure") as alert, patch.object(base.logger,"error") as error:
+            self.trader.ai3_task(bar,seq)
+            post.assert_not_called()
+            alert.assert_not_called()
+            error.assert_not_called()
+        self.assertEqual(self.protected_state(),before)
+        self.assertFalse(self.trader._ai3_inflight)
+        self.assertEqual(self.trader._ai3_consumed_bar_time,0)
+        self.tick = fresh
+        with patch.object(ai.threading,"Thread",side_effect=self.synchronous_ai3_threads), patch.object(ai.requests,"post",return_value=Response(dict(action="hold",ticket=123,new_stop_loss=0,reasoning="继续"))) as post:
+            self.assertTrue(self.trader.dispatch_ai3(bar))
+            self.assertFalse(self.trader.dispatch_ai3(bar))
+        self.assertEqual(post.call_count,1)
+
+    def test_ai3_fresh_quote_waits_for_current_m1_boundary(self):
+        self.seed_protected_position()
+        marker = int(self.now//60)*60+60
+        with patch.object(ai.threading,"Thread",side_effect=self.synchronous_ai3_threads), patch.object(ai.requests,"post",return_value=Response(dict(action="hold",ticket=123,new_stop_loss=0,reasoning="继续"))) as post, patch.object(base.logger,"info") as info:
+            self.assertFalse(self.trader.dispatch_ai3(marker))
+            self.now += .5
+            self.assertFalse(self.trader.dispatch_ai3(marker))
+            self.assertEqual(info.call_count,1)
+            self.assertEqual(self.trader._ai3_seq,0)
+            post.assert_not_called()
+            self.now = marker+.5
+            self.tick.time = marker
+            self.assertTrue(self.trader.dispatch_ai3(marker))
+            self.assertEqual(post.call_count,1)
+
+    def test_ai3_invalid_final_refresh_does_not_consume_request_bar(self):
+        self.seed_protected_position()
+        bar = int(self.now//60)*60
+        collect = self.trader.collect_ai3_snapshot
+        reads = []
+        def refresh(expected_tickets=None):
+            reads.append(expected_tickets)
+            if expected_tickets is not None:
+                self.tick.time = int(self.now-31)
+            return collect(expected_tickets)
+        seq = self.trader.claim_task("ai3",bar,ai.AI3_TAKEOVER_SEC)
+        with patch.object(self.trader,"collect_ai3_snapshot",side_effect=refresh), patch.object(ai.requests,"post") as post, patch.object(base.logger,"error") as error:
+            self.trader.ai3_task(bar,seq)
+            post.assert_not_called()
+            error.assert_not_called()
+        self.assertEqual(len(reads),2)
+        self.assertEqual(self.trader._ai3_consumed_bar_time,0)
+        self.assertFalse(self.trader._ai3_inflight)
+
+    def test_ai3_read_timeout_does_not_repay_same_minute(self):
+        self.seed_protected_position()
+        bar = int(self.now//60)*60
+        with patch.object(ai.threading,"Thread",side_effect=self.synchronous_ai3_threads), \
+             patch.object(ai.requests,"post",side_effect=ai.requests.ReadTimeout("mock")) as post, \
+             patch.object(self.trader,"alert_api_failure"):
+            self.assertTrue(self.trader.dispatch_ai3(bar))
+            self.assertFalse(self.trader.dispatch_ai3(bar))
+            self.assertEqual(post.call_count,1)
+            self.now += 60
+            self.tick.time = int(self.now)
+            self.assertTrue(self.trader.dispatch_ai3(bar+60))
+            self.assertEqual(post.call_count,2)
+
+    def test_local_guard_invalid_final_quote_preserves_state(self):
+        self.seed_protected_position()
+        before = self.protected_state()
+        get_rates = self.trader.get_rates
+        def stale_after_rates(*args,**kwargs):
+            frame = get_rates(*args,**kwargs)
+            self.tick.time = int(self.now-31)
+            return frame
+        with patch.object(base,"GUARDIAN_ENABLED",True), patch.object(self.trader,"get_rates",side_effect=stale_after_rates), \
+             patch.object(self.trader,"close_position_by_ticket") as close, patch.object(self.trader,"modify_position_sl") as modify:
+            self.trader.run_guardian()
+            close.assert_not_called()
+            modify.assert_not_called()
+        self.assertEqual(self.protected_state(),before)
+
+    def test_guard_quote_wait_logs_reason_then_recovery(self):
+        self.seed_protected_position()
+        with patch.object(base,"GUARDIAN_ENABLED",False), patch.object(base.logger,"warning") as warning, patch.object(base.logger,"info") as info:
+            self.tick.time = int(self.now-31)
+            self.trader.run_guardian()
+            self.trader.run_guardian()
+            self.assertEqual(warning.call_count,1)
+            self.tick.time = int(self.now+1)
+            self.trader.run_guardian()
+            self.assertEqual(warning.call_count,2)
+            self.tick.time = int(self.now)
+            self.trader.run_guardian()
+            self.assertTrue(any("护盘行情恢复" in str(item) for item in info.call_args_list))
 
     def test_freshness_exact_hour_stale_and_explicit_offset(self):
         self.configure()
