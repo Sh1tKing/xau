@@ -49,6 +49,24 @@ def reserve(payload, identifier, dimension, severity="minor", cause="volume", ev
     card["dimensions"][dimension]["reservation_ids"].append(identifier)
 
 
+def pooled_sample(direction="sell"):
+    pack, payload = sample(direction)
+    pack["opportunities"] = [
+        {"opportunity_id": "selected", "action": direction,
+         "strategy_evidence": {direction: {"evidence": {"closed_trigger": {"confirmed": True}}}}},
+        {"opportunity_id": "other", "action": direction},
+    ]
+    pack["rules"] = {"min_rr": 1.5, "price_finalization": {
+        "execution_min_stop_clearance": .3, "target_max_reference_r": 2.5}}
+    payload["opportunity_id"] = "selected"
+    payload["quality_assessment"]["version"] = ai.QUALITY_VERSION
+    payload["quality_assessment"].pop("reservations")
+    for item in payload["quality_assessment"]["dimensions"].values():
+        item.pop("reservation_ids")
+        item["reservations"] = []
+    return pack, payload
+
+
 class QualityScorecardTests(unittest.TestCase):
     def setUp(self):
         from crypto_demo.tests.test_crypto_risk import specification
@@ -148,6 +166,68 @@ class QualityScorecardTests(unittest.TestCase):
         pack, payload = sample()
         payload["quality_assessment"]["dimensions"]["trigger"]["level"] = []
         self.assertTrue(ai.normalize_ai1_quality(payload, pack)[1])
+
+    def test_pool_accepts_shared_ema_and_execution_clearance_without_changing_action(self):
+        for direction in ("buy", "sell"):
+            for action in (direction, "no"):
+                with self.subTest(direction=direction, action=action):
+                    pack, payload = pooled_sample(direction)
+                    payload["action"] = action
+                    payload["quality_assessment"]["dimensions"]["structure"]["evidence_refs"] = [
+                        "/m15_ema21_distance_atr"]
+                    payload["quality_assessment"]["dimensions"]["protection"]["evidence_refs"] = [
+                        "/rules/price_finalization/execution_min_stop_clearance"]
+                    if action == "no":
+                        payload["wait_basis"] = [{"code": "hard_limit", "reason": "Current protective clearance is insufficient",
+                            "evidence_refs": ["/rules/price_finalization/execution_min_stop_clearance"]}]
+                    original = copy.deepcopy(payload)
+                    normalized, error = ai.normalize_ai1_quality(payload, pack)
+                    self.assertFalse(error, error)
+                    self.assertEqual(normalized["action"], action)
+                    self.assertEqual(normalized["quality_score"], 80)
+                    self.assertEqual(payload, original)
+
+    def test_pool_still_rejects_missing_shared_fact_and_unsafe_aliases(self):
+        pointers = (
+            "/rules", "/rules/price_finalization", "/rules/price_finalization/target_max_reference_r",
+            "/local_plan_feasibility", "/computed_evidence/fib",
+            "/opportunities/1/action", "/opportunities/0/strategy_evidence/buy",
+            "/opportunities/0/host_verified_analysis_checkpoint",
+            "/opportunities/0/local_plan/details/candidates/0/price",
+        )
+        for pointer in pointers:
+            with self.subTest(pointer=pointer):
+                pack, payload = pooled_sample()
+                pack["local_plan_feasibility"] = {"available": True}
+                candidate = pack["opportunities"][0]
+                candidate["strategy_evidence"]["buy"] = {"score": 80}
+                candidate["host_verified_analysis_checkpoint"] = {"verified": True}
+                candidate["local_plan"] = {"details": {"candidates": [{"price": 100}]}}
+                self.assertTrue(ai._evidence_pointer_exists(pack, pointer))
+                payload["quality_assessment"]["dimensions"]["structure"]["evidence_refs"] = [pointer]
+                self.assertIn("证据隔离拒绝", ai.normalize_ai1_quality(payload, pack)[1])
+        for pointer in ("/m15_ema21_distance_atr", "/rules/price_finalization/execution_min_stop_clearance"):
+            pack, payload = pooled_sample()
+            if pointer.startswith("/rules/"):
+                pack["rules"]["price_finalization"].pop("execution_min_stop_clearance")
+            else:
+                pack.pop("m15_ema21_distance_atr")
+            payload["quality_assessment"]["dimensions"]["structure"]["evidence_refs"] = [pointer]
+            self.assertIn("证据路径无效", ai.normalize_ai1_quality(payload, pack)[1])
+
+    def test_pool_rubric_examples_match_sent_evidence_scope(self):
+        pack, payload = pooled_sample()
+        pack["quality_rubric"] = ai.quality_rubric(analysis_mode=True)
+        sent = ai.compact_market_pack(pack)
+        paths = sent["quality_rubric"]["reference_paths"]
+        self.assertIn("/m15_ema21_distance_atr", paths)
+        self.assertIn("/rules/price_finalization/execution_min_stop_clearance", paths)
+        self.assertNotIn("/local_plan_feasibility", paths)
+        self.assertNotIn("/computed_evidence/fib", paths)
+        for pointer in paths:
+            with self.subTest(pointer=pointer):
+                payload["quality_assessment"]["dimensions"]["structure"]["evidence_refs"] = [pointer]
+                self.assertFalse(ai.normalize_ai1_quality(payload, sent)[1])
 
 
 if __name__ == "__main__":

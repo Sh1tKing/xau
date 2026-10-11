@@ -159,6 +159,25 @@ class CryptoIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 1, self.snapshots)
         self.assertEqual(self.trader.entry_contexts["123"]["strategy_contract"]["max_hold_minutes"], 60)
 
+    def assert_shared_refs_entry(self, asset, side):
+        self.configure(asset, side)
+        def cite_shared_facts(value):
+            dimensions = value["quality_assessment"]["dimensions"]
+            dimensions["structure"]["evidence_refs"] = ["/m15_ema21_distance_atr"]
+            dimensions["protection"]["evidence_refs"] = [
+                "/rules/price_finalization/execution_min_stop_clearance"]
+            return value
+        status = lambda: [(stage, data.get("quality_error")) for _, stage, data in self.snapshots
+                          if stage == "ai1_result"]
+        self.assertEqual(self.run_entry(mutate=cite_shared_facts).call_count, 2, status())
+        self.assertEqual(len(self.sent), 1, status())
+
+    def test_btc_shared_ema_and_clearance_refs_reach_ai2(self):
+        self.assert_shared_refs_entry("BTC", "buy")
+
+    def test_eth_shared_ema_and_clearance_refs_reach_ai2(self):
+        self.assert_shared_refs_entry("ETH", "sell")
+
     def test_btc_sell_actual_chain(self):
         self.configure("BTC", "sell")
         self.assertEqual(self.run_entry().call_count, 2, self.snapshots)

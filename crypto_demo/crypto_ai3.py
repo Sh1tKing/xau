@@ -99,6 +99,19 @@ QUALITY_DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_e
 QUALITY_CAUSES = {"volume", "shallow_retrace", "trigger_weakness", "opposing_structure", "stop_vulnerability", "target_uncertainty", "execution_drift", "missing_data", "hard_limit"}
 LEGACY_QUALITY_VERSION = "entry-quality-v1"
 QUALITY_VERSION = "entry-quality-v2"
+AI1_EVIDENCE_SCOPE_VERSION = "crypto-evidence-scope-v1"
+# Pool evidence must distinguish common source facts from winner-specific aliases.
+AI1_SHARED_EVIDENCE_ROOTS = (
+    "m15_bars", "m5_bars", "h1_bars", "patterns", "live_quote", "atr",
+    "h1_trend", "m15_trend", "m15_ema21", "m15_ema21_distance_atr", "bar_closure",
+)
+AI1_SHARED_RULE_PATHS = (
+    ("rules", "h1_sets_direction"), ("rules", "max_stop_abs"),
+    ("rules", "chase_max_atr"), ("rules", "min_rr"),
+    ("rules", "price_finalization", "execution_min_stop_clearance"),
+    ("rules", "price_finalization", "execution_clearance_price"),
+    ("rules", "price_finalization", "generation_floor_is_not_execution_floor"),
+)
 
 base.MAGIC = AI_MAGIC
 base.ENABLE_TRADING = AI_ENABLE_TRADING
@@ -136,7 +149,7 @@ AI2_INSTRUCTIONS = (
 )
 AI1_INSTRUCTIONS += (
     "输入存在opportunities时一次自主选择一个opportunity_id，包括no也必须指明评估候选。动作及质量方向绑定该候选，"
-    "只引用自身/opportunities/原索引/下证据或共享OHLC/price_action/patterns，不能借用其他候选或本地赢家别名。"
+    "只引用自身/opportunities/原索引/下证据或quality_rubric.reference_paths列出的共享行情及公共风险叶子字段，不能借用其他候选或本地赢家别名。"
     "本地分低或参考方案失败不剥夺自主提出安全方案的权限；patterns仅几何与位置事实，不是吞没硬门或首轮趋势判断。"
     "live_quote是本次请求重新采集的报价，不是参考K线收盘价；按当前报价核实方案可执行性，不能把止损贴近现价形成的高RR当作质量提升。"
     "local_plan_feasibility只评价原本地SL/TP，不是否决其他自主方案的全局开关；本地no或该方案不可执行时，仍可提出有证据的其他合法方案。"
@@ -485,7 +498,8 @@ def opportunity_selection(payload, pack):
                         if own and "strategy_evidence" in parts:
                             evidence_at = parts.index("strategy_evidence")
                             own = len(parts) > evidence_at + 1 and parts[evidence_at + 1] == candidate["action"]
-                        shared = parts and parts[0] in ("m15_bars", "m5_bars", "h1_bars", "patterns", "live_quote", "atr", "h1_trend", "m15_trend", "m15_ema21", "bar_closure")
+                        shared = parts and parts[0] in AI1_SHARED_EVIDENCE_ROOTS
+                        shared = shared or tuple(parts) in AI1_SHARED_RULE_PATHS
                         shared = shared or parts[:2] == ["computed_evidence", "price_action"]
                         if not (own or shared) or any(p in ("host_verified_region", "host_verified_entry_event", "host_verified_analysis_checkpoint", "candidates") for p in parts):
                             return "AI-1证据隔离拒绝: " + pointer
@@ -776,6 +790,20 @@ def compact_market_pack(pack):
         times = [bar.get("time") for bar in result.get(bars_key, [])[-count:]]
         if key in windows and windows[key] == times:
             windows.pop(key)
+    if "opportunities" in result and "quality_rubric" in result:
+        # Advertise only paths that survive compaction and the same isolation gate.
+        # Whole /rules and reference/target aliases may belong to a different plan.
+        pointers = (["/" + key for key in AI1_SHARED_EVIDENCE_ROOTS]
+                    + ["/computed_evidence/price_action"]
+                    + ["/" + "/".join(parts) for parts in AI1_SHARED_RULE_PATHS])
+        rubric = result["quality_rubric"]
+        rubric["reference_scope_version"] = AI1_EVIDENCE_SCOPE_VERSION
+        rubric["reference_paths"] = [pointer for pointer in pointers if _evidence_pointer_exists(result, pointer)]
+        rubric["reference_path_policy"] = (
+            "路径相对本次输入根对象；reference_paths列出可引用的共享事实。候选路径以/opportunities/实际原索引/为前缀，"
+            "只引用已选opportunity_id内strategy_evidence/所选方向、local_plan_feasibility、reference_price或strategy_contract下存在的字段，不照抄占位符。"
+            "不引用其他候选、内部host标记或顶层本地赢家别名；公共风险只引用列出的具体叶子字段，不引用整个/rules。"
+        )
     # Stable rules/rubric precede changing quotes and bars for prefix caching.
     stable = ("symbol", "timeframe", "direction_timeframe", "bars_are_closed",
               "rules", "quality_rubric", "strategy_framework", "strategy_contract", "evidence_windows", "bar_closure")
@@ -3054,6 +3082,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                {s.id: s.entry_reference for s in strategies.strategies if s.enabled})
         )
         base.logger.info("AI质量评分=%s，等级分值=%s，门槛=%s（非胜率）", QUALITY_VERSION, QUALITY_LEVEL_POINTS, AI_CONFIDENCE)
+        base.logger.info("AI证据引用范围=%s 共享行情及公共风险叶子字段可引用，原候选/方向/真实路径隔离保留", AI1_EVIDENCE_SCOPE_VERSION)
         base.logger.info("止损价格=%s BUY向下/SELL向上量化，严格保留M5极值缓冲与止损上限", base.STOP_PRICE_VERSION)
         base.logger.info("AI行情刷新=%s 每次POST采集新行情，AI-2及下单前复核现价，旧提案不跨收盘K线执行",
                          MARKET_FRESHNESS_VERSION)

@@ -11,3 +11,5 @@ USD DEMO only. Observe/dry-run prohibit all order mutations. Entry inspects all 
 Tests use explicit mocks/placeholders, no actual .env/network. Engineering paths are not actual AI results or returns.
 
 Feishu notifications are opt-in through private .env, independent of the trading mode. Never send a real test notification unless the user explicitly requests it; use mocked transport to verify the switch, signing and delivery results.
+
+AI-1 pool evidence scope is crypto-evidence-scope-v1. The common M15 EMA distance and named common execution-risk leaves are valid evidence. Prompt reference examples must use the same scope and paths that survive compaction. Keep selected candidate/index/direction isolation, reject internal host markers and winner aliases, and require actual non-null paths. Never rewrite an invalid model reply into a trade or resend paid requests to repair a scorecard. On 2026-10-11 the two synced ETH replies became valid no/64 and no/56 after fixing scope, with spread2.0 > .25*M15 ATR; this is not evidence they should open a trade.

@@ -8,10 +8,10 @@
   "sha256": {
     ".env.example": "d52f74113a37e6b7adcac23a183d2f326ffb32ecacd286d4287f81047c0a7158",
     ".gitignore": "11aa96c5f85644b81f7dbbdfc0fe124708f96fc2d68f23de999266224bebe03c",
-    "AGENTS.md": "40d7093a49a0fa725bbcd9b0ee784c4873b225fb419df7f2ad40e854bd690857",
+    "AGENTS.md": "7cfe467306739ec072786fd681ab08375fb1f63e6fecec4ce2be297a0909a909",
     "README.md": "a5f6efa62e89b26193905357bf62018f1cde59d65b5a1beea368367c346860ad",
     "__init__.py": "a8a0632a9d790c8a0ce1b0bda1914d5770cbdcb9feda10d894e4efd1d8718e03",
-    "crypto_ai3.py": "73d1ee99b2b6397997098bde96a661df2c9bf65d72189d9988012bada0a3d866",
+    "crypto_ai3.py": "589497c6829c56cd5b5ca7436c521e71e7e4b990dd1c90507a2edd64a371262b",
     "crypto_backtest.py": "72a1080cd0401f8bbd33d697bbad88fd5cbdecf389c900b1b7810cbfab567b34",
     "crypto_trader.py": "eb8b53cc5068310598c232db18ee928dd9decc09780f93c6a4f7910df3c7c8c2",
     "instance_lock.py": "1f8b0bc5fce2cd1a0381daff37d99da127c8a19ffdc6669fa55aba2f4881fab9",
@@ -44,10 +44,10 @@
     "tests/bootstrap.py": "b5756e02d040fefb236d695c31647253f5a77ef12ef47f32326902f659c2a16a",
     "tests/test_ai_backup.py": "5ef63bab00f0615dfb07228597c3f48ef812596ccf595360476bcff923553491",
     "tests/test_ai_cost_control.py": "766de4244e299f7930baee533a707587a4df81789bf311df62136b375edfd8a5",
-    "tests/test_ai_quality_scorecard.py": "ea13e9b52c61bcd55d4cdf1ecb5919b05d64f63cd4f95a30e6afbcf899115d12",
+    "tests/test_ai_quality_scorecard.py": "b185eb8efc7b76b3f24a8850c7f9e7809e0d7f56aa06c40076ac75e1451701a5",
     "tests/test_ai_response_contract.py": "e291b3b654a6b8afd17bbd111c4ee70950d628466333e2d7f8d865c77b03739f",
     "tests/test_crypto_feishu.py": "b1cc748bdedf12b3dd59dfbd4985c7fa0c30fbed889d2c13514c57c3a757f3ff",
-    "tests/test_crypto_integration.py": "d36d82a919f6b1ed10934b57dd27503ac8960bbae5ea124cf746c0c38cae30cb",
+    "tests/test_crypto_integration.py": "e3e4b71cc04f57f57785acf45062d3f7c9888954cebfe54f05a0525d49901bd7",
     "tests/test_crypto_risk.py": "cd6ddf5a2b99ac53f4f435cc855397cdf3be1a46bea112546b4d49dee70e6a26"
   }
 }
