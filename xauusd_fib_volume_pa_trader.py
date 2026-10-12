@@ -1274,7 +1274,9 @@ def review_entry(
     return True, f"二审通过: RR={rr:.2f}, H1={h1_trend}, M15={m15_trend}"
 
 def sl_change_is_tighter(direction: str, current_sl: float, new_sl: float) -> bool:
-    if new_sl <= 0:
+    if direction not in ("BUY", "SELL"):
+        return False
+    if not all(math.isfinite(value) for value in (current_sl, new_sl)) or current_sl < 0 or new_sl <= 0:
         return False
     if current_sl <= 0:
         return True
@@ -2262,34 +2264,95 @@ class FibVolumePATrader:
         return False
 
     def modify_position_sl(self, position, new_sl: float, reason: str) -> bool:
-        current_sl = float(getattr(position, "sl", 0.0) or 0.0)
-        current_tp = float(getattr(position, "tp", 0.0) or 0.0)
         ticket = int(getattr(position, "ticket", 0))
-        if ticket <= 0 or new_sl <= 0:
+        try:
+            proposed_sl = float(new_sl)
+        except (TypeError, ValueError, OverflowError):
             return False
-        direction = "BUY" if getattr(position, "type", None) == mt5.POSITION_TYPE_BUY else "SELL"
+        if ticket <= 0 or not math.isfinite(proposed_sl) or proposed_sl <= 0:
+            return False
+
+        # The caller's object may predate another guardian/AI-3 modification.
+        # ThreeAITrader holds its shared MT5 lock across this read and order_send.
+        live = mt5.positions_get(ticket=ticket)
+        if live is None or len(live) != 1:
+            logger.info("护盘修改跳过：最新持仓未知或已消失 ticket=%s", ticket)
+            return False
+        live = live[0]
+        expected_identifier = int(getattr(position, "identifier", 0) or 0)
+        if (int(getattr(live, "ticket", 0)) != ticket
+                or getattr(live, "symbol", None) != SYMBOL
+                or int(getattr(live, "magic", 0) or 0) != MAGIC
+                or getattr(live, "type", None) != getattr(position, "type", None)
+                or expected_identifier and int(getattr(live, "identifier", 0) or 0) != expected_identifier):
+            logger.warning("护盘修改拒绝：最新持仓身份不符 ticket=%s", ticket)
+            return False
+        if live.type not in (mt5.POSITION_TYPE_BUY, mt5.POSITION_TYPE_SELL):
+            return False
+        direction = "BUY" if live.type == mt5.POSITION_TYPE_BUY else "SELL"
+        current_sl = float(live.sl or 0.0)
+        current_tp = float(live.tp or 0.0)
+        info = mt5.symbol_info(SYMBOL)
+        tick = mt5.symbol_info_tick(SYMBOL)
+        try:
+            point = float(info.point)
+            tick_size = float(info.trade_tick_size or point)
+            digits = int(info.digits)
+            stops = float(info.trade_stops_level)
+            freeze = float(info.trade_freeze_level)
+            bid, ask = float(tick.bid), float(tick.ask)
+            if (not all(math.isfinite(value) for value in
+                        (point, tick_size, stops, freeze, bid, ask, current_sl, current_tp))
+                    or min(point, tick_size, bid, ask) <= 0 or ask < bid
+                    or min(stops, freeze, current_sl, current_tp) < 0 or not 0 <= digits <= 10):
+                raise ValueError("invalid broker stop facts")
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            logger.info("护盘修改跳过：报价或经纪商止损参数无效 ticket=%s", ticket)
+            return False
+        rounding = ROUND_FLOOR if direction == "BUY" else ROUND_CEILING
+        grid = Decimal(str(tick_size))
+        new_sl = round(float((Decimal(str(proposed_sl)) / grid).to_integral_value(rounding=rounding) * grid), digits)
         if not sl_change_is_tighter(direction, current_sl, new_sl):
-            logger.info(f"护盘拒绝放宽止损 ticket={ticket}: {current_sl} -> {round(new_sl, 2)} ({reason})")
+            logger.info("护盘拒绝放宽或重复止损 ticket=%s: 最新SL=%s 建议SL=%s (%s)",
+                        ticket, current_sl, new_sl, reason)
+            return False
+        close_price = bid if direction == "BUY" else ask
+        sign = 1 if direction == "BUY" else -1
+        # Validate the exact rounded request. Keep one tick of execution room;
+        # never widen an AI/local proposal to manufacture a valid stop.
+        required_gap = max(stops, freeze) * point + tick_size
+        stop_gap = sign * (close_price - new_sl)
+        frozen_sl = current_sl > 0 and sign * (close_price - current_sl) <= freeze * point
+        frozen_tp = current_tp > 0 and sign * (current_tp - close_price) <= freeze * point
+        invalid_tp = current_tp > 0 and sign * (current_tp - close_price) < stops * point
+        if stop_gap + tick_size * 1e-8 < required_gap or frozen_sl or frozen_tp or invalid_tp:
+            logger.info("护盘修改暂缓 ticket=%s direction=%s current_sl=%s target_sl=%s tp=%s "
+                        "bid=%s ask=%s point=%s tick_size=%s stops_level=%s freeze_level=%s (%s)",
+                        ticket, direction, current_sl, new_sl, current_tp, bid, ask,
+                        point, tick_size, stops, freeze, reason)
             return False
 
         request_body = {
             "action": mt5.TRADE_ACTION_SLTP,
             "symbol": SYMBOL,
             "position": ticket,
-            "sl": round(new_sl, 2),
+            "sl": new_sl,
             "tp": current_tp,
         }
         if not ENABLE_TRADING:
-            logger.info(f"🧪 DRY-RUN 修改SL ticket={ticket}: {current_sl} -> {round(new_sl, 2)} ({reason})")
+            logger.info(f"🧪 DRY-RUN 修改SL ticket={ticket}: {current_sl} -> {new_sl} ({reason})")
             return True
 
         result = mt5.order_send(request_body)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-            logger.info(f"🛡️ 护盘SL更新 ticket={ticket}: {current_sl} -> {round(new_sl, 2)} ({reason})")
+            logger.info(f"🛡️ 护盘SL更新 ticket={ticket}: {current_sl} -> {new_sl} ({reason})")
             return True
         retcode = result.retcode if result else "None"
         comment = result.comment if result else "无返回"
-        logger.warning(f"⚠️ 护盘SL更新失败 ticket={ticket}, retcode={retcode}, comment={comment}")
+        logger.warning("⚠️ 护盘SL更新失败 ticket=%s retcode=%s comment=%s current_sl=%s target_sl=%s "
+                       "tp=%s bid=%s ask=%s point=%s tick_size=%s stops_level=%s freeze_level=%s (%s)",
+                       ticket, retcode, comment, current_sl, new_sl, current_tp, bid, ask,
+                       point, tick_size, stops, freeze, reason)
         return False
 
     def close_position_by_ticket(self, position, reason: str) -> bool:

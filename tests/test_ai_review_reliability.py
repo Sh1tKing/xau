@@ -57,6 +57,32 @@ class ReviewReliabilityTests(unittest.TestCase):
         self.assertIsNone(event['reasoning_effort_sent'])
         self.assertEqual(event['thinking_mode_sent'], 'disabled')
 
+    def test_logged_grok_messages_route_sends_native_cap_and_disabled_switch(self):
+        with patch.dict(ai.os.environ, {'FIB_PA_AI2_THINKING':'disabled'}), \
+             patch.object(ai.requests, 'post', return_value=Response()) as post:
+            ai.call_chat('AI-2','grok-4.7','low','review instructions','live prices',120,
+                         'https://hapiopen.cc/v1/messages','mock-key')
+        data = post.call_args.kwargs['json']
+        self.assertEqual(data['max_tokens'], 4096)
+        self.assertNotIn('max_completion_tokens', data)
+        self.assertEqual(data['thinking'], {'type':'disabled'})
+        self.assertFalse(data['stream'])
+        self.assertEqual(data['system'], 'review instructions')
+        self.assertEqual(data['messages'], [{'role':'user','content':'live prices'}])
+        self.assertNotIn('reasoning_effort', data)
+        self.assertNotIn('effort', data.get('output_config', {}))
+
+    def test_logged_7814_overrun_rejects_and_quarantines_without_paid_repair(self):
+        with patch.dict(ai.os.environ, {'FIB_PA_AI2_THINKING':'disabled'}), \
+             patch.object(ai.requests,'post',return_value=self.excessive(output=7814)) as post:
+            with self.assertRaises(ai.AIRequestError): self.call(model='grok-4.7')
+            with self.assertRaises(ai.AIRequestError): self.call(model='grok-4.7')
+        self.assertEqual(post.call_count, 1)
+        event = self.events()[0]
+        self.assertEqual(event['token_limit'], 4096)
+        self.assertEqual(event['usage']['output_tokens'], 7814)
+        self.assertEqual(event['outcome'], 'token_limit_exceeded')
+
     def test_ai2_backup_only_disabled_and_blank_timeout_inherits_primary(self):
         self.backup()
         with patch.dict(ai.os.environ, {'FIB_PA_AI2_BACKUP_THINKING':'disabled',
