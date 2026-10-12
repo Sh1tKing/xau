@@ -112,6 +112,8 @@ FIB_PA_AI3_BACKUP_THINKING=
 
 ## 文件说明
 
+2026-10-12黄金AI-1引用更新 `ai1-citations-v1`：每次请求发送可引用证据目录，模型复制短ID，Python按成功请求快照解析并严格核验候选隔离；维度/保留意见/等待依据使用同一目录和动态Schema。真实共享EMA/风险字段不再误拒绝，错误旧Pointer不会被猜测修补成交易。启动日志应出现`AI-1证据引用=ai1-citations-v1`。更新必须覆盖AI脚本及完整`strategies/`（含`citations.py`），只换主脚本会缺少依赖；覆盖后由用户重启，保留服务器自己的.env及日志状态。详细诊断和请求长度影响见[验证记录](../experiments/2026-10-12-ai1-citation-contract-validation.md)。
+
 - 两个 `.py`：三AI与本地策略/交易/护盘模块。
 - `xauusd_fib_pa_backtest.py`：另附的离线回放入口；不参与`start.cmd`启动。`--offline`仅读已有缓存，普通模式会连接MT5读取历史。
 - `strategies/`：必需的框架、公共证据工具和策略定义，保留文件夹结构。更新策略只改 `definitions/*.py`；部署新框架第一次仍需自行重启。参见策略文件说明。

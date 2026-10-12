@@ -22,6 +22,8 @@ from urllib.parse import urlsplit
 
 import requests
 from strategies.evidence import _rounded_number, _bar_payload, _extreme_bar, bars_for_prompt, bar_times_for_prompt
+from strategies.citations import (VERSION as AI1_CITATION_VERSION, MISSING as _MISSING_EVIDENCE,
+                                 build_catalog, catalog_bindings, pointer_value, resolve_references, scope_allowed)
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -167,7 +169,8 @@ AI1_INSTRUCTIONS += (
     "dimension={level,reason,evidence_refs,reservations}；reservation={cause,event_group,reason,evidence_refs}，直接放入唯一归属维度，禁止另填id/dimension/severity/reservation_ids。"
     "level一次声明程度：strong=20且无保留；adequate=16且保留仅轻微；weak=8且保留是重大反证；missing=0且保留是阻断条件。weak/missing必须有保留。"
     "direction为buy/sell，dimensions是rubric五项为键的对象；reservations、wait_basis、fact_conflicts、unknowns、evidence_refs均为数组。"
-    "refs为本次输入真实JSON Pointer。每项reason≤35汉字，refs只列必要证据；同cause/event只扣一项。"
+    "本次输入有evidence_catalog时，evidence_refs只复制目录中的短ID，不手写、拼接或猜测JSON路径；目录标注所属opportunity_id和direction，只选自身组或共享组。目录base+值是Python声明的实际路径，不需要自行输出。"
+    "没有目录的旧输入才用真实JSON Pointer。每项reason≤35汉字，只列必要证据；同cause/event只扣一项。"
     "普通量/浅回撤最多轻微，不能评weak/missing；Python据level生成程度并加总，不输出自由confidence。"
     "执行止损空间问题归protection，实时RR不足归target，不能因报价漂移把已命中的触发评missing。"
     "no仍评允许方向，wait_basis列{code,reason,evidence_refs}，code为hard_limit/missing_structure/missing_trigger/missing_data/target_space/material_counter_evidence。"
@@ -481,14 +484,7 @@ def opportunity_selection(payload, pack):
                     for pointer in child:
                         if not isinstance(pointer, str):
                             return "AI-1证据路径无效"
-                        parts = [part.replace("~1", "/").replace("~0", "~") for part in pointer.split("/")[1:]]
-                        own = len(parts) >= 3 and parts[:2] == ["opportunities", str(index)]
-                        if own and "strategy_evidence" in parts:
-                            evidence_at = parts.index("strategy_evidence")
-                            own = len(parts) > evidence_at + 1 and parts[evidence_at + 1] == candidate["action"]
-                        shared = parts and parts[0] in ("m15_bars", "m5_bars", "h1_bars", "patterns", "live_quote", "atr", "h1_trend", "m15_trend", "m15_ema21", "bar_closure")
-                        shared = shared or parts[:2] == ["computed_evidence", "price_action"]
-                        if not (own or shared) or any(p in ("host_verified_region", "host_verified_entry_event", "host_verified_analysis_checkpoint", "candidates") for p in parts):
+                        if not scope_allowed(pointer, index, candidate["action"]):
                             return "AI-1证据隔离拒绝: " + pointer
                 error = check_refs(child)
                 if error:
@@ -801,6 +797,18 @@ def compact_review_pack(review):
     return {"market_evidence": result.pop("market_evidence"), **result}
 
 
+def prepare_ai1_request_pack(pack):
+    """Describe only paths that survive request compaction, with snapshot-bound IDs."""
+    request = compact_market_pack(pack)
+    request["evidence_catalog"] = build_catalog(request)
+    rubric = request.setdefault("quality_rubric", {})
+    rubric.pop("reference_paths", None)  # Static legacy examples were invalid in pool mode.
+    rubric["reference_path_policy"] = ("evidence_refs只复制本次evidence_catalog.groups.refs的ID键；"
+        "路径由该组base加对应值定义，只用共享组或所选opportunity_id/方向组。不能猜路径或沿用旧快照ID。"
+        "volume和bar_behavior是同级事实；候选参数在strategy_contract，数据在strategy_evidence/方向/evidence。")
+    return request
+
+
 def plan_feasibility(action, reference_entry, stop_loss, take_profit, quote, atr=None, ema21=None):
     """Snapshot arithmetic for one plan, never a substitute for order-time checks."""
     result = {"action": action, "reference_entry": reference_entry, "stop_loss": stop_loss,
@@ -929,23 +937,19 @@ def quality_rubric(analysis_mode=False):
 
 
 def _evidence_pointer_exists(pack, pointer):
-    if not isinstance(pointer, str) or not pointer.startswith("/"):
-        return False
-    value = pack
-    try:
-        for token in pointer[1:].split("/"):
-            token = token.replace("~1", "/").replace("~0", "~")
-            if isinstance(value, list) and (not token.isascii() or not token.isdigit()
-                                           or len(token) > 1 and token.startswith("0")):
-                return False
-            value = value[int(token)] if isinstance(value, list) else value[token]
-        return value is not None
-    except (KeyError, IndexError, TypeError, ValueError):
-        return False
+    value = pointer_value(pack, pointer)
+    return value is not _MISSING_EVIDENCE and value is not None
 
 
 def normalize_ai1_quality(payload, pack):
     """Decode the declared contract; never repair legacy cards into trades."""
+    card = payload.get("quality_assessment") if isinstance(payload, dict) else None
+    if isinstance(card, dict) and "wait_basis" in card:
+        return payload, "AI-1字段层级错误: wait_basis必须位于顶层，不能嵌在quality_assessment内"
+    try:
+        payload = resolve_references(payload, pack)
+    except ValueError as exc:
+        return payload, str(exc)
     selection, error = opportunity_selection(payload, pack)
     if error:
         return payload, error
@@ -1198,30 +1202,40 @@ def _object_schema(properties):
     return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
 
 
-def response_json_schema(role):
+def response_json_schema(role, request_pack=None):
     text = {"type": "string"}
     texts = {"type": "array", "items": text}
     price = {"anyOf": [{"type": "number"}, {"type": "null"}]}
     if role == "AI-1":
+        evidence_ids = catalog_bindings(request_pack) if request_pack is not None else {}
+        refs = ({"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidence_ref"}}
+                if evidence_ids else texts)
         reservation = _object_schema({
             "cause": {"type": "string", "enum": sorted(QUALITY_CAUSES)},
             "event_group": {"anyOf": [text, {"type": "null"}]},
-            "reason": text, "evidence_refs": texts})
+            "reason": text, "evidence_refs": refs})
         dimension = _object_schema({"level": {"type": "string", "enum": list(QUALITY_LEVEL_POINTS)},
-                                    "reason": text, "evidence_refs": texts,
+                                    "reason": text, "evidence_refs": refs,
                                     "reservations": {"type": "array", "items": reservation}})
         wait = _object_schema({"code": {"type": "string", "enum": ["hard_limit", "missing_structure", "missing_trigger",
                                "missing_data", "target_space", "material_counter_evidence"]},
-                               "reason": text, "evidence_refs": texts})
-        return _object_schema({
-            "opportunity_id": text,
+                               "reason": text, "evidence_refs": refs})
+        opportunities = request_pack.get("opportunities", []) if request_pack is not None else []
+        identifiers = [o["opportunity_id"] for o in opportunities if o]
+        schema = _object_schema({
+            "opportunity_id": {"type": "string", "enum": identifiers} if identifiers else text,
             "action": {"type": "string", "enum": ["buy", "sell", "no"]}, "stop_loss": price, "take_profit": price,
             "reasoning": text, "trigger_evidence": text, "invalidation": text, "target_basis": text,
             "fact_conflicts": texts, "unknowns": texts,
             "quality_assessment": _object_schema({"version": {"type": "string", "enum": [QUALITY_VERSION]},
                 "direction": {"type": "string", "enum": ["buy", "sell"]},
-                "dimensions": _object_schema({name: dimension for name in QUALITY_DIMENSIONS})}),
+                "dimensions": _object_schema({name: ({"$ref": "#/$defs/quality_dimension"} if evidence_ids else dimension)
+                                              for name in QUALITY_DIMENSIONS})}),
             "wait_basis": {"type": "array", "items": wait}})
+        if evidence_ids:
+            schema["$defs"] = {"evidence_ref": {"type": "string", "enum": list(evidence_ids)},
+                               "quality_dimension": dimension}
+        return schema
     if role == "AI-2":
         return _object_schema({"decision": {"type": "string", "enum": ["APPROVE", "REJECT"]},
                                "defects": texts, "reasoning": text, "fact_conflicts": texts})
@@ -1236,9 +1250,9 @@ def ai1_json_template():
             "reasoning": "<本次结论>", "trigger_evidence": "<实际触发或缺失>",
             "invalidation": "<失效条件>", "target_basis": "<目标依据>", "fact_conflicts": [], "unknowns": [],
             "quality_assessment": {"version": QUALITY_VERSION, "direction": "buy", "dimensions": {
-                name: {"level": "adequate", "reason": "<本项证据结论>", "evidence_refs": ["/<本次真实路径>"],
+                name: {"level": "adequate", "reason": "<本项证据结论>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"],
                        "reservations": []} for name in QUALITY_DIMENSIONS}},
-            "wait_basis": [{"code": "missing_trigger", "reason": "<实际等待条件>", "evidence_refs": ["/<本次真实路径>"]}]}
+            "wait_basis": [{"code": "missing_trigger", "reason": "<实际等待条件>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}]}
 
 
 AI1_INSTRUCTIONS += (
@@ -1505,6 +1519,9 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             raise MarketSnapshotError("无法构造新的请求快照，停止本轮，不发送旧提示词")
         request_prompt = snapshot.get("prompt", prompt)
         request_instructions = snapshot.get("instructions", instructions)
+        request_schema = snapshot.get("response_schema", schema)
+        if request_schema is not None and not isinstance(request_schema, dict):
+            raise MarketSnapshotError("请求输出Schema类型无效")
         if not isinstance(request_instructions, str) or not request_instructions.strip():
             raise MarketSnapshotError("请求角色规则为空或类型无效")
         if not task_alive():
@@ -1534,7 +1551,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             if this_effort and not omit_reasoning and thinking_mode != "disabled":
                 output_config["effort"] = this_effort
             if json_mode == "schema":
-                output_config["format"] = {"type": "json_schema", "schema": schema}
+                output_config["format"] = {"type": "json_schema", "schema": request_schema}
             if output_config:
                 data["output_config"] = output_config
             headers["anthropic-version"] = "2023-06-01"
@@ -1544,7 +1561,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 data["reasoning_effort"] = this_effort
             if json_mode == "schema":
                 data["response_format"] = {"type": "json_schema", "json_schema": {
-                    "name": role.replace("-", "_").lower() + "_decision", "strict": True, "schema": schema}}
+                    "name": role.replace("-", "_").lower() + "_decision", "strict": True, "schema": request_schema}}
             elif json_mode == "object":
                 data["response_format"] = {"type": "json_object"}
         attempted = attempt
@@ -2542,7 +2559,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 base.logger.info("AI-1 任务已过期，取消请求 seq=%s" % seq)
                 return
 
-            request_pack = compact_market_pack(pack)
+            request_pack = prepare_ai1_request_pack(pack)
             scope_claimed = False
             def refresh_ai1_request():
                 nonlocal df_m15, df_h1, df_m5, local_result, pack, fib, atr, price, request_pack, scope_claimed
@@ -2552,11 +2569,12 @@ class ThreeAITrader(base.FibVolumePATrader):
                         "status": "AI not called for this refreshed scope", "local_reasoning": local_result.reasoning,
                         "blockers": pack.get("opportunity_blockers")})
                     raise MarketSnapshotError("无合法结构候选，本轮本地观望，不请求AI")
-                request_pack = compact_market_pack(pack)
+                request_pack = prepare_ai1_request_pack(pack)
                 snapshot = {"prompt": prompt_json("分析本次已收盘行情及当前报价，只输出契约JSON。", request_pack),
                             "snapshot_id": pack["snapshot_id"], "quote": pack["live_quote"],
                             "instructions": role_instructions("AI-1", request_contracts(pack)),
-                            "profile_rules": role_rules("AI-1", request_contracts(pack))}
+                            "profile_rules": role_rules("AI-1", request_contracts(pack)),
+                            "response_schema": response_json_schema("AI-1", request_pack)}
                 if not scope_claimed:
                     if not self.claim_analysis_scope(pack):
                         raise MarketSnapshotError("同分析检查点已经派发，AI not called")
@@ -2568,7 +2586,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                             self._analysis_request_scopes = scopes
                 append_decision_snapshot(decision_id, "ai1_input", {
                     "market_evidence": pack, "local_result": local_result.to_decision(), "trigger": trigger,
-                    "cost_control_version": COST_CONTROL_VERSION, "freshness_version": MARKET_FRESHNESS_VERSION})
+                    "cost_control_version": COST_CONTROL_VERSION, "freshness_version": MARKET_FRESHNESS_VERSION,
+                    "citation_version": AI1_CITATION_VERSION, "evidence_catalog": request_pack["evidence_catalog"]})
                 return snapshot
 
             ai_started = True
@@ -3034,6 +3053,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                {s.id: s.entry_reference for s in strategies.strategies if s.enabled})
         )
         base.logger.info("AI质量评分=%s，等级分值=%s，门槛=%s（非胜率）", QUALITY_VERSION, QUALITY_LEVEL_POINTS, AI_CONFIDENCE)
+        base.logger.info("AI-1证据引用=%s 每次POST声明快照绑定目录，ID解码后严格核候选隔离和事实路径，不修补错误旧引用",
+                         AI1_CITATION_VERSION)
         base.logger.info("止损价格=%s BUY向下/SELL向上量化，严格保留M5极值缓冲与止损上限", base.STOP_PRICE_VERSION)
         base.logger.info("AI行情刷新=%s 每次POST采集新行情，AI-2及下单前复核现价，旧提案不跨收盘K线执行",
                          MARKET_FRESHNESS_VERSION)
