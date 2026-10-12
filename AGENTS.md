@@ -26,7 +26,7 @@
 
 ## 当前架构
 
-独立样本 `local_guard_demo/`（2026-10-12）：用户要求纯本地完整入场+单AI异步护仓，独立文件夹且不接飞书，随后要求秒级并明确改为黄金。默认strategy.py用H1许可/真实30秒采样区间/持续约1秒突破，目标0.2秒轮询；连续回区间及20秒不足0.15R本地退出，默认2分钟期限/5秒冷却，0.5R尝试锁0.1R。只读本目录LG_配置、独立magic、0.01单仓，公共SL8/RR1.5/M5保护/追价及真实现金风险门保留，默认observe。AI满10秒才考虑派发，不下单、不阻塞本地退出，迟到回复只丢弃；token原子落盘、不确定回执不重开、原仓契约冻结，原EMA规则entry_ema.py保留供对照。lg_ticks采集实录，replay冻结策略/次报价成交/延迟重检/点差滑点费用压力；采样不是完整tick流，不从M1伪造tick或用合成测试/旧回测宣称秒级收益。样本私有.env四项时间字段变为0.2/1秒/2分钟/5秒，用户再次明确授权LG_SYMBOL从BTCUSD改成XAUUSD，账户及AI配置保留；黄金/crypto/server_deploy运行代码配置不改。样本不在公开黄金快照白名单内，用户自行启动，见local_guard_demo/README.md及VALIDATION.md。
+独立样本 `local_guard_demo/`（2026-10-12）：用户要求纯本地完整入场+单AI异步护仓，独立文件夹、不接飞书，随后要求秒级黄金。默认strategy.py用H1许可/真实30秒采样区间/持续约1秒突破，0.2秒目标轮询；最新授权由AI负责策略性护仓。新仓冻结quote_ai_guardian_v1，回区间/20秒不足0.15R/0.5R锁盈仅提醒，AI自主hold/tighten/close，本地保留原SLTP/现金风险/SL恢复/2分钟期限。绑定立即派发，默认15秒最小间隔/20秒有效决策预算/动作偏移0.15原始R；成功POST快照验证证据，最新报价及最终Broker修改/平仓前再检查身份/契约/时效/价格变化；单线程、每轮主备最多2POST，坏回复不重审。旧无guardian_policy仓及显式local对照仍沿用原短时本地退出/锁盈，不能重建旧仓。LG_独立配置、magic、0.01单仓、SL8/RR1.5/M5保护/EMA追价/真实现金风险门、token落盘和默认observe保留；EMA入口entry_ema.py保留。replay仅local_comparison、冻结策略/次报价成交/延迟成本压力，不能作为AI护仓收益；真实采样不是完整tick。实际.env、runtime、黄金/crypto/server_deploy本次不改；样本不在公开黄金快照白名单内，用户自行复制完整源码并重启，见local_guard_demo/README.md及VALIDATION.md。
 
 主文件：
 
