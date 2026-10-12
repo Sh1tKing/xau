@@ -112,6 +112,8 @@ FIB_PA_AI3_BACKUP_THINKING=
 
 ## 文件说明
 
+2026-10-12集中请求更新 `ai-review-reliability-v1`：AI-2也支持独立思考开关。本机部署实际.env新增`FIB_PA_AI2_THINKING=disabled`和`FIB_PA_AI2_BACKUP_THINKING=disabled`，并将`FIB_PA_AI2_BACKUP_TIMEOUT=`留空，使备用继承主路120秒，而非旧40秒。若服务器已有自己的新配置，只合并这三个字段，其余账户、模型、密钥和门槛保留。disabled会省略实际effort，不把low当作关闭思考；接口明确拒绝时不偷偷删开关。上游报告输出超过发送上限即结束本轮并暂停该配置的后续付费请求，下一轮可用已有健康备用，两路都违规则不发HTTP，本地护盘继续。暂停仅存当前进程，核查上游后通过明确配置变化或用户重启恢复。启动应显示新可靠性版本、AI-2主备disabled、备用等待120秒及加载时代码签名；API失败/契约通知也附版本。详见[诊断及离线验证](../experiments/2026-10-12-ai2-review-reliability.md)。
+
 2026-10-12黄金AI-1引用更新 `ai1-citations-v1`：每次请求发送可引用证据目录，模型复制短ID，Python按成功请求快照解析并严格核验候选隔离；维度/保留意见/等待依据使用同一目录和动态Schema。真实共享EMA/风险字段不再误拒绝，错误旧Pointer不会被猜测修补成交易。启动日志应出现`AI-1证据引用=ai1-citations-v1`。更新必须覆盖AI脚本及完整`strategies/`（含`citations.py`），只换主脚本会缺少依赖；覆盖后由用户重启，保留服务器自己的.env及日志状态。详细诊断和请求长度影响见[验证记录](../experiments/2026-10-12-ai1-citation-contract-validation.md)。
 
 - 两个 `.py`：三AI与本地策略/交易/护盘模块。

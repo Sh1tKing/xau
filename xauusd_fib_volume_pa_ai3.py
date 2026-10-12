@@ -8,6 +8,7 @@ Python still enforces reward/risk, H1/M15 alignment, the configured stop cap, an
 """
 
 import copy
+import hashlib
 import json
 import logging
 import math
@@ -93,8 +94,11 @@ AI_USAGE_DIR = os.path.join(base.LOG_DIR, "ai_usage")
 _USAGE_LOCK = threading.RLock()
 _CHAT_OPTIONS_LOCK = threading.RLock()
 _CHAT_OPTIONS = {}
+_CAP_BLOCKED_ROUTES = {}
+_CAP_BLOCKED_ROUTES_LOCK = threading.RLock()
 COST_CONTROL_VERSION = "cost-latency-v2"
 AI3_THINKING_CONTROL_VERSION = "xau-ai3-thinking-v1"
+AI_REVIEW_RELIABILITY_VERSION = "ai-review-reliability-v1"
 MARKET_FRESHNESS_VERSION = "request-freshness-v2"
 RESPONSE_CONTRACT_VERSION = "response-contract-v3"
 QUALITY_LEVEL_POINTS = {"strong": 20, "adequate": 16, "weak": 8, "missing": 0}
@@ -102,6 +106,21 @@ QUALITY_DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_e
 QUALITY_CAUSES = {"volume", "shallow_retrace", "trigger_weakness", "opposing_structure", "stop_vulnerability", "target_uncertainty", "execution_drift", "missing_data", "hard_limit"}
 LEGACY_QUALITY_VERSION = "entry-quality-v1"
 QUALITY_VERSION = "entry-quality-v2"
+
+
+def loaded_code_signature():
+    """Capture loaded source identity once, before deployment can replace files."""
+    digest = hashlib.sha256()
+    for filename in (__file__, base.__file__, os.path.join(BASE_DIR, "strategies", "citations.py")):
+        try:
+            with open(filename, "rb") as source:
+                digest.update(hashlib.sha256(source.read()).digest())
+        except OSError:
+            return "unavailable"
+    return digest.hexdigest()[:16]
+
+
+CLIENT_CODE_SIGNATURE = loaded_code_signature()
 
 base.MAGIC = AI_MAGIC
 base.ENABLE_TRADING = AI_ENABLE_TRADING
@@ -1433,23 +1452,52 @@ def response_content_stats(result):
 
 
 def request_thinking_mode(role, using_backup=False):
-    """An explicit AI-3 switch; blank preserves the provider's existing default."""
-    if role != "AI-3":
+    """Independent reviewer/guardian switches; blank preserves provider defaults."""
+    if role not in ("AI-2", "AI-3"):
         return None
 
     def configured(name):
         return os.getenv(name, "").strip().strip('"').strip("'").strip().lower()
 
-    name = "FIB_PA_AI3_THINKING"
+    name = "FIB_PA_AI%s_THINKING" % role[-1]
     value = configured(name)
     if using_backup:
-        backup_name = "FIB_PA_AI3_BACKUP_THINKING"
+        backup_name = "FIB_PA_AI%s_BACKUP_THINKING" % role[-1]
         backup_value = configured(backup_name)
         if backup_value:
             name, value = backup_name, backup_value
     if value not in ("", "disabled"):
         raise AIRequestError(role, "%s只支持空白（原接口默认行为）或disabled；low是EFFORT档位，不是思考开关" % name)
     return value or None
+
+
+def reported_token_fields(result):
+    """Keep original numeric token counters without saving provider text."""
+    raw = result.get("usage") if isinstance(result, dict) else None
+    if not isinstance(raw, dict):
+        return None
+
+    def finite_counter(value):
+        return not isinstance(value, bool) and (isinstance(value, int)
+               or isinstance(value, float) and math.isfinite(value))
+
+    safe = {}
+    for name, value in raw.items():
+        if "token" not in name:
+            continue
+        if finite_counter(value):
+            safe[name] = value
+        elif isinstance(value, dict):
+            safe[name] = {key: counter for key, counter in value.items()
+                          if "token" in key and finite_counter(counter)}
+    return safe
+
+
+def cap_route_key(role, active, protocol, token_field, cap, effort, thinking):
+    # Credential fingerprints remain in memory only, never in logs or notifications.
+    credential = hashlib.sha256(active["key"].encode("utf-8")).digest()
+    return (role, active["url"], protocol, active["model"], credential,
+            token_field, cap, effort, thinking)
 
 
 def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, still_current=None,
@@ -1489,7 +1537,9 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
     last_problem = "接口未返回有效响应"
     transport_failures = 0
     attempted = 0
-    for attempt in range(1, AI_HTTP_RETRIES + 1):
+    attempt_trace = []
+    while attempted < AI_HTTP_RETRIES:
+        attempt = attempted + 1
         channel = "backup" if using_backup else "primary"
         request_timeout = chat_request_timeout(role, timeout, using_backup)
         label = channel
@@ -1512,6 +1562,17 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             base.logger.info("%s 任务已过期或已停止，停止重试 (%s %s/%s)",
                              role, label, attempt, AI_HTTP_RETRIES)
             return ""
+        this_effort = "low" if low_retry else active["effort"]
+        sent_effort = this_effort if this_effort and not omit_reasoning and thinking_mode != "disabled" else None
+        route_key = cap_route_key(role, active, protocol, token_field,
+                                  AI_MAX_TOKENS.get(role, 4096), sent_effort, thinking_mode)
+        with _CAP_BLOCKED_ROUTES_LOCK:
+            blocked = _CAP_BLOCKED_ROUTES.get(route_key)
+        if blocked:
+            base.logger.error("%s 跳过输出超限配置，未发HTTP: %s", role, blocked)
+            if switch_to_backup():
+                continue
+            raise AIRequestError(role, "输出超限配置已暂停付费请求：%s；核查供应商映射后调整配置或重启，本地护盘继续" % blocked)
         refresh_started = time.monotonic()
         snapshot = refresh_request() if refresh_request is not None else {}
         refresh_elapsed = time.monotonic() - refresh_started
@@ -1540,7 +1601,6 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             "stream": False,
             token_field: AI_MAX_TOKENS.get(role, 4096),
         }
-        this_effort = "low" if low_retry else active["effort"]
         if thinking_mode:
             data["thinking"] = {"type": thinking_mode}
         headers = {"Content-Type": "application/json", "Authorization": "Bearer " + active["key"]}
@@ -1584,6 +1644,18 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
 
         def record_attempt(outcome, result=None, response=None, json_error=None):
             finish = chat_finish_reason(result)
+            usage = normalized_chat_usage(result)
+            output = (usage or {}).get("output_tokens")
+            violation = output is not None and output > data[token_field]
+            if violation:
+                blocked_detail = "%s host=%s model=%s %s=%s output=%s finish=%s thinking=%s effort=%s" % (
+                    channel, urlsplit(active["url"]).hostname, active["model"], token_field,
+                    data[token_field], output, finish, thinking_mode or "provider_default", sent_effort or "omitted")
+                with _CAP_BLOCKED_ROUTES_LOCK:
+                    _CAP_BLOCKED_ROUTES[route_key] = blocked_detail
+                base.logger.error("%s 上游输出超限，暂停该配置后续付费请求: %s", role, blocked_detail)
+            attempt_trace.append("%s host=%s model=%s wait=%ss %s" % (
+                channel, urlsplit(active["url"]).hostname, active["model"], request_timeout, outcome))
             response_headers = getattr(response, "headers", {}) or {}
             response_id = result.get("id") if isinstance(result, dict) else None
             record_ai_usage({
@@ -1606,9 +1678,12 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 "reasoning_effort_sent": sent_effort,
                 "reasoning_effort_requested": this_effort,
                 "thinking_mode_sent": thinking_mode,
-                "thinking_control_version": AI3_THINKING_CONTROL_VERSION if role == "AI-3" else None,
+                "thinking_control_version": AI3_THINKING_CONTROL_VERSION if role == "AI-3" else AI_REVIEW_RELIABILITY_VERSION if role == "AI-2" else None,
+                "client_version": AI_REVIEW_RELIABILITY_VERSION, "citation_version": AI1_CITATION_VERSION,
+                "client_code_signature": CLIENT_CODE_SIGNATURE,
                 "token_limit": data[token_field], "token_limit_field": token_field,
-                "finish_reason": finish, "usage": normalized_chat_usage(result),
+                "finish_reason": finish, "usage": usage, "usage_reported": reported_token_fields(result),
+                "token_limit_violation": violation,
                 **response_content_stats(result),
                 "cost": None,  # Rates and timeout billing belong to the provider, not guesses.
             })
@@ -1658,6 +1733,13 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                                  % (data[token_field], sent_effort or "omitted", this_effort,
                                     thinking_mode or "provider_default", usage.get("output_tokens"),
                                     stats["visible_text_chars"], stats["thinking_blocks"]))
+        usage = normalized_chat_usage(result) or {}
+        reported_output = usage.get("output_tokens")
+        if reported_output is not None and reported_output > data[token_field]:
+            record_attempt("token_limit_exceeded", result, response)
+            raise AIRequestError(role, "上游报告输出%s token超过发送上限%s，停止本轮且暂停该配置后续付费请求：%s host=%s model=%s finish=%s thinking=%s effort=%s；需核查中转参数映射/计量，已发生费用不能由客户端撤回"
+                                 % (reported_output, data[token_field], channel, urlsplit(active["url"]).hostname,
+                                    active["model"], finish_reason, thinking_mode or "provider_default", sent_effort or "omitted"))
         error_object = result.get("error") if isinstance(result, dict) else None
         error_text = (str(error_object.get("message", "")) + " " + str(error_object.get("param", ""))
                       if isinstance(error_object, dict) else response.text).lower()
@@ -1719,12 +1801,6 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             last_problem = "接口返回非JSON响应"
             record_attempt("non_json", result, response)
         else:
-            usage = normalized_chat_usage(result) or {}
-            reported_output = usage.get("output_tokens")
-            if reported_output is not None and reported_output > data[token_field]:
-                record_attempt("token_limit_exceeded", result, response)
-                raise AIRequestError(role, "上游报告输出%s token超过发送上限%s，停止本轮；需核查中转参数映射/计量，已发生费用不能由客户端撤回"
-                                     % (reported_output, data[token_field]))
             if finish_reason in ("refusal", "content_filter") or (protocol == "anthropic" and finish_reason not in ("end_turn", "stop_sequence")):
                 record_attempt("non_final_decision", result, response)
                 raise AIRequestError(role, "接口未返回可执行的最终决策，结束标记=%s，不重复生成" % finish_reason)
@@ -1749,12 +1825,10 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             continue
         break
 
-    if transport_failures == attempted:
-        detail = "连续 %s 次超时或连接失败 (%s): %s" % (attempted, label, last_problem)
-    else:
-        detail = "%s次请求后失败 (%s): %s" % (attempted, label, last_problem)
-    base.logger.error("%s %s", role, detail[:300])
-    raise AIRequestError(role, detail[:300])
+    summary = "连续 %s 次超时或连接失败" % attempted if transport_failures == attempted else "%s次请求后失败" % attempted
+    detail = "%s；%s；%s" % (summary, " → ".join(attempt_trace), last_problem[:300])
+    base.logger.error("%s %s", role, detail)
+    raise AIRequestError(role, detail)
 
 
 def prices_are_valid(action, entry, stop_loss, take_profit):
@@ -2436,7 +2510,8 @@ class ThreeAITrader(base.FibVolumePATrader):
         self._last_api_alert = now
         self.notify_lines(
             "⚠️ %s %s 请求失败" % (base.SYMBOL, role),
-            [detail, datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+            [detail, "版本=%s 引用=%s 代码=%s" % (AI_REVIEW_RELIABILITY_VERSION, AI1_CITATION_VERSION, CLIENT_CODE_SIGNATURE),
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
         )
 
     def dispatch_m5_entry(self, bar_time):
@@ -2680,7 +2755,9 @@ class ThreeAITrader(base.FibVolumePATrader):
                 if "观望" not in reason and "未给出" not in reason:
                     self.notify_lines(
                         ("⚠️ %s AI-1输出契约错误" if quality_error else "✋ %s AI-1/Python 未放行") % base.SYMBOL,
-                        [confidence_line, reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+                        [confidence_line, reason, "版本=%s 引用=%s 代码=%s" % (
+                            AI_REVIEW_RELIABILITY_VERSION, AI1_CITATION_VERSION, CLIENT_CODE_SIGNATURE),
+                         datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
                     )
                 return
             proposal.score_buy = local_result.score_buy
@@ -3063,6 +3140,12 @@ class ThreeAITrader(base.FibVolumePATrader):
                          RESPONSE_CONTRACT_VERSION)
         base.logger.info("AI成本控制=%s token上限=%s 同通道读超时补发=%s 用量目录=%s",
                          COST_CONTROL_VERSION, AI_MAX_TOKENS, AI_READ_TIMEOUT_RETRIES, AI_USAGE_DIR)
+        base.logger.info("AI请求可靠性=%s 代码=%s 输出超限配置暂停后续付费请求，主备共享实际HTTP预算",
+                         AI_REVIEW_RELIABILITY_VERSION, CLIENT_CODE_SIGNATURE)
+        base.logger.info("AI-2思考控制 主路=%s 备用=%s；备用等待=%ss，空白继承主路=%ss",
+                         request_thinking_mode("AI-2") or "provider_default",
+                         request_thinking_mode("AI-2", True) or "provider_default",
+                         chat_request_timeout("AI-2", AI2_TIMEOUT, True), AI2_TIMEOUT)
         base.logger.info("AI-3思考控制=%s 主路=%s 备用=%s；空白沿用接口默认，disabled显式关闭扩展思考并省略effort",
                          AI3_THINKING_CONTROL_VERSION, request_thinking_mode("AI-3") or "provider_default",
                          request_thinking_mode("AI-3", True) or "provider_default")

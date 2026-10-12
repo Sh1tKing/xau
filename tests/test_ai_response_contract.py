@@ -32,6 +32,7 @@ class ResponseContractTests(unittest.TestCase):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         for scope in (patch.dict(ai.os.environ, {}, clear=True), patch.dict(ai._CHAT_OPTIONS, {}, clear=True),
+                      patch.dict(ai._CAP_BLOCKED_ROUTES, {}, clear=True),
                       patch.object(ai, "AI_USAGE_DIR", self.folder.name), patch.object(ai.time, "sleep")):
             scope.start()
             self.addCleanup(scope.stop)
