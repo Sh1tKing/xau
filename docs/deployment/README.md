@@ -12,7 +12,7 @@
 
 # 三AI黄金策略服务器部署
 
-此部署包的代码提交以 `MANIFEST.json` 为准，证据版本 `entry-evidence-v5`，评分版本 `entry-quality-v2`，行情刷新版本 `request-freshness-v2`，JSON契约版本 `response-contract-v3`。
+此部署包的代码提交以 `MANIFEST.json` 为准，证据版本 `entry-evidence-v5`，评分版本 `entry-quality-v3`，行情刷新版本 `request-freshness-v2`，JSON契约版本 `response-contract-v3`。
 运行入口是 `xauusd_fib_volume_pa_ai3.py`，它会导入同目录的 `xauusd_fib_volume_pa_trader.py` 和完整 `strategies/` 包。
 
 若从GitHub源码部署：将这两个脚本、完整 `strategies/` 文件夹及 `docs/deployment` 下的 `requirements.txt`、`install.cmd`、`start.cmd` 放在同一目录，再将 `.env.example` 复制为 `.env` 并填写自己的账户及接口配置。公开仓库不包含私人 `server_deploy` 目录、实际 `.env`、日志或持仓状态。下述“部署包”指本机生成的私人目录。
@@ -30,7 +30,11 @@
 3. 双击 `install.cmd`，安装依赖到该文件夹的 `.venv`。安装脚本不会启动交易。
 4. 打开MT5终端。迁移同一账户前，先在原机器停止旧交易脚本，避免两台机器同时管理同一账户。
 5. 双击 `start.cmd` 启动三AI策略。该操作会按 `.env` 的交易开关运行，可能实际下单；只运行一个实例。
-6. 查看启动输出：应显示 `adaptive-session-v1`、三个启用的adaptive名称和策略指纹，并说明本地分不是新模式AI派发门槛；证据版本为 `entry-evidence-v5`、质量评分为 `entry-quality-v2`、行情刷新为 `request-freshness-v2`。AI门槛以实际 `.env` 为准，AI分比较五项质量总分（非胜率）；旧固定模式仍使用本地门槛。日志写入 `xau_fib_pa_logs`，跨日后第一条记录会按服务器本地日期创建对应日期日志；每次AI结果可查看质量明细、状态与观望依据。更新后需自行重启加载，旧进程不会自动换代码或配置。
+6. 查看启动输出：应显示 `adaptive-session-v1`、三个启用的adaptive名称和策略指纹，并说明本地分不是新模式AI派发门槛；证据版本为 `entry-evidence-v5`、质量评分为 `entry-quality-v3`、行情刷新为 `request-freshness-v2`。AI门槛以实际 `.env` 为准，AI分比较五项质量总分（非胜率）；旧固定模式仍使用本地门槛。日志写入 `xau_fib_pa_logs`，跨日后第一条记录会按服务器本地日期创建对应日期日志；每次AI结果可查看质量明细、状态与观望依据。更新后需自行重启加载，旧进程不会自动换代码或配置。
+
+## 2026-10-12 评分契约v3更新
+
+同步AI脚本及完整strategies包，包含新增 `quality.py`；普通量/浅回撤使用observations，重大问题使用reservations，提示词、Schema与Python共享同一等级关联规则。有效旧卡按原版本处理，坏卡不改分、不补发审核；错误通知显示实际路径/cause/level，并可附独立风险诊断。详情见 [验证记录](../experiments/2026-10-12-ai1-quality-contract-v3.md)。如需运行离线Schema回归，可安装 `requirements-test.txt`；正常交易仅需 `requirements.txt`，不依赖jsonschema。
 
 ## 2026-10-09 入场可靠性更新
 

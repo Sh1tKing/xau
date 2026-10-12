@@ -25,6 +25,12 @@ import requests
 from strategies.evidence import _rounded_number, _bar_payload, _extreme_bar, bars_for_prompt, bar_times_for_prompt
 from strategies.citations import (VERSION as AI1_CITATION_VERSION, MISSING as _MISSING_EVIDENCE,
                                  build_catalog, catalog_bindings, pointer_value, resolve_references, scope_allowed)
+from strategies.quality import (VERSION as QUALITY_VERSION, PREVIOUS_VERSION as PREVIOUS_QUALITY_VERSION,
+                                LEVEL_POINTS as QUALITY_LEVEL_POINTS, DIMENSIONS as QUALITY_DIMENSIONS,
+                                CAUSES as QUALITY_CAUSES, MINOR_CAUSES as QUALITY_MINOR_CAUSES,
+                                LEVEL_RULES as QUALITY_LEVEL_RULES,
+                                INSTRUCTIONS as QUALITY_INSTRUCTIONS, dimension_error as quality_dimension_error,
+                                dimension_schema as quality_dimension_schema, rubric_fields as quality_rubric_fields)
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -101,17 +107,14 @@ AI3_THINKING_CONTROL_VERSION = "xau-ai3-thinking-v1"
 AI_REVIEW_RELIABILITY_VERSION = "ai-review-reliability-v1"
 MARKET_FRESHNESS_VERSION = "request-freshness-v2"
 RESPONSE_CONTRACT_VERSION = "response-contract-v3"
-QUALITY_LEVEL_POINTS = {"strong": 20, "adequate": 16, "weak": 8, "missing": 0}
-QUALITY_DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_evidence")
-QUALITY_CAUSES = {"volume", "shallow_retrace", "trigger_weakness", "opposing_structure", "stop_vulnerability", "target_uncertainty", "execution_drift", "missing_data", "hard_limit"}
 LEGACY_QUALITY_VERSION = "entry-quality-v1"
-QUALITY_VERSION = "entry-quality-v2"
 
 
 def loaded_code_signature():
     """Capture loaded source identity once, before deployment can replace files."""
     digest = hashlib.sha256()
-    for filename in (__file__, base.__file__, os.path.join(BASE_DIR, "strategies", "citations.py")):
+    for filename in (__file__, base.__file__, os.path.join(BASE_DIR, "strategies", "citations.py"),
+                     os.path.join(BASE_DIR, "strategies", "quality.py")):
         try:
             with open(filename, "rb") as source:
                 digest.update(hashlib.sha256(source.read()).digest())
@@ -183,14 +186,10 @@ PRICE_ACTION_INSTRUCTIONS = (
 )
 AI1_INSTRUCTIONS += PRICE_ACTION_INSTRUCTIONS
 AI2_INSTRUCTIONS += PRICE_ACTION_INSTRUCTIONS
-AI1_INSTRUCTIONS += (
-    "按quality_rubric评五项，不猜胜率、不复制本地分、不抬分。quality_assessment={version,direction,dimensions}，version=entry-quality-v2。"
-    "dimension={level,reason,evidence_refs,reservations}；reservation={cause,event_group,reason,evidence_refs}，直接放入唯一归属维度，禁止另填id/dimension/severity/reservation_ids。"
-    "level一次声明程度：strong=20且无保留；adequate=16且保留仅轻微；weak=8且保留是重大反证；missing=0且保留是阻断条件。weak/missing必须有保留。"
-    "direction为buy/sell，dimensions是rubric五项为键的对象；reservations、wait_basis、fact_conflicts、unknowns、evidence_refs均为数组。"
+AI1_INSTRUCTIONS += QUALITY_INSTRUCTIONS + (
     "本次输入有evidence_catalog时，evidence_refs只复制目录中的短ID，不手写、拼接或猜测JSON路径；目录标注所属opportunity_id和direction，只选自身组或共享组。目录base+值是Python声明的实际路径，不需要自行输出。"
     "没有目录的旧输入才用真实JSON Pointer。每项reason≤35汉字，只列必要证据；同cause/event只扣一项。"
-    "普通量/浅回撤最多轻微，不能评weak/missing；Python据level生成程度并加总，不输出自由confidence。"
+    "Python据level加总，不输出自由confidence；cause的定义以quality_rubric.cause_rules为准。"
     "执行止损空间问题归protection，实时RR不足归target，不能因报价漂移把已命中的触发评missing。"
     "no仍评允许方向，wait_basis列{code,reason,evidence_refs}，code为hard_limit/missing_structure/missing_trigger/missing_data/target_space/material_counter_evidence。"
     "已有周期触发不写missing_trigger；仅minor且位置/确认/保护/目标成立应提案交审核，不无限等待更漂亮形态。"
@@ -934,9 +933,8 @@ def execution_rejection(facts):
 def quality_rubric(analysis_mode=False):
     """A transparent ordinal scale, not a calibrated probability of profit."""
     return {
-        "version": QUALITY_VERSION,
+        **quality_rubric_fields(),
         "meaning": "entry_quality_not_win_probability",
-        "level_points": QUALITY_LEVEL_POINTS,
         "dimensions": {
             "structure": ("按真实原始K线、位置及H1方向评价自主打法有效性，分盘菜单是参考；不要求固定Fib/建箱/首次事件。" if analysis_mode else "按strategy_contract评价本时段策略位置及有效性；满足该策略结构条件为adequate。Fib策略用现有容差/探入；浅回撤本身不是结构缺失。"),
             "trigger": ("真实原始已收盘K线所证自主打法触发可为adequate，无需固定检测器；analysis_checkpoint本身不能证明触发。" if analysis_mode else "本地M15或M5已收盘规则或strategy_evidence.closed_trigger命中可为adequate；更明确独立确认可为strong，不强制双周期。颜色、弱量不否定false_break。"),
@@ -944,8 +942,6 @@ def quality_rubric(analysis_mode=False):
             "target": "目标有给定依据、重要未克服障碍之前有空间且有效报价RR至少1.5为adequate；刚过1.5无需在其他项重复扣分。",
             "counter_evidence": "没有可核实反向证据为strong；普通量、浅回撤、H1旧影线、未证实过程极值等minor意见为adequate；独立及时的反向结构为material。",
         },
-        "reservations_policy": "保留意见直接嵌在所属维度，一个cause/event仅归一项。level是唯一程度声明：adequate的保留为minor，weak为material，missing为blocking；strong不得有保留，weak/missing必须有保留。普通量/浅回撤不能weak/missing。Python生成ID/归属/程度，不由模型重复声明。",
-        "reservation_causes": sorted(QUALITY_CAUSES),
         "proposal_policy": "硬伤或必要证据缺失则no；已成立的候选仅有minor意见时给出提案，最终分数及Python/AI2决定是否放行。不要将不确定未来获利当成必要字段缺失。",
         "quote_policy": ("自主候选reference_price是本次成功POST live_quote的BUY Ask/SELL Bid；coarse_reference_price与local_plan_feasibility保留原本地M15方案诊断。AI2/Python再核新报价。" if analysis_mode else "reference_price与live_quote来自不同时间，差异本身不是事实冲突；用live_quote核实当前可行性，AI2/Python还会复核执行。"),
         "reference_paths": ["/h1_trend", "/live_quote", "/local_plan_feasibility",
@@ -958,6 +954,35 @@ def quality_rubric(analysis_mode=False):
 def _evidence_pointer_exists(pack, pointer):
     value = pointer_value(pack, pointer)
     return value is not _MISSING_EVIDENCE and value is not None
+
+
+def ai1_verified_risk_notes(payload, pack):
+    """Independent direction/chase facts, never a repair or score for an invalid card."""
+    try:
+        payload = resolve_references(payload, pack)
+    except ValueError:
+        return []
+    card = payload.get("quality_assessment", {}) if isinstance(payload, dict) else {}
+    direction = card.get("direction") if isinstance(card, dict) else None
+    if direction not in ("buy", "sell"):
+        return []
+    if "opportunities" in pack and opportunity_selection(payload, pack)[1]:
+        return []
+    notes = []
+    permitted = "buy" if pack.get("h1_trend") == "bull" else "sell" if pack.get("h1_trend") == "bear" else None
+    if permitted and direction != permitted:
+        notes.append("H1方向不许可%s" % direction)
+    try:
+        quote = pack.get("live_quote", {})
+        bid, ask, atr, ema = (float(quote["bid"]), float(quote["ask"]), float(pack["atr"]), float(pack["m15_ema21"]))
+        if not all(math.isfinite(v) and v > 0 for v in (bid, ask, atr, ema)) or bid > ask:
+            return notes
+        distance = abs((ask if direction == "buy" else bid) - ema) / atr
+        if distance > base.CHASE_MAX_ATR + 1e-6:
+            notes.append("%s本次请求报价偏离EMA21 %.2fATR > %.2fATR" % (direction, distance, base.CHASE_MAX_ATR))
+    except (KeyError, TypeError, ValueError):
+        pass
+    return notes
 
 
 def normalize_ai1_quality(payload, pack):
@@ -980,44 +1005,43 @@ def normalize_ai1_quality(payload, pack):
     version = card.get("version", LEGACY_QUALITY_VERSION)
     if version == LEGACY_QUALITY_VERSION:
         return _normalize_ai1_quality_v1(payload, pack)
-    if version != QUALITY_VERSION:
+    if version not in (PREVIOUS_QUALITY_VERSION, QUALITY_VERSION):
         return payload, "AI-1质量评估版本无效: %s" % version
     if set(card) != {"version", "direction", "dimensions"}:
-        return payload, "AI-1质量评估v2字段错误: 保留意见只能放入各维度"
+        return payload, "AI-1质量评估字段错误: 保留意见只能放入各维度"
     dimensions = card.get("dimensions")
     if not isinstance(dimensions, dict) or set(dimensions) != set(QUALITY_DIMENSIONS):
         return payload, "AI-1质量评估无效: 五项缺失"
     decoded = copy.deepcopy(payload)
-    decoded_card = {"version": QUALITY_VERSION, "direction": card.get("direction"),
+    decoded_card = {"version": version, "direction": card.get("direction"),
                     "dimensions": {}, "reservations": []}
-    severity_by_level = {"adequate": "minor", "weak": "material", "missing": "blocking"}
+    seen_causes = set()
+    evidence_items = []
     for name in QUALITY_DIMENSIONS:
         item = dimensions[name]
-        if not isinstance(item, dict) or set(item) != {"level", "reason", "evidence_refs", "reservations"}:
-            return payload, "AI-1质量评估v2字段错误: %s" % name
-        level, reservations = item.get("level"), item.get("reservations")
-        if not isinstance(level, str) or level not in QUALITY_LEVEL_POINTS or not isinstance(reservations, list):
-            return payload, "AI-1质量评估无效: %s等级或保留意见" % name
-        if (level == "strong" and reservations or level in ("weak", "missing") and not reservations):
-            return payload, "AI-1质量评估程度不符: %s缺少对应保留意见或strong含保留" % name
+        error = quality_dimension_error(name, item, version)
+        if error:
+            return payload, error
+        level = item["level"]
         converted = {"level": level, "reason": item["reason"], "evidence_refs": item["evidence_refs"],
                      "reservation_ids": []}
-        for index, issue in enumerate(reservations, 1):
-            if not isinstance(issue, dict) or set(issue) != {"cause", "event_group", "reason", "evidence_refs"}:
-                return payload, "AI-1质量评估v2保留意见字段错误: %s/%s" % (name, index)
-            if (not isinstance(issue["cause"], str) or issue["cause"] not in QUALITY_CAUSES
-                    or issue["event_group"] is not None and not isinstance(issue["event_group"], str)
-                    or not isinstance(issue["reason"], str) or not issue["reason"].strip()):
-                return payload, "AI-1质量评估v2保留意见无效: %s/%s" % (name, index)
-            if level in ("weak", "missing") and issue["cause"] in ("volume", "shallow_retrace"):
-                return payload, "AI-1质量评估程度不符: 普通量/浅回撤仅是轻微意见，不能评%s" % level
+        if version == QUALITY_VERSION:
+            converted["observations"] = copy.deepcopy(item.get("observations", []))
+        for container in ("reservations", "observations"):
+            for index, issue in enumerate(item.get(container, [])):
+                key = (issue["cause"], issue["event_group"] or tuple(sorted(issue["evidence_refs"])))
+                if key in seen_causes:
+                    return payload, "AI-1质量评估重复扣分: /quality_assessment/dimensions/%s/%s/%s 同一原因和事件" % (name, container, index)
+                seen_causes.add(key)
+                evidence_items.append(issue)
+        for index, issue in enumerate(item.get("reservations", []), 1):
             identifier = "%s:%s" % (name, index)
             converted["reservation_ids"].append(identifier)
             decoded_card["reservations"].append({**issue, "id": identifier, "dimension": name,
-                                                "severity": severity_by_level[level]})
+                                                "severity": QUALITY_LEVEL_RULES[level]["severity"]})
         decoded_card["dimensions"][name] = converted
     # Check paths before the shared validator to expose the precise invalid pointer.
-    for item in list(dimensions.values()) + decoded_card["reservations"]:
+    for item in list(dimensions.values()) + evidence_items:
         refs = item.get("evidence_refs")
         if not isinstance(refs, list) or not refs:
             return payload, "AI-1质量评估无效: evidence_refs必须是非空数组"
@@ -1028,7 +1052,7 @@ def normalize_ai1_quality(payload, pack):
     normalized, error = _normalize_ai1_quality_v1(decoded, pack)
     if error:
         return payload, error
-    normalized["quality_version"] = QUALITY_VERSION
+    normalized["quality_version"] = version
     return normalized, ""
 
 
@@ -1086,6 +1110,8 @@ def _normalize_ai1_quality_v1(payload, pack):
             return payload, "AI-1质量评估无效: event_group格式"
         if issue.get("dimension") not in QUALITY_DIMENSIONS or issue.get("severity") not in ("minor", "material", "blocking") or not isinstance(issue.get("reason"), str) or not issue["reason"].strip() or not refs_valid(issue):
             return payload, "AI-1质量评估无效: 原因缺少维度/程度/真实证据"
+        if cause in QUALITY_MINOR_CAUSES and issue["severity"] != "minor":
+            return payload, "AI-1质量评估程度不符: cause=%s severity=%s；轻微原因不能声明重大或阻断" % (cause, issue["severity"])
         key = (cause, event if event else tuple(sorted(issue["evidence_refs"])))
         if key in causes:
             return payload, "AI-1质量评估重复扣分: 同一原因和事件"
@@ -1227,15 +1253,9 @@ def response_json_schema(role, request_pack=None):
     price = {"anyOf": [{"type": "number"}, {"type": "null"}]}
     if role == "AI-1":
         evidence_ids = catalog_bindings(request_pack) if request_pack is not None else {}
-        refs = ({"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidence_ref"}}
-                if evidence_ids else texts)
-        reservation = _object_schema({
-            "cause": {"type": "string", "enum": sorted(QUALITY_CAUSES)},
-            "event_group": {"anyOf": [text, {"type": "null"}]},
-            "reason": text, "evidence_refs": refs})
-        dimension = _object_schema({"level": {"type": "string", "enum": list(QUALITY_LEVEL_POINTS)},
-                                    "reason": text, "evidence_refs": refs,
-                                    "reservations": {"type": "array", "items": reservation}})
+        refs = {"type": "array", "minItems": 1,
+                "items": {"$ref": "#/$defs/evidence_ref"} if evidence_ids else text}
+        dimension = quality_dimension_schema(refs)
         wait = _object_schema({"code": {"type": "string", "enum": ["hard_limit", "missing_structure", "missing_trigger",
                                "missing_data", "target_space", "material_counter_evidence"]},
                                "reason": text, "evidence_refs": refs})
@@ -1248,12 +1268,12 @@ def response_json_schema(role, request_pack=None):
             "fact_conflicts": texts, "unknowns": texts,
             "quality_assessment": _object_schema({"version": {"type": "string", "enum": [QUALITY_VERSION]},
                 "direction": {"type": "string", "enum": ["buy", "sell"]},
-                "dimensions": _object_schema({name: ({"$ref": "#/$defs/quality_dimension"} if evidence_ids else dimension)
+                "dimensions": _object_schema({name: {"$ref": "#/$defs/quality_dimension"}
                                               for name in QUALITY_DIMENSIONS})}),
             "wait_basis": {"type": "array", "items": wait}})
+        schema["$defs"] = {"quality_dimension": dimension}
         if evidence_ids:
-            schema["$defs"] = {"evidence_ref": {"type": "string", "enum": list(evidence_ids)},
-                               "quality_dimension": dimension}
+            schema["$defs"]["evidence_ref"] = {"type": "string", "enum": list(evidence_ids)}
         return schema
     if role == "AI-2":
         return _object_schema({"decision": {"type": "string", "enum": ["APPROVE", "REJECT"]},
@@ -1270,13 +1290,13 @@ def ai1_json_template():
             "invalidation": "<失效条件>", "target_basis": "<目标依据>", "fact_conflicts": [], "unknowns": [],
             "quality_assessment": {"version": QUALITY_VERSION, "direction": "buy", "dimensions": {
                 name: {"level": "adequate", "reason": "<本项证据结论>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"],
-                       "reservations": []} for name in QUALITY_DIMENSIONS}},
+                       "reservations": [], "observations": []} for name in QUALITY_DIMENSIONS}},
             "wait_basis": [{"code": "missing_trigger", "reason": "<实际等待条件>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}]}
 
 
 AI1_INSTRUCTIONS += (
     "严格输出一个完整JSON对象，闭合所有括号，不输出Markdown或分析过程。wait_basis必须在顶层，与quality_assessment并列，"
-    "quality_assessment内部只有version/direction/dimensions，保留意见在各维度的reservations内。以下仅示范层级，示例方向/等级/理由/路径不可复用，须按实际证据重填；"
+    "quality_assessment内部只有version/direction/dimensions，轻微观察放observations、扣分理由放reservations；strong维度不含这两个数组。以下仅示范层级，示例方向/等级/理由/路径不可复用，须按实际证据重填；"
     "有交易提案时wait_basis为空数组。格式模板：" + json.dumps(ai1_json_template(), ensure_ascii=False, separators=(",", ":"))
 )
 
@@ -2717,6 +2737,7 @@ class ThreeAITrader(base.FibVolumePATrader):
             if isinstance(parsed, dict) and not quality_error:
                 ai_confidence = normalize_confidence(parsed.get("confidence", 0))
             result_status = ai1_result_status(parsed, quality_error, proposal)
+            verified_risk_notes = ai1_verified_risk_notes(parsed, request_pack) if quality_error else []
             append_decision_snapshot(
                 decision_id,
                 "ai1_result",
@@ -2729,6 +2750,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "quality_version": parsed.get("quality_version") if isinstance(parsed, dict) else None,
                     "proposal": proposal.to_decision() if proposal is not None else None,
                     "python_reason": reason,
+                    "verified_risk_notes": verified_risk_notes,
                 },
             )
             action_line = ("AI-1输出无效（原动作: %s）" if quality_error else "AI-1动作: %s") % format_ai_action(parsed)
@@ -2747,16 +2769,20 @@ class ThreeAITrader(base.FibVolumePATrader):
             )
             if not quality_error:
                 card = parsed["quality_assessment"]
-                base.logger.info("AI-1质量明细 decision=%s version=%s grades=%s reservations=%s wait_basis=%s",
+                base.logger.info("AI-1质量明细 decision=%s version=%s grades=%s reservations=%s observations=%s wait_basis=%s",
                                  decision_id, parsed["quality_version"],
                                  {key: item["level"] for key, item in card["dimensions"].items()},
-                                 card["reservations"], parsed.get("wait_basis", []))
+                                 card["reservations"],
+                                 {key: item["observations"] for key, item in card["dimensions"].items() if item.get("observations")},
+                                 parsed.get("wait_basis", []))
+            elif verified_risk_notes:
+                base.logger.info("AI-1独立风险诊断 decision=%s: %s", decision_id, verified_risk_notes)
             if proposal is None:
                 if "观望" not in reason and "未给出" not in reason:
                     self.notify_lines(
                         ("⚠️ %s AI-1输出契约错误" if quality_error else "✋ %s AI-1/Python 未放行") % base.SYMBOL,
-                        [confidence_line, reason, "版本=%s 引用=%s 代码=%s" % (
-                            AI_REVIEW_RELIABILITY_VERSION, AI1_CITATION_VERSION, CLIENT_CODE_SIGNATURE),
+                        [confidence_line, reason] + (["独立风险诊断: " + "；".join(verified_risk_notes)] if verified_risk_notes else []) + ["版本=%s 评分=%s 引用=%s 代码=%s" % (
+                            AI_REVIEW_RELIABILITY_VERSION, QUALITY_VERSION, AI1_CITATION_VERSION, CLIENT_CODE_SIGNATURE),
                          datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
                     )
                 return

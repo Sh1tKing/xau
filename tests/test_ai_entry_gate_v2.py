@@ -108,13 +108,14 @@ class EntryGateV2Tests(unittest.TestCase):
 
     def test_new_schema_and_template_remove_duplicate_ownership_fields(self):
         card = ai.response_json_schema("AI-1")["properties"]["quality_assessment"]
-        self.assertEqual(card["properties"]["version"]["enum"], ["entry-quality-v2"])
+        self.assertEqual(card["properties"]["version"]["enum"], [ai.QUALITY_VERSION])
         self.assertNotIn("reservations", card["properties"])
-        dimension = card["properties"]["dimensions"]["properties"]["target"]
-        self.assertNotIn("reservation_ids", dimension["properties"])
-        issue = dimension["properties"]["reservations"]["items"]["properties"]
+        dimension = ai.response_json_schema("AI-1")["$defs"]["quality_dimension"]
+        adequate = dimension["anyOf"][1]
+        self.assertNotIn("reservation_ids", adequate["properties"])
+        issue = adequate["properties"]["reservations"]["items"]["properties"]
         self.assertEqual(set(issue), {"cause", "event_group", "reason", "evidence_refs"})
-        self.assertEqual(ai.ai1_json_template()["quality_assessment"]["version"], "entry-quality-v2")
+        self.assertEqual(ai.ai1_json_template()["quality_assessment"]["version"], ai.QUALITY_VERSION)
 
     def test_new_cards_score_symmetrically_without_mutating_model_evidence(self):
         for side in ("buy", "sell"):
