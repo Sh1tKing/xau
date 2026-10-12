@@ -36,6 +36,8 @@
 
 同步AI脚本及完整strategies包，包含新增 `quality.py`；普通量/浅回撤使用observations，重大问题使用reservations，提示词、Schema与Python共享同一等级关联规则。有效旧卡按原版本处理，坏卡不改分、不补发审核；错误通知显示实际路径/cause/level，并可附独立风险诊断。详情见 [验证记录](../experiments/2026-10-12-ai1-quality-contract-v3.md)。如需运行离线Schema回归，可安装 `requirements-test.txt`；正常交易仅需 `requirements.txt`，不依赖jsonschema。
 
+17:36日志后的兼容修订：未确认反转的单根M5反向等轻微观察允许使用对应原因主题，不再只允许量能/浅回撤。重大反证仍使用reservations，hard_limit/missing_data禁止放observations；等级、分数及Python硬风险门保持。评分标签仍为entry-quality-v3，请核对MANIFEST的代码签名确认本次构建；必须覆盖AI脚本及完整strategies后自行重启，保留服务器自己的.env、日志与持仓状态。
+
 ## 2026-10-09 入场可靠性更新
 
 本次另修复止损舍入：启动日志新增 `止损价格=protective-stop-v1`。生成止损、AI定稿和M5保护价统一保持两位小数，BUY向下、SELL向上，避免四舍五入进入保护缓冲；取整后超过8美元仍拒绝。日志区分真正超限与无法生成，不再将覆盖失败一律称为超过8美元。该缺陷与本次15轮连续触发EMA追价限制分开处理；EMA1.5ATR、RR1.5和运行配置保持。更新须同时替换两个主脚本，自行重启，保留服务器自己的 `.env`。

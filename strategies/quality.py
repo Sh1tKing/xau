@@ -11,19 +11,20 @@ LEVEL_RULES = {
 }
 LEVEL_POINTS = {level: rule["points"] for level, rule in LEVEL_RULES.items()}
 CAUSE_RULES = {
-    "volume": {"minor_only": True, "meaning": "普通或偏弱量能，仅轻微观察；必要量数据缺失用missing_data。"},
-    "shallow_retrace": {"minor_only": True, "meaning": "回撤深度略浅，仅轻微观察；深度下行、远离EMA不属于浅回撤。"},
-    "trigger_weakness": {"minor_only": False, "meaning": "真实收盘触发不足或较弱；不得把已成立的触发说成不存在。"},
-    "opposing_structure": {"minor_only": False, "meaning": "有真实证据的反向结构；M15暂反向或单根颜色不自动构成硬伤。"},
-    "stop_vulnerability": {"minor_only": False, "meaning": "命名结构或M5极值保护不足，引用保护价和缓冲。"},
-    "target_uncertainty": {"minor_only": False, "meaning": "有依据的目标或障碍空间问题，不猜未来收益。"},
-    "execution_drift": {"minor_only": False, "meaning": "报价变化影响当前执行；旧收盘价与新报价不同本身不是冲突。"},
-    "missing_data": {"minor_only": False, "meaning": "本次方案必需且输入确实缺失的数据，不包括未知外部新闻。"},
-    "hard_limit": {"minor_only": False, "meaning": "违反明确风险限制；EMA偏离超过1.5ATR归此类，不归浅回撤。"},
+    "volume": {"minor_only": True, "observation_allowed": True, "meaning": "普通或偏弱量能，仅轻微观察；必要量数据缺失用missing_data。"},
+    "shallow_retrace": {"minor_only": True, "observation_allowed": True, "meaning": "回撤深度略浅，仅轻微观察；深度下行、远离EMA不属于浅回撤。"},
+    "trigger_weakness": {"minor_only": False, "observation_allowed": True, "meaning": "真实收盘触发不足或较弱；不得把已成立的触发说成不存在。轻微不足可观察，缺必要触发须保留意见。"},
+    "opposing_structure": {"minor_only": False, "observation_allowed": True, "meaning": "有真实证据的反向信息；M15暂反向、单根M5颜色、未确认反转仅可作轻微观察，独立及时的重大反向结构须放reservations。"},
+    "stop_vulnerability": {"minor_only": False, "observation_allowed": True, "meaning": "保护结构的风险意见；硬保护已满足的轻微顾虑可观察，命名结构或M5极值保护不足须保留意见并引用保护价和缓冲。"},
+    "target_uncertainty": {"minor_only": False, "observation_allowed": True, "meaning": "有依据的目标或障碍意见；硬空间已满足的轻微不确定性可观察，重要障碍前空间不足须保留意见，不猜未来收益。"},
+    "execution_drift": {"minor_only": False, "observation_allowed": True, "meaning": "报价变化影响当前执行；未影响合法执行的轻微波动可观察，实质执行风险须保留意见；旧收盘价与新报价不同本身不是冲突。"},
+    "missing_data": {"minor_only": False, "observation_allowed": False, "meaning": "本次方案必需且输入确实缺失的数据，必须放reservations，不包括未知外部新闻。"},
+    "hard_limit": {"minor_only": False, "observation_allowed": False, "meaning": "违反明确风险限制，必须放reservations；EMA偏离超过1.5ATR归此类，不归浅回撤。"},
 }
 CAUSES = frozenset(CAUSE_RULES)
 MINOR_CAUSES = frozenset(cause for cause, rule in CAUSE_RULES.items() if rule["minor_only"])
 SCORED_CAUSES = CAUSES - MINOR_CAUSES
+OBSERVATION_CAUSES = frozenset(cause for cause, rule in CAUSE_RULES.items() if rule["observation_allowed"])
 
 
 def dimension_fields(level, version=VERSION):
@@ -37,7 +38,7 @@ def dimension_fields(level, version=VERSION):
 
 def allowed_causes(level, version=VERSION, observations=False):
     if observations:
-        return MINOR_CAUSES
+        return OBSERVATION_CAUSES
     if version == PREVIOUS_VERSION and level == "adequate":
         return CAUSES
     return SCORED_CAUSES
@@ -73,7 +74,7 @@ def dimension_error(name, item, version=VERSION):
                     issue_path, cause, level,
                     ("轻微原因须放observations，不能支撑weak/missing" if version == VERSION
                      else "普通量/浅回撤仅是轻微意见，不能支撑weak/missing") if cause in MINOR_CAUSES
-                    else "observations只允许普通量/浅回撤，重大原因须放reservations")
+                    else "硬限制/必要数据缺失不能放observations，必须放reservations")
             if not isinstance(issue.get("reason"), str) or not issue["reason"].strip():
                 return "AI-1质量评估原因缺失: " + issue_path
             refs = issue.get("evidence_refs")
@@ -102,7 +103,7 @@ def dimension_schema(refs):
         if "reservations" in dimension_fields(level):
             properties["reservations"] = {"type": "array", "minItems": LEVEL_RULES[level]["minimum_reservations"],
                                           "items": issue_schema(allowed_causes(level))}
-            properties["observations"] = {"type": "array", "items": issue_schema(MINOR_CAUSES)}
+            properties["observations"] = {"type": "array", "items": issue_schema(allowed_causes(level, observations=True))}
         branches.append(_object(properties))
     return {"anyOf": branches}
 
@@ -112,7 +113,10 @@ RESERVATIONS_POLICY = (
     "strong只填level/reason/evidence_refs，不含reservations或observations。"
     "其他等级还须填reservations和observations两个数组；adequate的reservations为minor，"
     "weak为material，missing为blocking，weak/missing至少一条reservations。"
-    + "/".join(sorted(MINOR_CAUSES)) + "只能放observations，无额外扣分、不能独立造成weak/missing或观望；"
+    "cause声明问题主题，不自动声明程度。observations一律是minor，不继承所在维度的weak/missing程度；"
+    "允许主题" + "/".join(sorted(OBSERVATION_CAUSES)) + "，例如单根M5反向但无反转确认；"
+    "硬限制/必要数据缺失必须放reservations，独立及时的重大反证不能作为轻微观察。"
+    + "/".join(sorted(MINOR_CAUSES)) + "只能放observations；观察无额外扣分、不能独立造成weak/missing或重大反证观望；"
     "重大问题和轻微观察可并存，以重大原因定level。一个cause/event只归一项，包括observations。"
     "每条意见含cause/event_group/reason/evidence_refs，Python生成ID/归属/程度，不由模型重复声明。"
 )

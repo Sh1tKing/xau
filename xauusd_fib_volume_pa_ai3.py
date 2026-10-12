@@ -940,7 +940,7 @@ def quality_rubric(analysis_mode=False):
             "trigger": ("真实原始已收盘K线所证自主打法触发可为adequate，无需固定检测器；analysis_checkpoint本身不能证明触发。" if analysis_mode else "本地M15或M5已收盘规则或strategy_evidence.closed_trigger命中可为adequate；更明确独立确认可为strong，不强制双周期。颜色、弱量不否定false_break。"),
             "protection": "止损保护命名结构且覆盖最近3根M5极值和缓冲、距离不超过上限为adequate；不能只因相对ATR较紧就认定无保护。",
             "target": "目标有给定依据、重要未克服障碍之前有空间且有效报价RR至少1.5为adequate；刚过1.5无需在其他项重复扣分。",
-            "counter_evidence": "没有可核实反向证据为strong；普通量、浅回撤、H1旧影线、未证实过程极值等minor意见为adequate；独立及时的反向结构为material。",
+            "counter_evidence": "没有可核实反向证据为strong；普通量用volume、浅回撤用shallow_retrace放observations；H1旧影线、单根M5反向、M15暂反向或未确认反转仅是minor，可用opposing_structure放observations；仅有这些轻微观察评adequate。独立及时的重大反向结构须放reservations并评weak。",
         },
         "proposal_policy": "硬伤或必要证据缺失则no；已成立的候选仅有minor意见时给出提案，最终分数及Python/AI2决定是否放行。不要将不确定未来获利当成必要字段缺失。",
         "quote_policy": ("自主候选reference_price是本次成功POST live_quote的BUY Ask/SELL Bid；coarse_reference_price与local_plan_feasibility保留原本地M15方案诊断。AI2/Python再核新报价。" if analysis_mode else "reference_price与live_quote来自不同时间，差异本身不是事实冲突；用live_quote核实当前可行性，AI2/Python还会复核执行。"),
