@@ -26,11 +26,13 @@
 
 ## 当前架构
 
+黄金主系统新仓护盘（2026-10-13，用户授权构建）：默认`profit-floor-v1`，纯规则在`strategies/profit_guard.py`，主脚本负责MT5现金模型、身份/报价复核、原子状态与真实执行。新仓冻结参数及原SL/TP到原事件metadata，绑定后保存`guardian_profit_state.json`；旧无标记仓继续legacy，不按当前配置重建旧仓。按运行配置轮询（现0.5秒），BUY用Bid、SELL用Ask；扣已知入场费用、预留平仓费用和负swap，点差不重复扣。持续1秒的新有利报价才晋级，初始预计净锁盈至少0.20账户币种，30%/1R40%/2R50%，没有1R启动门；保留max(冻结上升的1×M5 ATR,3×点差,0.50价格单位,broker止损/冻结+1tick)空间。确认SL只能收紧；ATR下降/回撤不推进，未成功提交不算锁盈。AI3 hold保留底线、tighten也过噪声及当前broker门，策略性退出由AI3处理；新仓不运行旧sigmoid盈利前退出、本地结构退出或旧保本触发，原SLTP及原期限继续。此分工依赖三AI入口，纯本地回放不含AI3，不得称收益更好。实际.env、模型/超时/门槛/三盘定义、crypto及local_guard_demo不改；完整部署含profit_guard.py及两个主脚本，用户自行重启。
+
 独立样本 `local_guard_demo/`（2026-10-12）：用户要求纯本地完整入场+单AI异步护仓，独立文件夹、不接飞书，随后要求秒级黄金。默认strategy.py用H1许可/真实30秒采样区间/持续约1秒突破，0.2秒目标轮询；最新授权由AI负责策略性护仓。新仓冻结quote_ai_guardian_v1，回区间/20秒不足0.15R/0.5R锁盈仅提醒，AI自主hold/tighten/close，本地保留原SLTP/现金风险/SL恢复/2分钟期限。绑定立即派发，默认15秒最小间隔/20秒有效决策预算/动作偏移0.15原始R；成功POST快照验证证据，最新报价及最终Broker修改/平仓前再检查身份/契约/时效/价格变化；单线程、每轮主备最多2POST，坏回复不重审。旧无guardian_policy仓及显式local对照仍沿用原短时本地退出/锁盈，不能重建旧仓。LG_独立配置、magic、0.01单仓、SL8/RR1.5/M5保护/EMA追价/真实现金风险门、token落盘和默认observe保留；EMA入口entry_ema.py保留。replay仅local_comparison、冻结策略/次报价成交/延迟成本压力，不能作为AI护仓收益；真实采样不是完整tick。实际.env、runtime、黄金/crypto/server_deploy本次不改；样本不在公开黄金快照白名单内，用户自行复制完整源码并重启，见local_guard_demo/README.md及VALIDATION.md。
 
 主文件：
 
-- `xauusd_fib_volume_pa_trader.py`：本地策略、下单、虚拟锁盈和单票平仓。
+- `xauusd_fib_volume_pa_trader.py`：本地策略、下单、新仓分级锁盈、旧仓虚拟护盘和单票平仓。
 - `xauusd_fib_volume_pa_ai3.py`：AI-1、AI-2、AI-3。它调用本地策略，不复制一套规则。
 - `strategies/definitions/*.py`：策略定义唯一入口，集中评分、参数、证据及AI三角色规则；`strategies/framework.py`自动发现并按文件内容指纹重载。2026-10-10默认启用三盘adaptive定义，旧固定定义及session_retest默认关闭，算法保留。评分异常/语法错误/重复id/无启用策略阻止新入场，持仓护盘继续。旧AI提案绑定原指纹，定义改变即停止审核/执行；已开仓的策略契约和证据保留给AI-3。回测开始冻结定义，不运行中换策略。新策略硬条件写Assessment.blockers，Python也执行，不只靠提示词；粗筛软意见不能误写成硬条件。目标倍数可在1.5–6内调整，旧三策略1.8、新三盘3.0，公共SL8/RR1.5/H1/追价/M5极值保护限制不能覆盖。模板和说明见docs/strategies，CLI `python -m strategies.check`不连接MT5。部署必须复制完整strategies包，框架首次部署需用户重启，此后定义文件在下一次评估/刷新自动检查；辅助模块/.env仍需重启。不要宣传自动从自然语言推导策略或已验证收益。
 - 日志目录：`xau_fib_pa_logs/`。密钥只放 `.env`。
@@ -90,6 +92,8 @@
 - 不把仓位改成账户的 1.5%，不把方向过滤抬回 D1/H4。
 
 ## 已知问题
+
+- 2026-10-13 黄金先锁利润护盘`profit-floor-v1`：实现用户已批准的“本地快保护+AI3策略判断”。只对新提交且冻结标记的仓生效，保存原风险/规则、最优确认价、ATR上限、desired意图与broker确认底线；缺失/放宽SL恢复已确认线，价格越线按最新身份/报价退出。每次修改读取最新SL/TP及broker距离，不回退或夹价；MT5 RLock覆盖本地护盘和AI3执行。原事件token可恢复成交后绑定前崩溃的新仓规则/期限；错身份/不完整回执不猜仓，坏锁盈状态不覆盖、不恢复成legacy；每次报价使用已保存服务器UTC偏移，整小时旧tick不能通过重新推断偏移变成新报价。未盈利不运行旧追损虚拟退出；费用/模型未知时不制造确定净利润承诺。初始参数是模拟假设，不是最优值。538项离线回归、两自检、策略CLI及回放帮助验证；缓存最新100个旧本地固定入场逐票M1对照（共同90分钟期限/0.10费用，无AI1/2/3），17改善/53变差/30相同，新纯本地退出整体更差，不能作为含AI3收益或单仓账户业绩，也不据此调参。设计与验证见`docs/superpowers/specs/2026-10-13-profit-floor-guardian.md`及`docs/experiments/2026-10-13-profit-floor-validation.md`；安全回归入口`verify_gold_profit_guard.py`隔离真实状态并禁止未mock的MT5/HTTP，缓存控制入口`replay_gold_profit_guard.py`只读缓存/旧逐笔。已有server_deploy原文件同步，无修复包；保留.env及最新三个状态文件，由用户重启，未启动交易/付费AI或推送远程。
 
 - 2026-10-13 黄金止损执行复核：AI2 Grok Messages实际发送max_tokens4096及thinking disabled，上游报告7814且含思考块；客户端已有超限拒绝/配置暂停，参数不是漏填，不增加非Messages字段或抬上限。本轮新增实际路由/7814离线回归，未改实际.env/模型/档位/主备。`xauusd_fib_volume_pa_trader.py:modify_position_sl`原来按调用者旧持仓对象比较SL，离线复现BUY95→100.5后旧对象仍能提交99，SELL同理；现每次按ticket读取唯一当前持仓并验symbol/magic/方向/已知identifier，使用最新服务器SL/TP，在AI主系统共享MT5锁内比较/提交。按实际tick网格量化后重核单向收紧及Bid/Ask触发侧stops/freeze距离、现SL/TP冻结和TP距离；非法/未知/距离不足不提交，不向外改松建议、不放弃已有SL，失败日志保留目标/当前SLTP和broker参数。18项新执行测试及3项旧函数失败→新函数通过验证，完整验证见部署MANIFEST及docs/experiments/2026-10-13-ai2-cap-and-guardian-stop-review.md。实际本地已经0.5秒跟踪，AI3按M1异步；盈利后仅按新高水位锁盈、AI3主管策略性退出是后续建议，尚未替换当前虚拟线/结构退出/触发/缓冲/期限，不能把本次执行修复宣传成该新策略已启用或AI3比本地收益更好。只允许单实例，同进程锁不能控制其它终端；无真实HTTP/MT5操作，不保证报价跳变时永无Invalid stops，用户更新原文件并自行重启。
 

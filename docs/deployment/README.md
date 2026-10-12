@@ -32,6 +32,18 @@
 5. 双击 `start.cmd` 启动三AI策略。该操作会按 `.env` 的交易开关运行，可能实际下单；只运行一个实例。
 6. 查看启动输出：应显示 `adaptive-session-v1`、三个启用的adaptive名称和策略指纹，并说明本地分不是新模式AI派发门槛；证据版本为 `entry-evidence-v5`、质量评分为 `entry-quality-v3`、行情刷新为 `request-freshness-v2`。AI门槛以实际 `.env` 为准，AI分比较五项质量总分（非胜率）；旧固定模式仍使用本地门槛。日志写入 `xau_fib_pa_logs`，跨日后第一条记录会按服务器本地日期创建对应日期日志；每次AI结果可查看质量明细、状态与观望依据。更新后需自行重启加载，旧进程不会自动换代码或配置。
 
+## 2026-10-13 分级利润保护
+
+本次完整覆盖两个黄金主脚本和`strategies/`（含新增`profit_guard.py`），部署清单/代码签名以MANIFEST为准。保留服务器自己的.env和最新状态，不用本机同步下来的旧状态覆盖服务器；原进程需由用户重启，保持单实例。辅助模块不能像策略定义一样热加载。
+
+未配置`FIB_PA_GUARDIAN_POLICY`时，新订单默认`profit_floor_v1`。现有仓没有冻结新标记时继续旧护盘。新订单参数在入场时冻结，修改.env只影响之后的新订单；显式`legacy`同样只影响之后的新订单。实际.env没有被这次更新修改，轮询仍使用`FIB_PA_POLL_SECONDS`（当前0.5秒）。
+
+持续1秒的新有利报价才提高预计利润保护；初始净保护至少0.20账户币种，初始30%，达到原风险1R/2R后40%/50%，没有必须先到1R的门。仍须留出M5 ATR、点差及broker最小距离的回撤空间，因此刚有微小浮盈时可能尚不能设置利润止损。已确认线不可回退；AI3 hold保留它，tighten必须更紧且有足够空间。原SL/TP和原持仓期限继续执行；新仓的策略性提前退出交给AI3，旧盈利前虚拟退出/本地结构退出不再套用到新仓。
+
+迁移同一账户时，在旧进程停止后保留最新`strategy_event_state.json`、`ai3_position_state.json`及新增`guardian_profit_state.json`。新锁盈状态默认与事件ledger同目录，也可用`FIB_PA_GUARDIAN_STATE_FILE`指定；不要删除它以重建水位。状态损坏/写入失败阻止新锁盈入场，现有服务器保护仍保留。日志`锁盈确认`分别记录保护线、预计净金额与费用状态；费用预留、滑点及止损成交不保证实际净收益等于预计值。
+
+离线工程检查与固定缓存控制见[验证记录](../experiments/2026-10-13-profit-floor-validation.md)。纯本地对照没有AI3且结果较差，不能用它证明该组合收益改善；下一步应观察新的模拟仓日志，不按本轮缓存调整默认参数。
+
 ## 2026-10-12 评分契约v3更新
 
 同步AI脚本及完整strategies包，包含新增 `quality.py`；普通量/浅回撤使用observations，重大问题使用reservations，提示词、Schema与Python共享同一等级关联规则。有效旧卡按原版本处理，坏卡不改分、不补发审核；错误通知显示实际路径/cause/level，并可附独立风险诊断。详情见 [验证记录](../experiments/2026-10-12-ai1-quality-contract-v3.md)。如需运行离线Schema回归，可安装 `requirements-test.txt`；正常交易仅需 `requirements.txt`，不依赖jsonschema。

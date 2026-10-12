@@ -82,7 +82,7 @@ class IntradayReplayTests(unittest.TestCase):
         test.windows['H1']=replay.Window(replay.pd.concat([data['H1'],added]),3600)
         self.assertIn('新闭合H1',test.research_signal_error(result,1,self.ts))
     def test_sell_ask_exit_and_guardian_use_scaled_cost(self):
-        test=replay.Backtest(self.data,self.meta,55,spread_multiplier=2)
+        test=replay.Backtest(self.data,self.meta,55,spread_multiplier=2,guardian_policy="legacy")
         result=old.proposal('sell')
         test.open_position(result,0,self.ts)
         self.assertIsNotNone(test.position)

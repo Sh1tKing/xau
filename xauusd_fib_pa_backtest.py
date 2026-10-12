@@ -2,8 +2,8 @@
 """Replay MT5 history through the local XAUUSD strategy.
 
 Every closed M5 bar runs build_fib_volume_pa_decision() with the same context the live
-script sees. Fills and the local guardian (breakeven, virtual trailing line, structure
-failure, real SL/TP) are simulated on M1 bars. AI-1/2/3 are not called.
+script sees. Fills and the selected local guardian are simulated on M1 bars;
+profit-floor stops take effect on the next bar. AI-1/2/3 are not called.
 """
 
 import argparse
@@ -153,7 +153,15 @@ def reject_key(reasoning):
 
 class Backtest:
     def __init__(self, data, meta, threshold, spread_points=None, *, strategies=None,
-                 entry_delay_seconds=0, spread_multiplier=1.0):
+                 entry_delay_seconds=0, spread_multiplier=1.0, guardian_policy=None):
+        if guardian_policy not in (None, "legacy", "profit_floor_v1"):
+            raise ValueError("unknown guardian policy")
+        self.guardian_policy = (None if guardian_policy == "legacy" else base.frozen_guardian_policy())
+        if guardian_policy == "profit_floor_v1" and self.guardian_policy is None:
+            self.guardian_policy = base.profit_policy()
+        self.guard_fee = float(meta.get("guardian_fee_cash", self.guardian_policy["fee_reserve"] if self.guardian_policy else 0.))
+        if not math.isfinite(self.guard_fee) or self.guard_fee < 0:
+            raise ValueError("invalid replay guardian costs")
         self.strategy_snapshot = base.STRATEGIES.snapshot()
         if self.strategy_snapshot.error:
             raise base.StrategyError(self.strategy_snapshot.error)
@@ -387,6 +395,7 @@ class Backtest:
             risk=max(risk, 0.01),
             highest_price=entry,
             lowest_price=entry,
+            profit_floor=base.ProfitFloor(copy.deepcopy(self.guardian_policy), sl, entry) if self.guardian_policy else None,
         )
         self.position = {
             "side": side,
@@ -411,6 +420,7 @@ class Backtest:
         state = pos["state"]
         sign = 1 if pos["side"] == "buy" else -1
         pnl = sign * (price - state.entry_price) * self.lot_value
+        pnl -= self.guard_fee
         self.trades.append({
             "open_bj": beijing(pos["open_ts"], self.offset).strftime("%Y-%m-%d %H:%M"),
             "close_bj": beijing(ts, self.offset).strftime("%Y-%m-%d %H:%M"),
@@ -477,11 +487,28 @@ class Backtest:
         return False
 
     def update_guardian(self, i):
-        # Same rules as FibVolumePATrader.run_guardian(), evaluated once per closed M1 bar.
+        # Closed M1 proxy, not a reconstructed intrabar tick path.
         pos = self.position
         state = pos["state"]
         _, atr = self.guardian_context(self.t[i] + 60)
         if atr <= 0:
+            return
+        if state.profit_floor:
+            guard = state.profit_floor
+            price = self.c[i] + (self.spreads[i] if pos["side"] == "sell" else 0.)
+            base.update_guardian_extremes(state, price)
+            target = guard.observe(direction=state.direction, entry=state.entry_price, risk=state.risk,
+                                   price=price, atr=atr, spread=self.spreads[i], broker_gap=self.point,
+                                   cash_per_price=self.lot_value, costs=self.guard_fee, now=self.t[i] + 60,
+                                   closed_bar_proxy=True)
+            if target:
+                target = base.round_protective_stop(pos["side"], target)
+                sign = 1 if pos["side"] == "buy" else -1
+                if (base.sl_change_is_tighter(state.direction, pos["sl"], target)
+                        and sign * (price - target) + 1e-8 >= guard.room(atr, self.spreads[i], self.point)
+                        and sign * (target - state.entry_price) * self.lot_value - self.guard_fee + 1e-8 >= guard.rules["min_net_lock"]):
+                    pos["sl"] = target
+                    guard.acknowledge(state.direction, target)
             return
         disaster = max(base.REAL_SL_DISASTER_MIN, base.REAL_SL_DISASTER_ATR * atr)
         step = max(base.MIN_SL_MODIFY_ABS, base.MIN_SL_MODIFY_ATR * atr)
@@ -520,6 +547,8 @@ class Backtest:
             pos["sl"] = target
 
     def check_structure(self, close_ts):
+        if self.position["state"].profit_floor:
+            return  # This control has no AI3; do not quietly reinstate legacy exits.
         m5, atr = self.guardian_context(close_ts)
         if atr <= 0 or m5 is None:
             return
@@ -643,6 +672,9 @@ def summarize(trades, stats, rejects, meta, start_balance):
     lines.append("本地阈值: %s，手数: %s，起始资金: %.2f" % (meta["threshold"], base.LOT_SIZE, start_balance))
     lines.append("止损上限: %.2f 美元，单笔最多亏起始资金的 %.1f%%" % (
         base.MAX_SL_ABS, 100.0 * base.MAX_SL_ABS / start_balance if start_balance > 0 else 0.0))
+    lines.append("护盘规则: " + json.dumps(meta.get("guardian_policy", "legacy"), ensure_ascii=False))
+    lines.append("护盘分辨率: " + str(meta.get("guardian_resolution", "legacy M1")))
+    lines.append("每笔费用假设: " + str(meta.get("guardian_fee_cash_assumption", 0.0)))
     lines.append("")
     lines.append("成交 %d 笔，盈利 %d，亏损 %d，胜率 %.1f%%" % (
         len(trades), len(wins), len(losses), 100.0 * len(wins) / len(trades) if trades else 0.0))
@@ -696,6 +728,8 @@ def main():
     parser.add_argument("--spread", type=float, default=None, help="固定点差(points)，默认用每根K线自带的点差")
     parser.add_argument("--server-offset", type=float, default=None, help="MT5 服务器相对 UTC 的小时数，默认自动检测")
     parser.add_argument("--offline", action="store_true", help="不连 MT5，直接用上次保存的 CSV")
+    parser.add_argument("--guardian-policy", choices=("profit_floor_v1", "legacy"), default=None,
+                        help="冻结护盘对照；profit为M1收盘代理，无AI3/秒级路径")
     parser.add_argument("--strategies", default=None, help="离线启用ID列表，不修改定义或.env")
     parser.add_argument("--entry-delay-seconds", type=int, default=0, help="冻结方案延迟，非负整分钟秒数")
     parser.add_argument("--spread-multiplier", type=float, default=1.0, help="统一成交/护盘/出场点差倍数")
@@ -758,7 +792,11 @@ def main():
     print("回放 %s 到 %s，M1 共 %d 根" % (meta["start_bj"], meta["end_bj"], len(m1)))
 
     test = Backtest(data, meta, args.threshold, args.spread, strategies=args.strategies,
-                    entry_delay_seconds=args.entry_delay_seconds, spread_multiplier=args.spread_multiplier)
+                    entry_delay_seconds=args.entry_delay_seconds, spread_multiplier=args.spread_multiplier,
+                    guardian_policy=args.guardian_policy)
+    meta['guardian_policy'] = copy.deepcopy(test.guardian_policy) or 'legacy'
+    meta['guardian_fee_cash_assumption'] = test.guard_fee
+    meta['guardian_resolution'] = 'closed M1 proxy, next-bar stop; no tick confirmation or AI3' if test.guardian_policy else 'legacy M1'
     meta['selected_strategies'] = [s.id for s in test.strategy_snapshot.strategies if s.enabled]
     meta['offline_strategy_override'] = args.strategies
     meta['entry_delay_seconds'] = args.entry_delay_seconds

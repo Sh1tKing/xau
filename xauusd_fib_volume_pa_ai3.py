@@ -114,7 +114,8 @@ def loaded_code_signature():
     """Capture loaded source identity once, before deployment can replace files."""
     digest = hashlib.sha256()
     for filename in (__file__, base.__file__, os.path.join(BASE_DIR, "strategies", "citations.py"),
-                     os.path.join(BASE_DIR, "strategies", "quality.py")):
+                     os.path.join(BASE_DIR, "strategies", "quality.py"),
+                     os.path.join(BASE_DIR, "strategies", "profit_guard.py")):
         try:
             with open(filename, "rb") as source:
                 digest.update(hashlib.sha256(source.read()).digest())
@@ -201,7 +202,10 @@ AI3_INSTRUCTIONS = (
     "禁止放宽止损，禁止加仓，禁止新开仓。tighten_sl 必须比当前止损更有利，并给出绝对价格。"
     "核实入场理由失效时必须使用该理由指定周期的已收盘K线：M15边界用m15_bars，H1边界用h1_bars，"
     "不能从M1/M5收盘推断M15/H1已收盘破坏。对应周期或时间覆盖不足时失效证据为未知，不能凭此close。"
-    "窄震荡里的上下影线和轻微回撤选择 hold，交给本地虚拟锁盈。"
+    "窄震荡里的上下影线和轻微回撤选择 hold，交给已冻结的本地保护规则。"
+    "positions.profit_guard存在时，Python按实时平仓侧报价分级锁盈。protected_sl是已确认保护，desired_sl仅是未必执行的目标。"
+    "hold不得撤回保护底线，tighten_sl也必须满足profit_guard.minimum_room的回撤空间；过近建议不会执行。"
+    "本地只做利润保护、原SLTP及期限，原交易结构是否失效由你按已收盘证据判断。旧仓没有profit_guard时仍沿用旧护盘。"
     "不必等价格碰到初始止损才处理，但不能仅因当前浮亏或持仓时间提前退出。只有指定失效边界被已收盘K线越过，"
     "或至少两根相邻已收盘M1朝不利方向推进、最近M5结构同步恶化且没有有利拒绝时，才可close；否则优先hold。"
     "单根影线刺穿但收盘收回不算结构失效。浮盈单可以把止损收紧到入场价以上（BUY）或以下（SELL）来锁定利润。"
@@ -2126,7 +2130,7 @@ def append_decision_snapshot(decision_id, stage, payload):
 class ThreeAITrader(base.FibVolumePATrader):
     def __init__(self):
         super().__init__()
-        self._mt5_lock = threading.RLock()
+        self._mt5_lock = self._guardian_lock
         self._state_lock = threading.RLock()
         self.entry_contexts = {}
         self._entry_lock = threading.Lock()
@@ -2270,6 +2274,7 @@ class ThreeAITrader(base.FibVolumePATrader):
             "reference_entry_price": details.get("reference_entry_price", details.get("entry_price")),
             "reference_price_source": details.get("reference_price_source"),
             "reference_price_metadata": copy.deepcopy(details.get("reference_price_metadata")),
+            "guardian_policy": copy.deepcopy(details.get("guardian_policy")),
             "coverage": "from_entry",
             "coverage_started_at": time.time(),
             "last_observed_at": time.time(),
@@ -2448,6 +2453,10 @@ class ThreeAITrader(base.FibVolumePATrader):
     def modify_position_sl(self, position, new_sl, reason):
         with self._mt5_lock:
             return super().modify_position_sl(position, new_sl, reason)
+
+    def run_guardian(self):
+        with self._mt5_lock:
+            return super().run_guardian()
 
     def close_position_by_ticket(self, position, reason):
         with self._mt5_lock:
@@ -2950,7 +2959,23 @@ class ThreeAITrader(base.FibVolumePATrader):
         state_changed = False
         for position in positions:
             ticket = int(position.ticket)
-            state = self.guardian_states.get(ticket)
+            with self._mt5_lock:
+                state = self.guardian_states.get(ticket)
+                profit_guard = state.profit_floor.export() if state and state.profit_floor else None
+                if profit_guard:
+                    broker_gap = 0.
+                    try:
+                        info = base.mt5.symbol_info(base.SYMBOL)
+                        broker_gap = max(float(info.trade_stops_level), float(info.trade_freeze_level)) * float(info.point)
+                        broker_gap += float(info.trade_tick_size or info.point)
+                        if not math.isfinite(broker_gap) or broker_gap <= 0:
+                            raise ValueError("invalid broker stop distance")
+                    except (AttributeError, TypeError, ValueError, OverflowError):
+                        broker_gap = 0.
+                    profit_guard["broker_distance_known"] = broker_gap > 0
+                    profit_guard["minimum_room"] = state.profit_floor.room(
+                        float(payload["atr_m5"]), float(tick.ask - tick.bid) if tick else 0., broker_gap)
+                    profit_guard["fee_status"] = "opening_history_plus_exit_reserve" if state.profit_floor.fees_known else "estimated_reserve"
             with self._state_lock:
                 saved_context = self.entry_contexts.get(str(ticket))
                 context = dict(saved_context) if isinstance(saved_context, dict) else None
@@ -3002,6 +3027,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 "tp": float(position.tp or 0),
                 "profit": round(float(position.profit or 0), 2),
                 "virtual_sl": round(float(state.virtual_sl), 2) if state else 0,
+                "profit_guard": profit_guard,
                 "hold_minutes": round(max(0.0, hold_minutes), 1),
                 "initial_risk": round(risk, 2) if risk > 0 else None,
                 "r_now": round(move / risk, 2) if risk > 0 else None,
