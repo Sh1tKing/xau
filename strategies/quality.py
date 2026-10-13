@@ -104,7 +104,12 @@ def dimension_schema(refs):
             properties["reservations"] = {"type": "array", "minItems": LEVEL_RULES[level]["minimum_reservations"],
                                           "items": issue_schema(allowed_causes(level))}
             properties["observations"] = {"type": "array", "items": issue_schema(allowed_causes(level, observations=True))}
-        branches.append(_object(properties))
+        branch = _object(properties)
+        branch["description"] = ("strong只写level/reason/evidence_refs，不含意见数组。" if level == "strong" else
+                                 "必须写level/reason/evidence_refs/reservations/observations；"
+                                 "即使没有意见，也不能省略reservations或observations，必须写空数组[]。"
+                                 + ("weak/missing至少一条reservations，observations可以为空。" if level == "weak" else ""))
+        branches.append(branch)
     return {"anyOf": branches}
 
 

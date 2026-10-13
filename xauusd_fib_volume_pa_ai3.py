@@ -105,6 +105,7 @@ _CAP_BLOCKED_ROUTES_LOCK = threading.RLock()
 COST_CONTROL_VERSION = "cost-latency-v2"
 AI3_THINKING_CONTROL_VERSION = "xau-ai3-thinking-v1"
 AI_REVIEW_RELIABILITY_VERSION = "ai-review-reliability-v1"
+AI_OUTPUT_RELIABILITY_VERSION = "ai-output-reliability-v2"
 MARKET_FRESHNESS_VERSION = "request-freshness-v2"
 RESPONSE_CONTRACT_VERSION = "response-contract-v3"
 LEGACY_QUALITY_VERSION = "entry-quality-v1"
@@ -1289,20 +1290,89 @@ def response_json_schema(role, request_pack=None):
     return None
 
 
+def response_schema_error(payload, schema):
+    """Diagnose the subset emitted by response_json_schema; never repair or trade.
+
+    This is not a general JSON Schema engine. It checks our generated wire
+    schema only, separately from evidence isolation, strategy and risk checks.
+    """
+    if schema is None:
+        return ""
+
+    def location(path, key):
+        return path + "/" + str(key).replace("~", "~0").replace("/", "~1")
+
+    def check(value, rule, path="", depth=0):
+        if depth > 30 or not isinstance(rule, dict):
+            return (path or "/") + " 请求Schema无效"
+        if "$ref" in rule:
+            ref = rule["$ref"]
+            target = pointer_value(schema, ref[1:]) if isinstance(ref, str) and ref.startswith("#/") else _MISSING_EVIDENCE
+            if target is _MISSING_EVIDENCE:
+                return (path or "/") + " 请求Schema引用无效"
+            return check(value, target, path, depth + 1)
+        if "anyOf" in rule:
+            branches = rule["anyOf"]
+            # Select the declared grade branch for precise missing-array errors.
+            if isinstance(value, dict) and "level" in value:
+                matching = [branch for branch in branches
+                            if value["level"] in branch.get("properties", {}).get("level", {}).get("enum", [])]
+                if matching:
+                    branches = matching
+            errors = [check(value, branch, path, depth + 1) for branch in branches]
+            return "" if "" in errors else errors[0] if errors else (path or "/") + " Schema分支为空"
+        kind = rule.get("type")
+        numeric = not isinstance(value, bool) and (isinstance(value, int)
+                                                   or isinstance(value, float) and math.isfinite(value))
+        matches = {"object": isinstance(value, dict), "array": isinstance(value, list),
+                   "string": isinstance(value, str), "number": numeric,
+                   "integer": numeric and int(value) == value, "null": value is None,
+                   "boolean": isinstance(value, bool)}
+        if kind is not None and not matches.get(kind, False):
+            return (path or "/") + " 类型须为" + str(kind)
+        if "enum" in rule and value not in rule["enum"]:
+            return (path or "/") + " 不在本次Schema枚举内"
+        if kind == "object":
+            missing = sorted(set(rule.get("required", [])) - set(value))
+            if missing:
+                return (path or "/") + " 缺少字段: " + ",".join(missing)
+            properties = rule.get("properties", {})
+            if rule.get("additionalProperties") is False and set(value) - set(properties):
+                return (path or "/") + " 存在未声明字段"
+            for key, item in value.items():
+                if key in properties:
+                    error = check(item, properties[key], location(path, key), depth + 1)
+                    if error:
+                        return error
+        if kind == "array":
+            if len(value) < rule.get("minItems", 0):
+                return (path or "/") + " 数组不足最低项数"
+            for index, item in enumerate(value):
+                error = check(item, rule.get("items", {}), location(path, index), depth + 1)
+                if error:
+                    return error
+        return ""
+
+    return check(payload, schema)
+
+
 def ai1_json_template():
     return {"opportunity_id": "<本次候选ID；仅无opportunities的legacy输入可空字符串>", "action": "no", "stop_loss": None, "take_profit": None,
             "reasoning": "<本次结论>", "trigger_evidence": "<实际触发或缺失>",
             "invalidation": "<失效条件>", "target_basis": "<目标依据>", "fact_conflicts": [], "unknowns": [],
+            "wait_basis": [{"code": "missing_trigger", "reason": "<实际等待条件>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}],
             "quality_assessment": {"version": QUALITY_VERSION, "direction": "buy", "dimensions": {
                 name: {"level": "adequate", "reason": "<本项证据结论>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"],
-                       "reservations": [], "observations": []} for name in QUALITY_DIMENSIONS}},
-            "wait_basis": [{"code": "missing_trigger", "reason": "<实际等待条件>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}]}
+                       "reservations": [], "observations": []} for name in QUALITY_DIMENSIONS}}}
 
 
 AI1_INSTRUCTIONS += (
     "严格输出一个完整JSON对象，闭合所有括号，不输出Markdown或分析过程。wait_basis必须在顶层，与quality_assessment并列，"
     "quality_assessment内部只有version/direction/dimensions，轻微观察放observations、扣分理由放reservations；strong维度不含这两个数组。以下仅示范层级，示例方向/等级/理由/路径不可复用，须按实际证据重填；"
-    "有交易提案时wait_basis为空数组。格式模板：" + json.dumps(ai1_json_template(), ensure_ascii=False, separators=(",", ":"))
+    "有交易提案时wait_basis为空数组。按模板先写顶层wait_basis再写quality_assessment，末尾依次闭合最后维度、dimensions、quality_assessment、顶层对象。"
+    "adequate/weak/missing的每一项都必须写reservations和observations；没有内容也写[]，不能省略。"
+    "输出前只检查括号闭合、字段层级和必填数组，不改交易判断或等级来满足格式。格式模板："
+    + json.dumps(ai1_json_template(), ensure_ascii=False, separators=(",", ":"))
 )
 
 
@@ -1414,6 +1484,10 @@ def record_ai_usage(event):
             usage.get("input_tokens"), usage.get("output_tokens"), usage.get("reasoning_tokens"),
             usage.get("cache_read_tokens"), usage.get("cache_write_tokens"),
         )
+        if row.get("response_shape_status"):
+            base.logger.info("%s 输出格式 call=%s shape=%s schema=%s error=%s",
+                             row["role"], row["call_id"], row["response_shape_status"],
+                             row.get("schema_enforcement"), row.get("response_shape_error") or "none")
     except (OSError, TypeError, ValueError) as exc:
         base.logger.warning("AI用量记录失败: %s", type(exc).__name__)
 
@@ -1423,14 +1497,33 @@ def normalized_chat_usage(result):
     if not isinstance(raw, dict):
         return None
     input_details = raw.get("prompt_tokens_details") or raw.get("input_tokens_details") or {}
-    output_details = raw.get("completion_tokens_details") or raw.get("output_tokens_details") or {}
+    output_details_name = "completion_tokens_details" if raw.get("completion_tokens_details") else "output_tokens_details"
+    output_details = raw.get(output_details_name) or {}
     if not isinstance(input_details, dict):
         input_details = {}
     if not isinstance(output_details, dict):
         output_details = {}
 
     def number(*values):
-        return next((value for value in values if isinstance(value, (int, float)) and not isinstance(value, bool)), None)
+        return next((value for value in values if not isinstance(value, bool) and value is not None
+                     and (isinstance(value, int) or isinstance(value, float) and math.isfinite(value))
+                     and value >= 0), None)
+
+    output = number(raw.get("output_tokens") if result.get("type") == "message" else raw.get("completion_tokens"),
+                    raw.get("output_tokens"))
+    reasoning_fields = ((output_details_name + ".thinking_tokens", output_details.get("thinking_tokens")),
+                        (output_details_name + ".reasoning_tokens", output_details.get("reasoning_tokens")),
+                        ("usage.reasoning_tokens", raw.get("reasoning_tokens")))
+    counters = [(name, number(value)) for name, value in reasoning_fields if number(value) is not None]
+    reasoning = counters[0][1] if counters else None
+    inconsistent = len({value for _, value in counters}) > 1 or (
+        reasoning is not None and output is not None and reasoning > output)
+    reasoning_info = {"reasoning_tokens": reasoning,
+                      "reasoning_source": counters[0][0] if counters else None,
+                      "reasoning_usage_inconsistent": inconsistent,
+                      # Derived from reported counters, not a count of visible text.
+                      "non_reasoning_output_tokens": output - reasoning if output is not None
+                      and reasoning is not None and not inconsistent else None}
 
     if result.get("type") == "message":
         uncached = number(raw.get("input_tokens"))
@@ -1443,7 +1536,7 @@ def normalized_chat_usage(result):
         output = number(raw.get("output_tokens"))
         return {"input_tokens": inclusive, "uncached_input_tokens": uncached, "output_tokens": output,
                 "total_tokens": inclusive + output if inclusive is not None and output is not None else None,
-                "reasoning_tokens": number(raw.get("reasoning_tokens")), "cache_read_tokens": cache_read,
+                **reasoning_info, "cache_read_tokens": cache_read,
                 "cache_write_tokens": cache_write, "input_semantics": "anthropic_cache_exclusive"}
 
     # Providers differ on whether cached input is included; do not add it again.
@@ -1451,7 +1544,7 @@ def normalized_chat_usage(result):
         "input_tokens": number(raw.get("prompt_tokens"), raw.get("input_tokens")),
         "output_tokens": number(raw.get("completion_tokens"), raw.get("output_tokens")),
         "total_tokens": number(raw.get("total_tokens")),
-        "reasoning_tokens": number(output_details.get("reasoning_tokens"), output_details.get("thinking_tokens"), raw.get("reasoning_tokens")),
+        **reasoning_info,
         "cache_read_tokens": number(input_details.get("cached_tokens"), raw.get("cache_read_input_tokens"), raw.get("prompt_cache_hit_tokens")),
         "cache_write_tokens": number(input_details.get("cache_write_tokens"), raw.get("cache_creation_input_tokens")),
         "uncached_input_tokens": number(raw.get("prompt_cache_miss_tokens")),
@@ -1477,8 +1570,8 @@ def response_content_stats(result):
 
 
 def request_thinking_mode(role, using_backup=False):
-    """Independent reviewer/guardian switches; blank preserves provider defaults."""
-    if role not in ("AI-2", "AI-3"):
+    """Independent role switches; blank preserves provider defaults."""
+    if role not in ("AI-1", "AI-2", "AI-3"):
         return None
 
     def configured(name):
@@ -1491,8 +1584,10 @@ def request_thinking_mode(role, using_backup=False):
         backup_value = configured(backup_name)
         if backup_value:
             name, value = backup_name, backup_value
-    if value not in ("", "disabled"):
-        raise AIRequestError(role, "%s只支持空白（原接口默认行为）或disabled；low是EFFORT档位，不是思考开关" % name)
+    allowed = ("", "disabled", "between_tools") if role == "AI-1" else ("", "disabled")
+    if value not in allowed:
+        choices = "disabled/between_tools" if role == "AI-1" else "disabled"
+        raise AIRequestError(role, "%s只支持空白（原接口默认行为）或%s；low是EFFORT档位，不是思考开关" % (name, choices))
     return value or None
 
 
@@ -1570,6 +1665,8 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
         label = channel
         protocol = request_protocol(active["url"])
         thinking_mode = request_thinking_mode(role, using_backup)
+        if thinking_mode == "between_tools" and protocol != "anthropic":
+            raise AIRequestError(role, "thinking=between_tools仅支持显式配置的Messages路线；不改写为其它协议参数")
         option_key = (active["url"], active["model"])
         default_token_field = "max_completion_tokens" if active["model"].lower().startswith(("gpt-", "o1", "o3", "o4")) else "max_tokens"
         with _CHAT_OPTIONS_LOCK:
@@ -1588,6 +1685,8 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                              role, label, attempt, AI_HTTP_RETRIES)
             return ""
         this_effort = "low" if low_retry else active["effort"]
+        if thinking_mode == "between_tools" and this_effort not in (None, "", "low", "medium", "high"):
+            raise AIRequestError(role, "thinking=between_tools要求effort为low/medium/high或接口默认；不自动降低用户档位")
         sent_effort = this_effort if this_effort and not omit_reasoning and thinking_mode != "disabled" else None
         route_key = cap_route_key(role, active, protocol, token_field,
                                   AI_MAX_TOKENS.get(role, 4096), sent_effort, thinking_mode)
@@ -1683,6 +1782,16 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 channel, urlsplit(active["url"]).hostname, active["model"], request_timeout, outcome))
             response_headers = getattr(response, "headers", {}) or {}
             response_id = result.get("id") if isinstance(result, dict) else None
+            shape_status, shape_error = "unavailable", None
+            if outcome == "truncated":
+                shape_status = "truncated"
+            elif outcome in ("success", "invalid_decision_json"):
+                parsed, syntax_error = parse_json_object(extract_chat_text(result))
+                shape_error = syntax_error or response_schema_error(parsed, request_schema)
+                shape_status = "invalid_json" if syntax_error else "invalid_shape" if shape_error else "valid_shape"
+            schema_enforcement = ("not_requested" if json_mode != "schema" else "violated"
+                                  if shape_status in ("invalid_json", "invalid_shape") else "no_violation_observed"
+                                  if shape_status == "valid_shape" else "unverified")
             record_ai_usage({
                 "role": role, "call_id": call_id, "decision_id": context.get("decision_id"),
                 "trigger": context.get("trigger", "unspecified"), "bar_time": context.get("bar_time"),
@@ -1703,7 +1812,10 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 "reasoning_effort_sent": sent_effort,
                 "reasoning_effort_requested": this_effort,
                 "thinking_mode_sent": thinking_mode,
-                "thinking_control_version": AI3_THINKING_CONTROL_VERSION if role == "AI-3" else AI_REVIEW_RELIABILITY_VERSION if role == "AI-2" else None,
+                "thinking_control_version": AI3_THINKING_CONTROL_VERSION if role == "AI-3" else AI_REVIEW_RELIABILITY_VERSION if role == "AI-2" else AI_OUTPUT_RELIABILITY_VERSION if role == "AI-1" else None,
+                "output_reliability_version": AI_OUTPUT_RELIABILITY_VERSION,
+                "response_shape_status": shape_status, "response_shape_error": shape_error,
+                "schema_enforcement": schema_enforcement,
                 "client_version": AI_REVIEW_RELIABILITY_VERSION, "citation_version": AI1_CITATION_VERSION,
                 "client_code_signature": CLIENT_CODE_SIGNATURE,
                 "token_limit": data[token_field], "token_limit_field": token_field,
@@ -1754,9 +1866,10 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             record_attempt("truncated", result, response)
             usage = normalized_chat_usage(result) or {}
             stats = response_content_stats(result)
-            raise AIRequestError(role, "输出达到token上限，拒绝不完整决策且不重复付费请求：max_tokens=%s effort=%s requested_effort=%s thinking=%s output=%s 正文字符=%s 思考块=%s；查看ai_usage，本地护盘继续"
+            raise AIRequestError(role, "输出达到token上限，拒绝不完整决策且不重复付费请求：max_tokens=%s effort=%s requested_effort=%s thinking=%s output=%s 思考token=%s 非思考输出token=%s 正文字符=%s 思考块=%s；上限包含思考，effort不是硬预算，查看ai_usage，本地护盘继续"
                                  % (data[token_field], sent_effort or "omitted", this_effort,
                                     thinking_mode or "provider_default", usage.get("output_tokens"),
+                                    usage.get("reasoning_tokens"), usage.get("non_reasoning_output_tokens"),
                                     stats["visible_text_chars"], stats["thinking_blocks"]))
         usage = normalized_chat_usage(result) or {}
         reported_output = usage.get("output_tokens")
@@ -1774,7 +1887,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             record_attempt("unsupported_thinking", result, response)
             if switch_to_backup():
                 continue
-            raise AIRequestError(role, "接口拒绝thinking=disabled；停止本轮，不移除用户的思考开关或取消token上限，本地护盘继续")
+            raise AIRequestError(role, "接口拒绝thinking=%s；停止本轮，不移除用户的思考开关或取消token上限，本地护盘继续" % thinking_mode)
         if response.status_code == 400 and unsupported_parameter:
             format_rejected = (json_mode != "prompt" and any(name in error_text for name in (
                 "response_format", "json_schema", "output_config.format")))

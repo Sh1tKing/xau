@@ -1,0 +1,83 @@
+{
+  "source": "2026-10-13 synced gold logs; visible decision text and numeric usage only; no hidden thinking text",
+  "cards": [
+    {
+      "timestamp": "2026-10-13T10:13:37",
+      "raw": "{\"opportunity_id\":\"ff1a7e5a9b7a5dd04f7c24b9\",\"action\":\"no\",\"stop_loss\":null,\"take_profit\":null,\"reasoning\":\"H1偏空且M5假突破收回具备卖出触发，但现价距保护止损仅1.74美元，低于2美元执行缓冲，结构止损放不下，等待回落或重新形成保护空间。\",\"trigger_evidence\":\"M5 1791867900收于4167.62，假突破高点4169.75后收回\",\"invalidation\":\"卖方保护位4170.75上方失守，或H1/M15收盘重新转强。\",\"target_basis\":\"候选目标4147.75；依据M15近期低点4150.77及候选3R目标\",\"fact_conflicts\":[],\"unknowns\":[\"外部新闻日历无实际来源，未核实。\"],\"quality_assessment\":{\"version\":\"entry-quality-v3\",\"direction\":\"sell\",\"dimensions\":{\"structure\":{\"level\":\"adequate\",\"reason\":\"H1与M15均偏空，顺势评估\",\"evidence_refs\":[\"fc1ead505d.6.1\",\"fc1ead505d.6.4\"]},\"trigger\":{\"level\":\"adequate\",\"reason\":\"M5已收盘确认假突破收回\",\"evidence_refs\":[\"fc1ead505d.9.1\",\"fc1ead505d.9.2\",\"fc1ead505d.9.3\"],\"reservations\":[],\"observations\":[]},\"protection\":{\"level\":\"weak\",\"reason\":\"保护高点明确但当前执行缓冲不足\",\"evidence_refs\":[\"fc1ead505d.18.34\",\"fc1ead505d.18.35\",\"fc1ead505d.15.11\",\"fc1ead505d.15.12\"],\"reservations\":[{\"cause\":\"hard_limit\",\"event_group\":\"execution-stop-clearance\",\"reason\":\"现价至止损仅1.74美元，低于2美元\",\"evidence_refs\":[\"fc1ead505d.15.15\",\"fc1ead505d.15.18\",\"fc1ead505d.15.12\"]}],\"observations\":[]},\"target\":{\"level\":\"adequate\",\"reason\":\"目标低于近期低点且候选空间充足\",\"evidence_refs\":[\"fc1ead505d.13.2\",\"fc1ead505d.18.33\",\"fc1ead505d.15.20\"],\"reservations\":[],\"observations\":[]},\"counter_evidence\":{\"level\":\"adequate\",\"reason\":\"M15反向收阳但尚未否定H1空头\",\"evidence_refs\":[\"fc1ead505d.18.25\",\"fc1ead505d.5.1\"],\"reservations\":[],\"observations\":[{\"cause\":\"opposing_structure\",\"event_group\":\"m15-bullish-rebound\",\"reason\":\"M15最新收盘反向，暂视回撤\",\"evidence_refs\":[\"fc1ead505d.5.1\",\"fc1ead505d.3.8\"]}]}}},\"wait_basis\":[{\"code\":\"hard_limit\",\"reason\":\"等待卖价回落，使止损4170.75与现价保持至少2美元缓冲，或形成新的可执行保护结构。\",\"evidence_refs\":[\"fc1ead505d.15.11\",\"fc1ead505d.15.12\",\"fc1ead505d.15.15\",\"fc1ead505d.15.18\"]}]}",
+      "status": "contract_invalid",
+      "quality_error": "AI-1质量评估字段错误: /quality_assessment/dimensions/structure level=adequate 必须包含['evidence_refs', 'level', 'observations', 'reason', 'reservations']",
+      "json_error": null
+    },
+    {
+      "timestamp": "2026-10-13T10:17:35",
+      "raw": "{\"opportunity_id\":\"0a8a378a477a684bab57ffa4\",\"action\":\"sell\",\"stop_loss\":4171.49,\"take_profit\":4162.13,\"reasoning\":\"H1空头许可，M5收盘长上影拒涨触发；SL越过近三根高点并满足报价间距，目标受3R封顶且避开4160.73支撑；M15反弹是主要反证。\",\"trigger_evidence\":\"M5 1791868200收于4167.78，上影1.81，拒涨信号成立。\",\"invalidation\":\"报价触及4171.49止损；若收盘突破近期反弹高位，空头拒涨逻辑失效。\",\"target_basis\":\"目标4162.13不越3R上限；下方4160.73为近端障碍，目标留在其上。\",\"fact_conflicts\":[],\"unknowns\":[\"外部新闻日历未知，仅作背景，不据此推断。\"],\"quality_assessment\":{\"version\":\"entry-quality-v3\",\"direction\":\"sell\",\"dimensions\":{\"structure\":{\"level\":\"adequate\",\"reason\":\"H1与M15偏空，回抽后在高位区域。\",\"evidence_refs\":[\"a768f0f440.18.6\",\"a768f0f440.18.29\",\"a768f0f440.18.31\"],\"reservations\":[],\"observations\":[{\"cause\":\"volume\",\"event_group\":\"m15_latest_volume\",\"reason\":\"M15代理量约为近期均值1.78倍。\",\"evidence_refs\":[\"a768f0f440.18.42\",\"a768f0f440.18.43\",\"a768f0f440.18.44\"]}]},\"trigger\":{\"level\":\"adequate\",\"reason\":\"M5收盘长上影拒涨，形成时机信号。\",\"evidence_refs\":[\"a768f0f440.9.0\",\"a768f0f440.9.2\",\"a768f0f440.9.3\"],\"reservations\":[],\"observations\":[]},\"protection\":{\"level\":\"adequate\",\"reason\":\"止损高于近三根M5高点且满足报价清距。\",\"evidence_refs\":[\"a768f0f440.18.34\",\"a768f0f440.15.6\",\"a768f0f440.7.4\",\"a768f0f440.7.1\"],\"reservations\":[],\"observations\":[]},\"target\":{\"level\":\"adequate\",\"reason\":\"目标受3R上限约束，留在4160.73障碍上方。\",\"evidence_refs\":[\"a768f0f440.18.0\",\"a768f0f440.18.31\",\"a768f0f440.10.6\",\"a768f0f440.3.6\"],\"reservations\":[],\"observations\":[]},\"counter_evidence\":{\"level\":\"adequate\",\"reason\":\"M15反弹与最新M5小幅收阳构成轻微反向信息。\",\"evidence_refs\":[\"a768f0f440.3.7\",\"a768f0f440.4.8\",\"a768f0f440.18.25\"],\"reservations\":[],\"observations\":[{\"cause\":\"opposing_structure\",\"event_group\":\"recent_rebound\",\"reason\":\"M15反弹但尚无独立反转确认。\",\"evidence_refs\":[\"a768f0f440.3.7\",\"a768f0f440.5.1\"]}]}},\"wait_basis\":[]}",
+      "status": "contract_invalid",
+      "quality_error": "AI-1输出格式错误: JSON语法错误: Expecting ',' delimiter（行1 列1710，正文1709字符）",
+      "json_error": "JSON语法错误: Expecting ',' delimiter（行1 列1710，正文1709字符）"
+    },
+    {
+      "timestamp": "2026-10-13T10:22:28",
+      "raw": "{\"opportunity_id\":\"69848e705a4edb34fcdce75b\",\"action\":\"sell\",\"stop_loss\":4173.47,\"take_profit\":4160.73,\"reasoning\":\"顺H1空头，M5假突破4169.75后收回至4169.49触发；SL保护近端高点，首个下方支撑前RR约1.64。M15反弹是主要反证。\",\"trigger_evidence\":\"M5 1791868500高4169.94越前高后收于4169.49；假突破收回。\",\"invalidation\":\"M5止损4173.47；若价格有效上破并收于该保护位上方，卖出逻辑失效。\",\"target_basis\":\"M15前低4160.73为首个支撑障碍，现Bid 4168.64至目标空间7.91。\",\"fact_conflicts\":[],\"unknowns\":[\"外部新闻日历未知。\"],\"quality_assessment\":{\"version\":\"entry-quality-v3\",\"direction\":\"sell\",\"dimensions\":{\"structure\":{\"level\":\"adequate\",\"reason\":\"H1及M15偏空，趋势续势可行。\",\"evidence_refs\":[\"5a98c39e67.1.8\",\"5a98c39e67.6.1\",\"5a98c39e67.6.4\"],\"reservations\":[],\"observations\":[]},\"trigger\":{\"level\":\"adequate\",\"reason\":\"M5高破前极值后收回，构成卖出触发。\",\"evidence_refs\":[\"5a98c39e67.9.3\",\"5a98c39e67.4.8\"],\"reservations\":[],\"observations\":[]},\"protection\":{\"level\":\"adequate\",\"reason\":\"止损覆盖近三根M5高点并留足间距。\",\"evidence_refs\":[\"5a98c39e67.18.34\",\"5a98c39e67.15.18\",\"5a98c39e67.7.1\"],\"reservations\":[],\"observations\":[]},\"target\":{\"level\":\"adequate\",\"reason\":\"首个支撑前空间满足最低RR。\",\"evidence_refs\":[\"5a98c39e67.3.6\",\"5a98c39e67.2.2\",\"5a98c39e67.7.2\"],\"reservations\":[],\"observations\":[]},\"counter_evidence\":{\"level\":\"adequate\",\"reason\":\"M15近两根收高，属反向回撤风险。\",\"evidence_refs\":[\"5a98c39e67.3.7\",\"5a98c39e67.18.25\"],\"reservations\":[],\"observations\":[{\"cause\":\"opposing_structure\",\"event_group\":\"M15近端反弹\",\"reason\":\"M15连续反弹，但未破坏H1空头许可。\",\"evidence_refs\":[\"5a98c39e67.3.7\",\"5a98c39e67.1.8\"]}]}},\"wait_basis\":[]}",
+      "status": "contract_invalid",
+      "quality_error": "AI-1输出格式错误: JSON语法错误: Expecting ',' delimiter（行1 列1453，正文1452字符）",
+      "json_error": "JSON语法错误: Expecting ',' delimiter（行1 列1453，正文1452字符）"
+    },
+    {
+      "timestamp": "2026-10-13T10:37:23",
+      "raw": "{\"opportunity_id\":\"e995c3d7d26088921c9c8d82\",\"action\":\"sell\",\"stop_loss\":4177.50,\"take_profit\":4157.00,\"reasoning\":\"H1偏空许可，M5收破前低触发；保护置于近端高点上方，目标在前低区域前。M15仍偏多且收阳是主要反证。\",\"trigger_evidence\":\"M5 1791869400收于4167.83，低于前K低点4168.76。\",\"invalidation\":\"价格触及4177.50止损；若M15收复4174.15高点上方，空头结构失效。\",\"target_basis\":\"目标4157.00，先于M15低点4155.11；按Bid 4172.37、止损风险5.13约2.99R。\",\"fact_conflicts\":[],\"unknowns\":[\"外部新闻日历未知。\"],\"quality_assessment\":{\"version\":\"entry-quality-v3\",\"direction\":\"sell\",\"dimensions\":{\"structure\":{\"level\":\"adequate\",\"reason\":\"H1偏空且处近期区间偏上区域，允许顺势空。\",\"evidence_refs\":[\"fccb216cf1.18.6\",\"fccb216cf1.18.29\",\"fccb216cf1.18.32\"],\"reservations\":[],\"observations\":[{\"cause\":\"opposing_structure\",\"event_group\":\"M15-bullish-pullback\",\"reason\":\"M15仍偏多，收盘高于EMA21。\",\"evidence_refs\":[\"fccb216cf1.6.2\",\"fccb216cf1.6.4\"]}]},\"trigger\":{\"level\":\"adequate\",\"reason\":\"M5收破前K低点，形成收盘触发。\",\"evidence_refs\":[\"fccb216cf1.9.3\",\"fccb216cf1.4.8\"],\"reservations\":[],\"observations\":[]},\"protection\":{\"level\":\"adequate\",\"reason\":\"止损高于近三根M5高点，距入场5.13且不超8。\",\"evidence_refs\":[\"fccb216cf1.18.34\",\"fccb216cf1.11.1\",\"fccb216cf1.7.1\"]},\"target\":{\"level\":\"adequate\",\"reason\":\"报价风险收益约2.99R，目标位于4155.11前低之前。\",\"evidence_refs\":[\"fccb216cf1.11.1\",\"fccb216cf1.3.7\",\"fccb216cf1.7.2\",\"fccb216cf1.10.6\"]},\"counter_evidence\":{\"level\":\"adequate\",\"reason\":\"M15偏多构成轻微反向背景，未见独立反转确认。\",\"evidence_refs\":[\"fccb216cf1.6.4\",\"fccb216cf1.5.1\"],\"reservations\":[],\"observations\":[{\"cause\":\"opposing_structure\",\"event_group\":\"M15-bullish-pullback\",\"reason\":\"M15收阳且偏多，尚非已确认反转。\",\"evidence_refs\":[\"fccb216cf1.3.8\",\"fccb216cf1.18.25\"]}]}},\"wait_basis\":[]}",
+      "status": "contract_invalid",
+      "quality_error": "AI-1输出格式错误: JSON语法错误: Expecting ',' delimiter（行1 列1588，正文1587字符）",
+      "json_error": "JSON语法错误: Expecting ',' delimiter（行1 列1588，正文1587字符）"
+    },
+    {
+      "timestamp": "2026-10-13T10:42:22",
+      "raw": "{\"opportunity_id\":\"ee31760a1c04d5a4879e5bcb\",\"action\":\"sell\",\"stop_loss\":4177.70,\"take_profit\":4166.97,\"reasoning\":\"H1偏空许可，M5假突破收回4174.15下方构成卖出触发；止损保护4175.55高点，目标取4166.97近端低点。反证为M5阳线吞没及报价靠近保护位。\",\"trigger_evidence\":\"M5 1791869700高4175.55后收4173.64，低于前高4174.15；假突破收回。\",\"invalidation\":\"M5高点4175.55上方设止损4177.70；若价格触及则卖出逻辑失效。\",\"target_basis\":\"近端M5低点4166.97为目标；按实时Bid 4174.62至止损风险3.08计，目标约2.48R。\",\"fact_conflicts\":[],\"unknowns\":[\"外部新闻日历无实际来源，未知。\"],\"quality_assessment\":{\"version\":\"entry-quality-v3\",\"direction\":\"sell\",\"dimensions\":{\"structure\":{\"level\":\"adequate\",\"reason\":\"H1偏空且价格处于近端区间偏上部，允许回撤做空。\",\"evidence_refs\":[\"625eee56d9.6.1\",\"625eee56d9.18.29\",\"625eee56d9.18.32\"],\"reservations\":[],\"observations\":[]},\"trigger\":{\"level\":\"adequate\",\"reason\":\"M5刺破前高后收回，构成假突破触发。\",\"evidence_refs\":[\"625eee56d9.9.2\",\"625eee56d9.9.3\",\"625eee56d9.4.8\"],\"reservations\":[],\"observations\":[]},\"protection\":{\"level\":\"adequate\",\"reason\":\"止损覆盖近三根M5高点并留缓冲，报价间距合规。\",\"evidence_refs\":[\"625eee56d9.18.34\",\"625eee56d9.2.2\",\"625eee56d9.2.1\",\"625eee56d9.7.4\"],\"reservations\":[],\"observations\":[]},\"target\":{\"level\":\"adequate\",\"reason\":\"近端低点作目标，实时风险回报超过1.5。\",\"evidence_refs\":[\"625eee56d9.18.35\",\"625eee56d9.2.2\",\"625eee56d9.7.2\"],\"reservations\":[],\"observations\":[]},\"counter_evidence\":{\"level\":\"adequate\",\"reason\":\"M5阳线吞没反向，但收盘仍低于前高。\",\"evidence_refs\":[\"625eee56d9.5.2\",\"625eee56d9.4.8\",\"625eee56d9.9.3\"],\"reservations\":[],\"observations\":[{\"cause\":\"opposing_structure\",\"event_group\":\"m5_bullish_engulf_1791869700\",\"reason\":\"单根M5阳线吞没，尚未确认反转。\",\"evidence_refs\":[\"625eee56d9.5.2\",\"625eee56d9.4.8\"]}]}},\"wait_basis\":[]}",
+      "status": "contract_invalid",
+      "quality_error": "AI-1输出格式错误: JSON语法错误: Expecting ',' delimiter（行1 列1579，正文1578字符）",
+      "json_error": "JSON语法错误: Expecting ',' delimiter（行1 列1579，正文1578字符）"
+    }
+  ],
+  "usage": [
+    {
+      "timestamp": "2026-10-13T10:07:52.666",
+      "role": "AI-2",
+      "channel": "primary",
+      "model": "grok-4.7",
+      "outcome": "token_limit_exceeded",
+      "finish_reason": "end_turn",
+      "token_limit": 4096,
+      "thinking_mode_sent": "disabled",
+      "json_mode_sent": "schema",
+      "usage_reported": {
+        "input_tokens": 21445,
+        "output_tokens": 6672,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 1152
+      },
+      "visible_text_chars": 169,
+      "thinking_blocks": 1
+    },
+    {
+      "timestamp": "2026-10-13T14:06:28.361",
+      "role": "AI-1",
+      "channel": "primary",
+      "model": "claude-sonnet-5-5",
+      "outcome": "truncated",
+      "finish_reason": "max_tokens",
+      "token_limit": 4096,
+      "thinking_mode_sent": null,
+      "json_mode_sent": "schema",
+      "usage_reported": {
+        "input_tokens": 4,
+        "cache_creation_input_tokens": 31441,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 4096,
+        "output_tokens_details": {
+          "thinking_tokens": 3623
+        }
+      },
+      "visible_text_chars": 3270,
+      "thinking_blocks": 1
+    }
+  ]
+}
