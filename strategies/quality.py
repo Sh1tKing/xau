@@ -2,6 +2,7 @@
 
 VERSION = "entry-quality-v3"
 PREVIOUS_VERSION = "entry-quality-v2"
+CURRENT_VERSION = "entry-quality-v4"
 DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_evidence")
 LEVEL_RULES = {
     "strong": {"points": 20, "severity": None, "minimum_reservations": 0},
@@ -141,6 +142,121 @@ INSTRUCTIONS = (
     "硬伤、必要证据缺失、无触发或重要障碍前空间不足则no并列wait_basis；"
     "M15或M5已有确认不能以另一周期未确认声称缺少触发。每条等级理由、保留、观察及等待引用本次真实evidence_refs。"
 )
+
+
+LEDGER_POLICY = (
+    "五个dimensions只含level/reason/evidence_refs；保留意见和轻微观察统一声明在quality_assessment/issues。"
+    "每条issues含dimension/kind/cause/event_group/reason/evidence_refs，dimension是唯一归属，"
+    "kind为reservation或observation；不要在五项内重复填写意见数组。"
+    "同cause和同event全卡只声明一次；event_group为空时以实际引用集合识别，改写reason或引用顺序不是新事件。"
+    "同一事实仍可在多个维度reason/evidence_refs描述，不能重复成两条issues。"
+    "例如同一M15阴线只有一条opposing_structure意见，可归counter_evidence，structure只描述事实。"
+)
+CURRENT_RESERVATIONS_POLICY = (
+    "level唯一声明程度：" + "/".join("%s%s" % (level, rule["points"]) for level, rule in LEVEL_RULES.items()) + "；"
+    + LEDGER_POLICY
+    + "strong不得归属任何意见；adequate的reservation为minor，weak为material，missing为blocking；"
+    "weak/missing必须各有至少一条归属本维度的reservation，不能借其他维度的意见撑扣分。"
+    "observation永远minor且无额外扣分，不能独立支撑weak/missing或重大反证观望。"
+    "cause是问题主题，不自动决定程度；普通量volume/浅回撤shallow_retrace仅可observation，"
+    "硬限制hard_limit/必要数据缺失missing_data仅可reservation。"
+    "单根M5反向、暂时M15反向及未确认反转可作opposing_structure observation，"
+    "独立及时的重大反证必须reservation；重大意见与独立轻微观察可以并存。"
+    "没有意见也必须写issues=[]；Python生成原因ID和程度，不由模型声明分数或修改判断来满足格式。"
+)
+CURRENT_INSTRUCTIONS = (
+    "按quality_rubric评五项，不猜胜率、不复制本地分、不抬分。"
+    "quality_assessment={version,direction,dimensions,issues}，version=" + CURRENT_VERSION + "，direction为buy/sell。"
+    + CURRENT_RESERVATIONS_POLICY
+    + "仅有轻微意见不剥夺合法提案；硬伤、必要证据缺失、无触发或重要障碍前空间不足则no并列顶层wait_basis。"
+    "M15或M5已有确认不能以另一周期未确认声称缺少触发；所有等级理由、意见及等待引用本次真实evidence_refs。"
+)
+
+
+def ledger_schema(refs):
+    """One issue list and one uniform dimension shape; no grade-dependent arrays."""
+    dimension = _object({"level": {"type": "string", "enum": list(LEVEL_RULES)},
+                         "reason": {"type": "string"}, "evidence_refs": refs})
+    branches = []
+    for kind, causes in (("reservation", SCORED_CAUSES), ("observation", OBSERVATION_CAUSES)):
+        branches.append(_object({
+            "dimension": {"type": "string", "enum": list(DIMENSIONS)},
+            "kind": {"type": "string", "enum": [kind]},
+            "cause": {"type": "string", "enum": sorted(causes)},
+            "event_group": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "reason": {"type": "string"}, "evidence_refs": refs}))
+    card = _object({"version": {"type": "string", "enum": [CURRENT_VERSION]},
+                    "direction": {"type": "string", "enum": ["buy", "sell"]},
+                    "dimensions": _object({name: {"$ref": "#/$defs/quality_dimension"} for name in DIMENSIONS}),
+                    "issues": {"type": "array", "items": {"anyOf": branches}}})
+    card["description"] = LEDGER_POLICY
+    return card, dimension
+
+
+def decode_ledger(card):
+    """Decode a declared v4 ledger into the shared validator, never repair a v3 card."""
+    import copy
+    root = "/quality_assessment"
+    if set(card) != {"version", "direction", "dimensions", "issues"}:
+        return None, "AI-1质量评估字段错误: %s v4须包含version/direction/dimensions/issues" % root
+    dimensions, issues = card["dimensions"], card["issues"]
+    if not isinstance(dimensions, dict) or set(dimensions) != set(DIMENSIONS):
+        return None, "AI-1质量评估无效: 五项缺失"
+    if not isinstance(issues, list):
+        return None, "AI-1质量评估字段错误: %s/issues必须是数组" % root
+    decoded = {"version": VERSION, "direction": card["direction"], "dimensions": {}}
+    for name, item in dimensions.items():
+        path = root + "/dimensions/" + name
+        if not isinstance(item, dict) or set(item) != {"level", "reason", "evidence_refs"}:
+            return None, "AI-1质量评估字段错误: %s v4只含level/reason/evidence_refs" % path
+        level = item["level"]
+        if not isinstance(level, str) or level not in LEVEL_RULES:
+            return None, "AI-1质量评估等级无效: %s/level=%r" % (path, level)
+        value = copy.deepcopy(item)
+        if level != "strong":
+            value.update(reservations=[], observations=[])
+        decoded["dimensions"][name] = value
+    seen = {}
+    fields = {"dimension", "kind", "cause", "event_group", "reason", "evidence_refs"}
+    for index, issue in enumerate(issues):
+        path = "%s/issues/%s" % (root, index)
+        if not isinstance(issue, dict) or set(issue) != fields:
+            return None, "AI-1质量评估意见字段错误: " + path
+        name, kind = issue["dimension"], issue["kind"]
+        if not isinstance(name, str) or name not in DIMENSIONS or kind not in ("reservation", "observation"):
+            return None, "AI-1质量评估意见归属无效: " + path
+        cause, event, refs = issue["cause"], issue["event_group"], issue["evidence_refs"]
+        if (not isinstance(cause, str) or cause not in CAUSES
+                or event is not None and not isinstance(event, str)):
+            return None, "AI-1质量评估原因无效: " + path
+        if not isinstance(issue["reason"], str) or not issue["reason"].strip():
+            return None, "AI-1质量评估原因缺失: " + path
+        if not isinstance(refs, list) or not refs or any(not isinstance(ref, str) for ref in refs):
+            return None, "AI-1质量评估证据无效: " + path + "/evidence_refs"
+        level = dimensions[name]["level"]
+        if level == "strong":
+            return None, "AI-1质量评估程度不符: %s归属strong维度%s" % (path, name)
+        if cause not in allowed_causes(level, VERSION, kind == "observation"):
+            return None, "AI-1质量评估程度不符: %s cause=%s kind=%s level=%s" % (path, cause, kind, level)
+        key = (cause, event or tuple(sorted(set(refs))))
+        if key in seen:
+            return None, ("AI-1质量评估重复扣分/意见: %s cause=%s 与%s重复；同一原因和事件只能声明一次"
+                          % (path, cause, seen[key]))
+        seen[key] = path
+        value = {key: copy.deepcopy(issue[key]) for key in ("cause", "event_group", "reason", "evidence_refs")}
+        decoded["dimensions"][name][kind + "s"].append(value)
+    for name, item in decoded["dimensions"].items():
+        error = dimension_error(name, item, VERSION)
+        if error:
+            return None, error
+    return decoded, ""
+
+
+def ledger_rubric_fields():
+    fields = rubric_fields()
+    fields.update(version=CURRENT_VERSION, reservations_policy=CURRENT_RESERVATIONS_POLICY,
+                  issue_layout="single_ledger_unique_dimension_owner")
+    return fields
 
 
 def rubric_fields():

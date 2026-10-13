@@ -146,7 +146,7 @@ class OutputReliabilityTests(unittest.TestCase):
                 self.assertIsNone(parsed)
                 self.assertIn('JSON语法错误', error)
             else:
-                shape_error = ai.response_schema_error(parsed, ai.response_json_schema('AI-1'))
+                shape_error = ai.response_schema_error(parsed, ai.response_json_schema('AI-1', quality_version=ai.DIMENSIONAL_QUALITY_VERSION))
                 self.assertIn('/quality_assessment/dimensions/structure', shape_error)
                 self.assertIn('observations', shape_error)
                 self.assertEqual(parsed['action'], 'no')
@@ -154,7 +154,7 @@ class OutputReliabilityTests(unittest.TestCase):
 
     def test_local_schema_diagnostics_match_real_quality_schema(self):
         _, card = current_card()
-        schema = ai.response_json_schema('AI-1')
+        schema = ai.response_json_schema('AI-1', quality_version=ai.DIMENSIONAL_QUALITY_VERSION)
         samples = [card]
         for update in ('missing_array', 'extra_field', 'strong_extra', 'bad_level', 'empty_refs', 'boolean_price', 'wrong_wait_layer'):
             sample = copy.deepcopy(card)
@@ -175,7 +175,9 @@ class OutputReliabilityTests(unittest.TestCase):
     def test_success_http_does_not_claim_schema_enforced_for_invalid_card(self):
         card = self.archive['cards'][0]
         with patch.object(ai.requests, 'post', return_value=Response(text=card['raw'])) as post:
-            self.assertEqual(self.call(), card['raw'])
+            self.assertEqual(self.call(refresh_request=lambda: {
+                'prompt': 'historical v3 request',
+                'response_schema': ai.response_json_schema('AI-1', quality_version=ai.DIMENSIONAL_QUALITY_VERSION)}), card['raw'])
         event = self.events()[0]
         self.assertEqual(event['response_shape_status'], 'invalid_shape')
         self.assertEqual(event['schema_enforcement'], 'violated')
@@ -205,11 +207,13 @@ class OutputReliabilityTests(unittest.TestCase):
 
     def test_schema_description_states_empty_arrays_explicitly(self):
         schema = ai.response_json_schema('AI-1')
-        self.assertIn('空数组', schema['$defs']['quality_dimension']['anyOf'][1]['description'])
-        self.assertIn('reservations', schema['$defs']['quality_dimension']['anyOf'][1]['description'])
+        self.assertEqual(set(schema['$defs']['quality_dimension']['properties']),
+                         {'level', 'reason', 'evidence_refs'})
+        self.assertIn('issues', schema['properties']['quality_assessment']['required'])
         template = ai.ai1_json_template()
         self.assertLess(list(template).index('wait_basis'), list(template).index('quality_assessment'))
         self.assertNotIn('wait_basis', template['quality_assessment'])
+        self.assertEqual(template['quality_assessment']['issues'], [])
 
 
 if __name__ == '__main__':

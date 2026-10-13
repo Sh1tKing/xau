@@ -20,7 +20,7 @@ from test_ai_response_contract import Response
 def current_card(side="buy", action=None):
     pack, raw = quality_sample(side)
     raw["opportunity_id"] = ""
-    raw["quality_assessment"]["version"] = ai.QUALITY_VERSION
+    raw["quality_assessment"]["version"] = ai.DIMENSIONAL_QUALITY_VERSION
     for item in raw["quality_assessment"]["dimensions"].values():
         item["observations"] = []
     if action == "no":
@@ -36,7 +36,7 @@ def issue(cause, event="bar-1", refs=None):
 def v3_copy(raw):
     """Explicit test fixture authoring, never called by production code."""
     result = copy.deepcopy(raw)
-    result["quality_assessment"]["version"] = ai.QUALITY_VERSION
+    result["quality_assessment"]["version"] = ai.DIMENSIONAL_QUALITY_VERSION
     for dimension in result["quality_assessment"]["dimensions"].values():
         dimension["observations"] = []
     return result
@@ -50,7 +50,7 @@ class QualityContractV3Tests(unittest.TestCase):
 
     def assert_contract(self, pack, raw, valid, score=None):
         before = copy.deepcopy(raw)
-        schema = ai.response_json_schema("AI-1", pack)
+        schema = ai.response_json_schema("AI-1", pack, quality_version=ai.DIMENSIONAL_QUALITY_VERSION)
         Draft202012Validator.check_schema(schema)
         errors = list(Draft202012Validator(schema).iter_errors(raw))
         result, error = ai.normalize_ai1_quality(raw, pack)
@@ -59,7 +59,7 @@ class QualityContractV3Tests(unittest.TestCase):
         self.assertEqual(raw, before)
         if valid:
             self.assertEqual(result["action"], raw["action"])
-            self.assertEqual(result["quality_version"], ai.QUALITY_VERSION)
+            self.assertEqual(result["quality_version"], ai.DIMENSIONAL_QUALITY_VERSION)
             if score is not None:
                 self.assertEqual(result["confidence"], score)
         return result, error
@@ -203,7 +203,7 @@ class QualityContractV3Tests(unittest.TestCase):
                         dimension["reservations"] = [issue("opposing_structure", "base-event")]
                     dimension[container] = [issue(cause)]
                     with self.subTest(level=level, cause=cause, container=container):
-                        schema_valid = Draft202012Validator(ai.response_json_schema("AI-1", pack)).is_valid(raw)
+                        schema_valid = Draft202012Validator(ai.response_json_schema("AI-1", pack, quality_version=ai.DIMENSIONAL_QUALITY_VERSION)).is_valid(raw)
                         self.assertEqual(schema_valid, not ai.normalize_ai1_quality(raw, pack)[1])
 
     def test_observations_require_nonempty_real_and_same_candidate_evidence(self):
@@ -253,13 +253,13 @@ class QualityContractV3Tests(unittest.TestCase):
 
     def test_schema_prompt_rubric_share_contract_and_fit_native_subset(self):
         rubric = ai.quality_rubric(True)
-        self.assertEqual(rubric["version"], quality.VERSION)
-        self.assertIn(quality.RESERVATIONS_POLICY, ai.AI1_INSTRUCTIONS)
-        self.assertEqual(rubric["reservations_policy"], quality.RESERVATIONS_POLICY)
+        self.assertEqual(rubric["version"], quality.CURRENT_VERSION)
+        self.assertIn(quality.CURRENT_RESERVATIONS_POLICY, ai.AI1_INSTRUCTIONS)
+        self.assertEqual(rubric["reservations_policy"], quality.CURRENT_RESERVATIONS_POLICY)
         self.assertEqual(rubric["cause_rules"], quality.CAUSE_RULES)
         rubric["cause_rules"]["volume"]["meaning"] = "mutated caller copy"
         self.assertNotEqual(rubric["cause_rules"], quality.CAUSE_RULES)
-        self.assertEqual(ai.ai1_json_template()["quality_assessment"]["version"], quality.VERSION)
+        self.assertEqual(ai.ai1_json_template()["quality_assessment"]["version"], quality.CURRENT_VERSION)
         schema = ai.response_json_schema("AI-1")
         encoded = json.dumps(schema)
         for unsupported in ('"if"', '"then"', '"maxItems"', '"minLength"'):
@@ -272,7 +272,7 @@ class QualityContractV3Tests(unittest.TestCase):
         updated["live_quote"]["ask"] += .01
         packs[1] = ai.prepare_ai1_request_pack(updated)
         raw = cite(packs[1], v3_copy(legacy_pool_payload()))
-        snapshots = iter([{"prompt": json.dumps(pack), "response_schema": ai.response_json_schema("AI-1", pack)} for pack in packs])
+        snapshots = iter([{"prompt": json.dumps(pack), "response_schema": ai.response_json_schema("AI-1", pack, quality_version=ai.DIMENSIONAL_QUALITY_VERSION)} for pack in packs])
         with tempfile.TemporaryDirectory() as folder, patch.object(ai, "AI_USAGE_DIR", folder), \
                 patch.dict(ai._CHAT_OPTIONS, {}, clear=True), patch.dict(ai._CAP_BLOCKED_ROUTES, {}, clear=True), \
                 patch.dict(ai.os.environ, {"AI1_BACKUP_URL": "https://backup.test/v1/messages", "AI1_BACKUP_KEY": "mock"}, clear=True), \
@@ -282,7 +282,8 @@ class QualityContractV3Tests(unittest.TestCase):
         self.assertEqual(post.call_count, 2)
         for call, pack in zip(post.call_args_list, packs):
             body = call.kwargs["json"]
-            self.assertEqual(body["output_config"]["format"]["schema"], ai.response_json_schema("AI-1", pack))
+            self.assertEqual(body["output_config"]["format"]["schema"],
+                             ai.response_json_schema("AI-1", pack, quality_version=ai.DIMENSIONAL_QUALITY_VERSION))
             self.assertEqual(json.loads(body["messages"][0]["content"]), pack)
             self.assertEqual(body["max_tokens"], ai.AI_MAX_TOKENS["AI-1"])
         self.assert_contract(packs[1], json.loads(reply), True, 80)
@@ -313,7 +314,7 @@ class QualityContractV3Tests(unittest.TestCase):
                                wait_basis=[{"code": "target_space", "reason": "重要障碍前空间不足",
                                             "evidence_refs": ["/m5_bars/79"]}])
                 raw = cite(pack, raw)
-                self.assertEqual(Draft202012Validator(ai.response_json_schema("AI-1", pack)).is_valid(raw), not invalid)
+                self.assertEqual(Draft202012Validator(ai.response_json_schema("AI-1", pack, quality_version=ai.DIMENSIONAL_QUALITY_VERSION)).is_valid(raw), not invalid)
                 return raw
             with patch.object(fixture, "proposal", side_effect=proposal), \
                     patch.object(ai, "AI1_URL", "https://primary.test/v1/messages"), \
@@ -336,11 +337,11 @@ class QualityContractV3Tests(unittest.TestCase):
             else:
                 self.assertEqual(post.call_count, 3 if failover else 2)
                 self.assertEqual(result["status"], "review_pending")
-                self.assertEqual(result["quality_version"], ai.QUALITY_VERSION)
+                self.assertEqual(result["quality_version"], ai.DIMENSIONAL_QUALITY_VERSION)
                 self.assertEqual(len(fixture.sent), 1, fixture.snapshots)
                 self.assertEqual(fixture.sent[0]["volume"], .01)
                 saved = fixture.trader.entry_contexts["123"]
-                self.assertEqual(saved["quality_version"], ai.QUALITY_VERSION)
+                self.assertEqual(saved["quality_version"], ai.DIMENSIONAL_QUALITY_VERSION)
                 self.assertEqual(saved["quality_assessment"]["dimensions"]["counter_evidence"]["observations"][0]["cause"], observation_cause)
                 fixture.trader.load_entry_contexts()
                 self.assertEqual(fixture.trader.entry_contexts["123"], saved)

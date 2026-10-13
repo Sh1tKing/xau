@@ -25,13 +25,15 @@ import requests
 from strategies.evidence import _rounded_number, _bar_payload, _extreme_bar, bars_for_prompt, bar_times_for_prompt
 from strategies.citations import (VERSION as AI1_CITATION_VERSION, MISSING as _MISSING_EVIDENCE,
                                  build_catalog, catalog_bindings, pointer_value, resolve_references, scope_allowed)
-from strategies.quality import (VERSION as QUALITY_VERSION, PREVIOUS_VERSION as PREVIOUS_QUALITY_VERSION,
+from strategies.quality import (CURRENT_VERSION as QUALITY_VERSION, VERSION as DIMENSIONAL_QUALITY_VERSION,
+                                PREVIOUS_VERSION as PREVIOUS_QUALITY_VERSION,
                                 LEVEL_POINTS as QUALITY_LEVEL_POINTS, DIMENSIONS as QUALITY_DIMENSIONS,
                                 CAUSES as QUALITY_CAUSES, MINOR_CAUSES as QUALITY_MINOR_CAUSES,
                                 LEVEL_RULES as QUALITY_LEVEL_RULES,
                                 ISSUE_DEDUPLICATION_POLICY as QUALITY_DEDUPLICATION_POLICY,
-                                INSTRUCTIONS as QUALITY_INSTRUCTIONS, dimension_error as quality_dimension_error,
-                                dimension_schema as quality_dimension_schema, rubric_fields as quality_rubric_fields)
+                                CURRENT_INSTRUCTIONS as QUALITY_INSTRUCTIONS, dimension_error as quality_dimension_error,
+                                dimension_schema as quality_dimension_schema, ledger_schema as quality_ledger_schema,
+                                decode_ledger as decode_quality_ledger, ledger_rubric_fields as quality_rubric_fields)
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1016,13 +1018,20 @@ def normalize_ai1_quality(payload, pack):
     version = card.get("version", LEGACY_QUALITY_VERSION)
     if version == LEGACY_QUALITY_VERSION:
         return _normalize_ai1_quality_v1(payload, pack)
-    if version not in (PREVIOUS_QUALITY_VERSION, QUALITY_VERSION):
-        return payload, "AI-1质量评估版本无效: %s" % version
+    wire_payload, wire_version = payload, version
+    if version == QUALITY_VERSION:
+        card, error = decode_quality_ledger(card)
+        if error:
+            return wire_payload, error
+        payload = {**payload, "quality_assessment": card}
+        version = DIMENSIONAL_QUALITY_VERSION
+    if version not in (PREVIOUS_QUALITY_VERSION, DIMENSIONAL_QUALITY_VERSION):
+        return wire_payload, "AI-1质量评估版本无效: %s" % version
     if set(card) != {"version", "direction", "dimensions"}:
-        return payload, "AI-1质量评估字段错误: 保留意见只能放入各维度"
+        return wire_payload, "AI-1质量评估字段错误: 保留意见只能放入各维度"
     dimensions = card.get("dimensions")
     if not isinstance(dimensions, dict) or set(dimensions) != set(QUALITY_DIMENSIONS):
-        return payload, "AI-1质量评估无效: 五项缺失"
+        return wire_payload, "AI-1质量评估无效: 五项缺失"
     decoded = copy.deepcopy(payload)
     decoded_card = {"version": version, "direction": card.get("direction"),
                     "dimensions": {}, "reservations": []}
@@ -1032,18 +1041,18 @@ def normalize_ai1_quality(payload, pack):
         item = dimensions[name]
         error = quality_dimension_error(name, item, version)
         if error:
-            return payload, error
+            return wire_payload, error
         level = item["level"]
         converted = {"level": level, "reason": item["reason"], "evidence_refs": item["evidence_refs"],
                      "reservation_ids": []}
-        if version == QUALITY_VERSION:
+        if version == DIMENSIONAL_QUALITY_VERSION:
             converted["observations"] = copy.deepcopy(item.get("observations", []))
         for container in ("reservations", "observations"):
             for index, issue in enumerate(item.get(container, [])):
                 key = (issue["cause"], issue["event_group"] or tuple(sorted(issue["evidence_refs"])))
                 issue_path = "/quality_assessment/dimensions/%s/%s/%s" % (name, container, index)
                 if key in seen_causes:
-                    return payload, ("AI-1质量评估重复扣分/意见: %s cause=%s 与%s重复；"
+                    return wire_payload, ("AI-1质量评估重复扣分/意见: %s cause=%s 与%s重复；"
                                      "同一原因和事件只能声明一次，observations不另扣分" % (
                                          issue_path, issue["cause"], seen_causes[key]))
                 seen_causes[key] = issue_path
@@ -1058,15 +1067,20 @@ def normalize_ai1_quality(payload, pack):
     for item in list(dimensions.values()) + evidence_items:
         refs = item.get("evidence_refs")
         if not isinstance(refs, list) or not refs:
-            return payload, "AI-1质量评估无效: evidence_refs必须是非空数组"
+            return wire_payload, "AI-1质量评估无效: evidence_refs必须是非空数组"
         invalid = [ref for ref in refs if not _evidence_pointer_exists(pack, ref)]
         if invalid:
-            return payload, "AI-1质量评估证据路径无效: %s" % invalid
+            return wire_payload, "AI-1质量评估证据路径无效: %s" % invalid
     decoded["quality_assessment"] = decoded_card
     normalized, error = _normalize_ai1_quality_v1(decoded, pack)
     if error:
-        return payload, error
-    normalized["quality_version"] = version
+        return wire_payload, error
+    normalized["quality_version"] = wire_version
+    normalized["quality_assessment"]["version"] = wire_version
+    if wire_version == QUALITY_VERSION:
+        # The expanded legacy form is only an internal validation projection.
+        # Persist/send the declared ledger once, without duplicating opinions downstream.
+        normalized["quality_assessment"] = copy.deepcopy(wire_payload["quality_assessment"])
     return normalized, ""
 
 
@@ -1261,7 +1275,7 @@ def _object_schema(properties):
     return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
 
 
-def response_json_schema(role, request_pack=None):
+def response_json_schema(role, request_pack=None, quality_version=None):
     text = {"type": "string"}
     texts = {"type": "array", "items": text}
     price = {"anyOf": [{"type": "number"}, {"type": "null"}]}
@@ -1269,7 +1283,17 @@ def response_json_schema(role, request_pack=None):
         evidence_ids = catalog_bindings(request_pack) if request_pack is not None else {}
         refs = {"type": "array", "minItems": 1,
                 "items": {"$ref": "#/$defs/evidence_ref"} if evidence_ids else text}
-        dimension = quality_dimension_schema(refs)
+        if quality_version is None or quality_version == QUALITY_VERSION:
+            card, dimension = quality_ledger_schema(refs)
+        elif quality_version == DIMENSIONAL_QUALITY_VERSION:
+            dimension = quality_dimension_schema(refs)
+            card = _object_schema({"version": {"type": "string", "enum": [DIMENSIONAL_QUALITY_VERSION]},
+                "direction": {"type": "string", "enum": ["buy", "sell"]},
+                "dimensions": _object_schema({name: {"$ref": "#/$defs/quality_dimension"}
+                                              for name in QUALITY_DIMENSIONS})})
+            card["description"] = QUALITY_DEDUPLICATION_POLICY
+        else:
+            raise ValueError("unsupported outbound quality schema version")
         wait = _object_schema({"code": {"type": "string", "enum": ["hard_limit", "missing_structure", "missing_trigger",
                                "missing_data", "target_space", "material_counter_evidence"]},
                                "reason": text, "evidence_refs": refs})
@@ -1280,13 +1304,9 @@ def response_json_schema(role, request_pack=None):
             "action": {"type": "string", "enum": ["buy", "sell", "no"]}, "stop_loss": price, "take_profit": price,
             "reasoning": text, "trigger_evidence": text, "invalidation": text, "target_basis": text,
             "fact_conflicts": texts, "unknowns": texts,
-            "quality_assessment": _object_schema({"version": {"type": "string", "enum": [QUALITY_VERSION]},
-                "direction": {"type": "string", "enum": ["buy", "sell"]},
-                "dimensions": _object_schema({name: {"$ref": "#/$defs/quality_dimension"}
-                                              for name in QUALITY_DIMENSIONS})}),
+            "quality_assessment": card,
             "wait_basis": {"type": "array", "items": wait}})
         schema["$defs"] = {"quality_dimension": dimension}
-        schema["properties"]["quality_assessment"]["description"] = QUALITY_DEDUPLICATION_POLICY
         if evidence_ids:
             schema["$defs"]["evidence_ref"] = {"type": "string", "enum": list(evidence_ids)}
         return schema
@@ -1371,15 +1391,15 @@ def ai1_json_template():
             "invalidation": "<失效条件>", "target_basis": "<目标依据>", "fact_conflicts": [], "unknowns": [],
             "wait_basis": [{"code": "missing_trigger", "reason": "<实际等待条件>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}],
             "quality_assessment": {"version": QUALITY_VERSION, "direction": "buy", "dimensions": {
-                name: {"level": "adequate", "reason": "<本项证据结论>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"],
-                       "reservations": [], "observations": []} for name in QUALITY_DIMENSIONS}}}
+                name: {"level": "adequate", "reason": "<本项证据结论>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}
+                for name in QUALITY_DIMENSIONS}, "issues": []}}
 
 
 AI1_INSTRUCTIONS += (
     "严格输出一个完整JSON对象，闭合所有括号，不输出Markdown或分析过程。wait_basis必须在顶层，与quality_assessment并列，"
-    "quality_assessment内部只有version/direction/dimensions，轻微观察放observations、扣分理由放reservations；strong维度不含这两个数组。以下仅示范层级，示例方向/等级/理由/路径不可复用，须按实际证据重填；"
+    "quality_assessment内部只有version/direction/dimensions/issues；五项统一只写level/reason/evidence_refs，意见只写在issues。以下仅示范层级，示例方向/等级/理由/路径不可复用，须按实际证据重填；"
     "有交易提案时wait_basis为空数组。按模板先写顶层wait_basis再写quality_assessment，末尾依次闭合最后维度、dimensions、quality_assessment、顶层对象。"
-    "adequate/weak/missing的每一项都必须写reservations和observations；没有内容也写[]，不能省略。"
+    "先声明每条意见的唯一dimension和kind，再核对五个等级，意见清单为空也写issues=[]；不输出五套reservations/observations。"
     "输出前核对括号、字段层级、必填数组及意见唯一归属，不复制同一事实的意见条目，不改交易判断或等级来满足格式。格式模板："
     + json.dumps(ai1_json_template(), ensure_ascii=False, separators=(",", ":"))
 )
@@ -2936,12 +2956,15 @@ class ThreeAITrader(base.FibVolumePATrader):
             )
             if not quality_error:
                 card = parsed["quality_assessment"]
-                base.logger.info("AI-1质量明细 decision=%s version=%s grades=%s reservations=%s observations=%s wait_basis=%s",
-                                 decision_id, parsed["quality_version"],
-                                 {key: item["level"] for key, item in card["dimensions"].items()},
-                                 card["reservations"],
-                                 {key: item["observations"] for key, item in card["dimensions"].items() if item.get("observations")},
-                                 parsed.get("wait_basis", []))
+                grades = {key: item["level"] for key, item in card["dimensions"].items()}
+                if parsed["quality_version"] == QUALITY_VERSION:
+                    base.logger.info("AI-1质量明细 decision=%s version=%s grades=%s issues=%s wait_basis=%s",
+                                     decision_id, parsed["quality_version"], grades, card["issues"], parsed.get("wait_basis", []))
+                else:
+                    base.logger.info("AI-1质量明细 decision=%s version=%s grades=%s reservations=%s observations=%s wait_basis=%s",
+                                     decision_id, parsed["quality_version"], grades, card["reservations"],
+                                     {key: item["observations"] for key, item in card["dimensions"].items() if item.get("observations")},
+                                     parsed.get("wait_basis", []))
             elif verified_risk_notes:
                 base.logger.info("AI-1独立风险诊断 decision=%s: %s", decision_id, verified_risk_notes)
             if proposal is None:
