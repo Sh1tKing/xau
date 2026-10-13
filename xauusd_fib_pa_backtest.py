@@ -411,6 +411,7 @@ class Backtest:
             "strategy_id": contract.get("id", details.get("setup", "")),
             "event_id": event_id,
             "max_hold_minutes": int(contract.get("max_hold_minutes", 0)),
+            "holding_policy": base.holding_policy(contract),
             "cooldown_seconds": int(contract.get("cooldown_seconds", 0)),
         }
         self.stats["成交"] += 1
@@ -450,7 +451,8 @@ class Backtest:
 
     def time_exit_due(self, i):
         hold = self.position.get("max_hold_minutes", 0)
-        return hold > 0 and self.t[i] >= self.position["open_ts"] + hold * 60
+        return (self.position.get("holding_policy", "hard_exit") == "hard_exit"
+                and hold > 0 and self.t[i] >= self.position["open_ts"] + hold * 60)
 
     def check_exit(self, i):
         # Pessimistic intrabar order: a bar that reaches both the stop and the target counts as a stop.

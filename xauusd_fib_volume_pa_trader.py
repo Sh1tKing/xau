@@ -14,7 +14,8 @@ import threading
 import time
 from types import SimpleNamespace
 from strategies.framework import Context, DEFAULT_REGISTRY, StrategyError, VERSION as STRATEGY_FRAMEWORK_VERSION
-from strategies.lifecycle import EventLedger, execution_token, recovery_event
+from strategies.lifecycle import (EventLedger, execution_token, recovery_event, holding_policy,
+                                  holding_status, HOLD_REVIEW_VERSION)
 from strategies.events import validate_entry_event
 from strategies.adaptive import validate_analysis_checkpoint
 from strategies.regions import region_facts
@@ -1979,6 +1980,9 @@ class FibVolumePATrader:
                     GUARDIAN_QUOTE_CLOCK_VERSION, GUARDIAN_MAX_QUOTE_AGE, GUARDIAN_MAX_CLOCK_LEAD)
         state_path = os.getenv("FIB_PA_STRATEGY_STATE_FILE", "").strip() or os.path.join(LOG_DIR, "strategy_event_state.json")
         self.strategy_ledger = EventLedger(state_path)
+        self._holding_review_logged = set()
+        logger.info("持仓时间规则=%s 自主AI仓到期复核，时间本身不强平；原SLTP及锁盈继续保护",
+                    HOLD_REVIEW_VERSION)
         self.positions_known = None
         self._entry_clock_defer_markers = None
         self._entry_clock_defer_reasons = set()
@@ -2109,11 +2113,23 @@ class FibVolumePATrader:
             active.update(int(t) for t, p in saved.get("positions", {}).items() if now < p["opened_at_utc"] + 30)
             self.strategy_ledger.closed_positions(active, now)
         due = set(self.strategy_ledger.due_tickets(now)) | recovered_due
+        if self.positions_known is True:
+            active = {int(p.ticket) for p in positions}
+            self._holding_review_logged = {key for key in self._holding_review_logged if key[0] in active}
         remaining = []
         for position in positions:
-            if (int(getattr(position, "magic", 0) or 0) == MAGIC and int(position.ticket) in due
-                    and self.close_position_by_ticket(position, "策略最长持有期限到达，Python强制退出")):
-                continue
+            if int(getattr(position, "magic", 0) or 0) == MAGIC and int(position.ticket) in due:
+                status = holding_status(saved, int(position.ticket), now)
+                if status and status["policy"] == "ai_review":
+                    key = (int(position.ticket), status["opened_at_utc"], status["threshold_minutes"])
+                    if key not in self._holding_review_logged:
+                        self._holding_review_logged.add(key)
+                        logger.info("持仓到期复核 ticket=%s held=%.2fmin threshold=%smin policy=%s；"
+                                    "沿用常规M1 AI-3判断，不因时间直接平仓，原SLTP及锁盈继续",
+                                    position.ticket, status["held_minutes"], status["threshold_minutes"],
+                                    HOLD_REVIEW_VERSION)
+                elif self.close_position_by_ticket(position, "策略最长持有期限到达，Python强制退出"):
+                    continue
             remaining.append(position)
         return remaining
 

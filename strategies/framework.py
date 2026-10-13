@@ -13,6 +13,7 @@ import threading
 from types import ModuleType
 import copy
 from typing import Any, Callable
+from strategies.lifecycle import holding_policy
 
 VERSION = "strategy-framework-v2"
 SESSIONS = ("asia", "london", "overlap", "late_us")
@@ -78,7 +79,8 @@ class Strategy:
                 "regime_filter": self.regime_filter, "entry_reference": self.entry_reference,
                 "stop_reference": self.stop_reference, "max_hold_minutes": self.max_hold_minutes,
                 "cooldown_seconds": self.cooldown_seconds, "one_entry_per_event": self.one_entry_per_event,
-                "demo_only": self.demo_only, "analysis_mode": self.analysis_mode})
+                "demo_only": self.demo_only, "analysis_mode": self.analysis_mode,
+                "holding_policy": holding_policy({"analysis_mode": self.analysis_mode})})
 
     def assess(self, context):
         contract = self.manifest()

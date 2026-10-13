@@ -26,7 +26,9 @@
 
 ## 当前架构
 
-黄金主系统新仓护盘（2026-10-13，用户授权构建）：默认`profit-floor-v1`，纯规则在`strategies/profit_guard.py`，主脚本负责MT5现金模型、身份/报价复核、原子状态与真实执行。新仓冻结参数及原SL/TP到原事件metadata，绑定后保存`guardian_profit_state.json`；旧无标记仓继续legacy，不按当前配置重建旧仓。按运行配置轮询（现0.5秒），BUY用Bid、SELL用Ask；扣已知入场费用、预留平仓费用和负swap，点差不重复扣。持续1秒的新有利报价才晋级，初始预计净锁盈至少0.20账户币种，30%/1R40%/2R50%，没有1R启动门；保留max(冻结上升的1×M5 ATR,3×点差,0.50价格单位,broker止损/冻结+1tick)空间。确认SL只能收紧；ATR下降/回撤不推进，未成功提交不算锁盈。AI3 hold保留底线、tighten也过噪声及当前broker门，策略性退出由AI3处理；新仓不运行旧sigmoid盈利前退出、本地结构退出或旧保本触发，原SLTP及原期限继续。此分工依赖三AI入口，纯本地回放不含AI3，不得称收益更好。实际.env、模型/超时/门槛/三盘定义、crypto及local_guard_demo不改；完整部署含profit_guard.py及两个主脚本，用户自行重启。
+黄金自主仓时间处理（2026-10-14用户明确否定盲目时间平仓）：`strategies/lifecycle.py`统一`holding-review-v1`，原持仓契约明确analysis_mode=True即ai_review，新manifest显式声明holding_policy。原max_hold_minutes（默认90）作为复核节点，时间本身不再强平；沿用常规M1 AI3派发，不增加付费请求。已有自主仓同样适用这个用户授权的处理变更，保留原契约/时间/SLTP/风险/锁盈水位，不改状态结构或用当前定义重建旧仓；旧强制期限提示词由positions.holding_review的有效规则明确覆盖。AI3超时/坏JSON不靠时间兜底平仓，原SLTP/实时单向锁盈/保护恢复及越线退出继续。非自主历史固定事件保留hard_exit；不能按策略名称猜仓模式。入场检查点TTL、手数、单仓、风险/质量门及私有.env不变。回放不替自主仓伪造AI时间退出，纯本地结果不能证明AI3收益。部署完整三个脚本+strategies，保留三个状态文件，由用户重启，设计见docs/superpowers/specs/2026-10-14-holding-review.md。
+
+黄金主系统新仓护盘（2026-10-13，用户授权构建）：默认`profit-floor-v1`，纯规则在`strategies/profit_guard.py`，主脚本负责MT5现金模型、身份/报价复核、原子状态与真实执行。新仓冻结参数及原SL/TP到原事件metadata，绑定后保存`guardian_profit_state.json`；旧无标记仓继续legacy，不按当前配置重建旧仓。按运行配置轮询（现0.5秒），BUY用Bid、SELL用Ask；扣已知入场费用、预留平仓费用和负swap，点差不重复扣。持续1秒的新有利报价才晋级，初始预计净锁盈至少0.20账户币种，30%/1R40%/2R50%，没有1R启动门；保留max(冻结上升的1×M5 ATR,3×点差,0.50价格单位,broker止损/冻结+1tick)空间。确认SL只能收紧；ATR下降/回撤不推进，未成功提交不算锁盈。AI3 hold保留底线、tighten也过噪声及当前broker门，策略性退出由AI3处理；新仓不运行旧sigmoid盈利前退出、本地结构退出或旧保本触发，原SLTP与原时间记录保留，自主仓按上方2026-10-14复核规则处理。此分工依赖三AI入口，纯本地回放不含AI3，不得称收益更好。实际.env、模型/超时/门槛/三盘定义、crypto及local_guard_demo不改；完整部署含profit_guard.py及两个主脚本，用户自行重启。
 
 独立样本 `local_guard_demo/`（2026-10-12）：用户要求纯本地完整入场+单AI异步护仓，独立文件夹、不接飞书，随后要求秒级黄金。默认strategy.py用H1许可/真实30秒采样区间/持续约1秒突破，0.2秒目标轮询；最新授权由AI负责策略性护仓。新仓冻结quote_ai_guardian_v1，回区间/20秒不足0.15R/0.5R锁盈仅提醒，AI自主hold/tighten/close，本地保留原SLTP/现金风险/SL恢复/2分钟期限。绑定立即派发，默认15秒最小间隔/20秒有效决策预算/动作偏移0.15原始R；成功POST快照验证证据，最新报价及最终Broker修改/平仓前再检查身份/契约/时效/价格变化；单线程、每轮主备最多2POST，坏回复不重审。旧无guardian_policy仓及显式local对照仍沿用原短时本地退出/锁盈，不能重建旧仓。LG_独立配置、magic、0.01单仓、SL8/RR1.5/M5保护/EMA追价/真实现金风险门、token落盘和默认observe保留；EMA入口entry_ema.py保留。replay仅local_comparison、冻结策略/次报价成交/延迟成本压力，不能作为AI护仓收益；真实采样不是完整tick。实际.env、runtime、黄金/crypto/server_deploy本次不改；样本不在公开黄金快照白名单内，用户自行复制完整源码并重启，见local_guard_demo/README.md及VALIDATION.md。
 
@@ -44,7 +46,7 @@
 - 三盘定义和各自entry/review/guardian提示词在`strategies/definitions/{asia,london,us}_adaptive.py`；共同事实与真实分析检查点在`strategies/adaptive.py`。亚盘07–15、欧盘15–20、美盘20–次日07为北京时间策略分段，未移动夏令时。亚盘可趋势交易，不假定永远区间；分盘菜单只是AI参考，不是固定路线。
 - `analysis_mode=True`时本地只是软分与真实行情上下文，本地no/低分、无Fib/首次回踩/开盘窗口、单根M5反向都不剥夺AI-1自主分析。数据/指纹/时间错、H1反向和消费/冷却仍拒绝。关闭AI时粗筛不会直接交易。
 - `analysis_checkpoint`绑定最新已收盘M5/M15和UTC偏移，明确不是已确认交易触发；每检查点最多一次订单尝试，预提交消费和恢复token保留。新M15、空闲的新M5和启动可分析，普通派发同检查点去重；不增加付费重审。
-- AI方案参考成功请求买Ask/卖Bid，旧模式参考价格不变。新模式参考目标上限3R、最长持仓90分钟、平仓冷却60秒，AI-2核固定SL/TP与当前报价，AI-3用原持仓契约。H1、SL8、RR1.5、三根M5极值+缓冲、EMA1.5ATR、实时触发侧2倍stop_buffer均保留。
+- AI方案参考成功请求买Ask/卖Bid，旧模式参考价格不变。新模式参考目标上限3R、90分钟持仓复核、平仓冷却60秒；自主仓时间本身不强平，AI-2核固定SL/TP与当前报价，AI-3用原持仓理由及有效holding_review。H1、SL8、RR1.5、三根M5极值+缓冲、EMA1.5ATR、实时触发侧2倍stop_buffer均保留。
 - 新默认模式依据用户授权用于模拟验证，不要求历史盈利作为启用门；旧区域/三固定策略的亏损回放结论保留，不能改写成盈利证明。完整离线AI链路测试证明代码通路，实际频率/成本/收益须看新的服务器日志。设计见`docs/superpowers/specs/2026-10-10-adaptive-session-demo.md`。
 
 历史候选session_retest（当前默认关闭）：

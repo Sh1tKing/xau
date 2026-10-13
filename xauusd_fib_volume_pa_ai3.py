@@ -123,7 +123,9 @@ def loaded_code_signature():
     digest = hashlib.sha256()
     for filename in (__file__, base.__file__, os.path.join(BASE_DIR, "strategies", "citations.py"),
                      os.path.join(BASE_DIR, "strategies", "quality.py"),
-                     os.path.join(BASE_DIR, "strategies", "profit_guard.py")):
+                     os.path.join(BASE_DIR, "strategies", "profit_guard.py"),
+                     os.path.join(BASE_DIR, "strategies", "lifecycle.py"),
+                     os.path.join(BASE_DIR, "strategies", "framework.py")):
         try:
             with open(filename, "rb") as source:
                 digest.update(hashlib.sha256(source.read()).digest())
@@ -214,7 +216,11 @@ AI3_INSTRUCTIONS = (
     "positions.profit_guard存在时，Python按实时平仓侧报价分级锁盈。protected_sl是已确认保护，desired_sl仅是未必执行的目标。"
     "broker_sl是快照读到的实际服务器SL；quote_status无效表示本地报价检查阻断，不能把desired_sl或建议价说成已经锁定。"
     "hold不得撤回保护底线，tighten_sl也必须满足profit_guard.minimum_room的回撤空间；过近建议不会执行。"
-    "本地只做利润保护、原SLTP及期限，原交易结构是否失效由你按已收盘证据判断。旧仓没有profit_guard时仍沿用旧护盘。"
+    "持仓时间处理以positions.holding_review的Python有效规则为准。policy=ai_review时，原max_hold_minutes仅为复核节点，"
+    "不能仅因持仓时间到期close；此规则优先于旧自主契约中的强制期限文字，不重建原入场理由、SLTP或锁盈线。"
+    "review_due=true需用已收盘证据重新核实原理由、失效边界与可执行保护；理由仍有效就hold或合法tighten_sl。"
+    "超时或证据不足不能用时间代替失效。policy=hard_exit的历史固定事件仓仍由Python执行原期限。"
+    "本地继续利润保护和原SLTP，原交易结构是否失效由你按已收盘证据判断。旧仓没有profit_guard时仍沿用旧护盘。"
     "不必等价格碰到初始止损才处理，但不能仅因当前浮亏或持仓时间提前退出。只有指定失效边界被已收盘K线越过，"
     "或至少两根相邻已收盘M1朝不利方向推进、最近M5结构同步恶化且没有有利拒绝时，才可close；否则优先hold。"
     "单根影线刺穿但收盘收回不算结构失效。浮盈单可以把止损收紧到入场价以上（BUY）或以下（SELL）来锁定利润。"
@@ -578,7 +584,7 @@ def role_instructions(role, contracts):
     rules = role_rules(role, contracts)
     extra = ""
     if role == "AI-3" and any(contract.get("analysis_mode") for contract in contracts):
-        extra = "\nanalysis_checkpoint有效期及消费只限制新入场；开仓后检查点过期或已消费本身不是交易失效，不据此平仓。原始打法失效证据与入场保存的原始持仓契约中Python持仓期限分别判断。"
+        extra = "\nanalysis_checkpoint有效期及消费只限制新入场；开仓后检查点过期或已消费本身不是交易失效，不据此平仓。自主持仓原时间节点只触发复核，原始打法是否失效必须另用真实闭合证据判断；时间本身不能作close理由。"
     return generic + extra + "\n本次来源绑定的策略角色规则：" + json.dumps(rules, ensure_ascii=False)
 
 
@@ -3137,6 +3143,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                             "timeframe_seconds": {"M1": 60, "M5": 300, "M15": 900, "H1": 3600}},
             "positions": [],
         }
+        lifecycle_state = self.strategy_ledger.snapshot()
         state_changed = False
         for position in positions:
             ticket = int(position.ticket)
@@ -3213,6 +3220,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 "virtual_sl": round(float(state.virtual_sl), 2) if state else 0,
                 "profit_guard": profit_guard,
                 "hold_minutes": round(max(0.0, hold_minutes), 1),
+                "holding_review": base.holding_status(lifecycle_state, ticket, quote["observed_at"]),
                 "initial_risk": round(risk, 2) if risk > 0 else None,
                 "r_now": round(move / risk, 2) if risk > 0 else None,
                 "max_favorable": round(best, 2) if best is not None else None,

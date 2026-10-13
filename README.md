@@ -15,7 +15,7 @@
 - [接入后的实际回放验证](docs/experiments/2026-10-09-session-retest-integration-validation.md)：本地10笔、净+0.30美元，后段仍亏，研究收益不能沿用。
 - [黄金多策略研究与模拟比较](docs/experiments/2026-10-09-gold-strategy-research.md)：短线、中线及激进候选的独立离线实验；优先候选现已按[接入设计](docs/superpowers/specs/2026-10-09-session-retest-integration.md)加入模拟盘框架。
 
-新三盘参考目标上限3R、止损不超过8美元、最多持有90分钟，每个分析检查点最多一次下单尝试，平仓后冷却60秒。普通已收盘M5可发起分析，检查点不是交易触发成立；AI仍须给真实证据并通过质量门槛。北京时间分段：亚盘07–15、欧盘15–20，美盘20–次日07（包含重叠和尾段），不冒称交易所开盘或自动夏令时分段。旧固定定义保留但默认关闭。事件和期限写入 `xau_fib_pa_logs/strategy_event_state.json`，部署迁移同一账户时保留该文件、`guardian_profit_state.json`及AI持仓上下文。
+新三盘参考目标上限3R、止损不超过8美元，持仓90分钟进入AI-3复核，时间本身不再强制平仓；原SLTP和实时单向锁盈持续保护。每个分析检查点最多一次下单尝试，平仓后冷却60秒。普通已收盘M5可发起分析，检查点不是交易触发成立；AI仍须给真实证据并通过质量门槛。北京时间分段：亚盘07–15、欧盘15–20，美盘20–次日07（包含重叠和尾段），不冒称交易所开盘或自动夏令时分段。旧固定定义保留但默认关闭，非自主固定事件仓仍按原硬期限。原契约和时间写入 `xau_fib_pa_logs/strategy_event_state.json`，部署迁移同一账户时保留该文件、`guardian_profit_state.json`及AI持仓上下文。时间复核兼容已有自主仓，见[设计](docs/superpowers/specs/2026-10-14-holding-review.md)。
 
 另有两个默认关闭的日内研究定义：`region_retest`（区域突破回踩）与 `region_rejection`（区域触碰拒绝）。它们在欧美盘中使用新形成的已确认M15区域、首次M5事件及独立保护锚，目标上限2.5R、最多120分钟、平仓冷却10分钟。参数属于本项目假设，不是视频作者算法的复现；构建与离线结果见[验证记录](docs/experiments/2026-10-10-intraday-build-validation.md)和[设计](docs/superpowers/specs/2026-10-10-intraday-region-opportunities-draft.md)。
 

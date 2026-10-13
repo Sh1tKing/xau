@@ -13,6 +13,46 @@ import tempfile
 import threading
 
 
+HOLD_REVIEW_VERSION = "holding-review-v1"
+
+
+def holding_policy(contract):
+    """Explicit host policy, including saved autonomous contracts from older builds.
+
+    The original clock/contract is never rewritten. Following the user's policy
+    change, autonomous analysis positions review that clock instead of closing
+    solely on time; historical fixed-event strategies keep their frozen exit.
+    """
+    return "ai_review" if isinstance(contract, dict) and contract.get("analysis_mode") is True else "hard_exit"
+
+
+def holding_status(state, ticket, now):
+    """Read the original position clock, without inferring it from current rules."""
+    if not _time(now) or not _integer(ticket, 1, 2**64 - 1) or not isinstance(state, dict):
+        return None
+    position = state.get("positions", {}).get(str(ticket))
+    if not isinstance(position, dict):
+        return None
+    opened = position.get("opened_at_utc")
+    minutes = position.get("max_hold_minutes")
+    event = state.get("events", {}).get(position.get("event_id"), {})
+    metadata = event.get("metadata", {})
+    if (not _time(opened) or not _integer(minutes, 1, 10080)
+            or not isinstance(metadata, dict)
+            or not _lifecycle_matches(metadata, minutes, position.get("cooldown_seconds"))):
+        return None
+    threshold = opened + minutes * 60
+    if not _time(threshold):
+        return None
+    policy = holding_policy(metadata.get("contract"))
+    reached = now >= threshold
+    return {"version": HOLD_REVIEW_VERSION, "ticket": ticket, "policy": policy,
+            "opened_at_utc": opened, "threshold_minutes": minutes,
+            "threshold_at_utc": threshold, "held_minutes": round(max(0., now - opened) / 60., 2),
+            "threshold_reached": reached, "review_due": policy == "ai_review" and reached,
+            "time_alone_can_close": policy == "hard_exit"}
+
+
 def execution_token(event_id, symbol, magic, action):
     """Compact deterministic key; the ledger also rejects hash collisions."""
     key = json.dumps([event_id, symbol, magic, action], separators=(",", ":"))

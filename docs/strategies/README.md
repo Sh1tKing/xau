@@ -55,7 +55,7 @@
 
 新模式AI方案以成功请求时买Ask/卖Bid为参考，目标参考上限3R；最近三根M5极值、M15 ATR保护生成规则及实时SL8/RR1.5/2倍缓冲余量继续检查。最大持仓90分钟、平仓后冷却60秒，每检查点最多一次订单尝试（回执不确定也不释放）。没有止损空间依然拒绝，不能靠激进提示词突破公共风控。普通本地/旧定义的M15参考价格不变。
 
-参考来源由契约声明：`entry_reference=closed_m15/closed_m5`，`stop_reference=structure/m5_extreme/region`；研究定义单独使用确认M5参考，旧三个策略仍使用M15。区域保护还要覆盖有来源的失效锚，目标先考虑真实的反向区域边缘。`max_hold_minutes/cooldown_seconds/one_entry_per_event/demo_only` 声明生命周期，Python保存并执行，已有仓不随定义修改延长。公共边界仍是H1方向、M5保护极值、止损8美元、RR至少1.5、EMA21追价1.5ATR、0.01手和最多1仓。服务器止损、本地锁盈及结构护盘仍是框架的公共保护；AI-3再结合入场保存的策略护盘规则。插件不改变这些限制，不能靠文本覆盖它们。
+参考来源由契约声明：`entry_reference=closed_m15/closed_m5`，`stop_reference=structure/m5_extreme/region`；研究定义单独使用确认M5参考，旧三个策略仍使用M15。区域保护还要覆盖有来源的失效锚，目标先考虑真实的反向区域边缘。`max_hold_minutes/cooldown_seconds/one_entry_per_event/demo_only` 声明生命周期，Python保存原数值与入场时钟，已有仓不随定义修改重计时。2026-10-14起，原契约`analysis_mode=True`的自主仓采用`holding_policy=ai_review`，max_hold_minutes是复核节点，时间本身不再强平；已有自主仓适用同一明确兼容规则，不改其余冻结契约。固定事件仓仍为hard_exit。AI-3请求提供positions.holding_review有效规则，沿用M1派发；请求失败仍保留SLTP与锁盈。公共边界仍是H1方向、M5保护极值、止损8美元、RR至少1.5、EMA21追价1.5ATR、0.01手和最多1仓。AI-3结合原策略护盘证据作策略判断，服务器止损和本地锁盈持续保护，插件不能靠文本放宽这些限制。
 
 区域定义用 `parameters.region_event_kind=retest/rejection` 声明已支持的事件算法，宿主从原始行情复算其区域、触发、失效锚、窗口及完整目标障碍；不会根据策略ID猜算法。改名或新增同接口定义不需要给宿主加ID分支。新增其他区域来源或算法仍须扩展辅助模块、测试并自行重启，不能只写一段提示词。
 
