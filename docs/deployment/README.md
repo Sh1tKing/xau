@@ -44,6 +44,8 @@
 
 离线工程检查与固定缓存控制见[验证记录](../experiments/2026-10-13-profit-floor-validation.md)。纯本地对照没有AI3且结果较差，不能用它证明该组合收益改善；下一步应观察新的模拟仓日志，不按本轮缓存调整默认参数。
 
+2026-10-13报价修订`guardian-quote-clock-v2`修复同步日志中服务器比本机快约2～3秒导致秒级锁盈持续跳过的问题：持仓报价容许最多5秒有限时钟领先，最老报价仍5秒，原UTC偏移固定，入场闭合K线时间检查不变。轮询、修改SL和平仓使用同一检查。跳过日志显示真实原因、时间差及服务器SL/确认线/目标；相同原因30秒内只打印一次，检查仍按原轮询频率进行。AI3保护证据显示broker_sl和quote_status，模型文字不能代替真实修改成功回执。详见[修复验证](../experiments/2026-10-13-profit-guard-clock-review.md)。覆盖两个主脚本并保留完整strategies及服务器最新状态，自行重启即可继续原profit-floor持仓，无需删除状态或修改.env。
+
 ## 2026-10-12 评分契约v3更新
 
 同步AI脚本及完整strategies包，包含新增 `quality.py`；普通量/浅回撤使用observations，重大问题使用reservations，提示词、Schema与Python共享同一等级关联规则。有效旧卡按原版本处理，坏卡不改分、不补发审核；错误通知显示实际路径/cause/level，并可附独立风险诊断。详情见 [验证记录](../experiments/2026-10-12-ai1-quality-contract-v3.md)。如需运行离线Schema回归，可安装 `requirements-test.txt`；正常交易仅需 `requirements.txt`，不依赖jsonschema。

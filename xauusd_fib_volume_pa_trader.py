@@ -415,16 +415,61 @@ def guardian_identity(position):
             "time": int(getattr(position, "time", 0) or 0)}
 
 
-def fresh_guardian_quote(tick, observed, server_offset=None):
+GUARDIAN_QUOTE_CLOCK_VERSION = "guardian-quote-clock-v2"
+GUARDIAN_MAX_QUOTE_AGE = 5.0
+GUARDIAN_MAX_CLOCK_LEAD = 5.0
+
+
+def guardian_quote_status(tick, observed, server_offset=None):
+    """Allow bounded broker clock skew without re-inferring a pinned timezone.
+
+    Tick milliseconds are preferred. A small clock lead is not an old quote;
+    timestamp incoherence, genuine age and a larger future jump still fail.
+    This clock is never used to advance closed entry-candle boundaries.
+    """
+    facts = dict(valid=False, reason="invalid_quote", bid=None, ask=None,
+                 raw_time=None, raw_time_msc=None, observed_utc=None,
+                 server_offset_hours=None, age_sec=None,
+                 max_age_sec=GUARDIAN_MAX_QUOTE_AGE, max_lead_sec=GUARDIAN_MAX_CLOCK_LEAD)
     try:
         bid, ask = float(tick.bid), float(tick.ask)
+        observed = float(observed)
+        sec = float(tick.time)
+        msc = float(getattr(tick, "time_msc", 0) or 0)
+        values = dict(bid=bid, ask=ask, raw_time=sec, raw_time_msc=msc, observed_utc=observed)
+        facts.update({key: value if math.isfinite(value) else None for key, value in values.items()})
+        if not all(math.isfinite(value) and value > 0 for value in (bid, ask)):
+            return facts
+        if ask < bid:
+            facts["reason"] = "crossed_quote"
+            return facts
+        if (not math.isfinite(observed) or observed <= 0 or not math.isfinite(sec) or sec <= 0
+                or not math.isfinite(msc) or msc < 0):
+            facts["reason"] = "invalid_clock"
+            return facts
+        raw = msc / 1000 if msc else sec
+        if abs(raw - sec) >= 2:
+            facts["reason"] = "timestamp_mismatch"
+            return facts
         offset = tick_clock_offset(tick, observed) if server_offset is None else server_offset
-        raw = float(getattr(tick, "time_msc", 0) or 0) / 1000 or float(tick.time)
-        age = observed - (raw - offset * 3600) if offset is not None else math.inf
-        return (all(math.isfinite(x) and x > 0 for x in (bid, ask, raw)) and ask >= bid
-                and abs(raw - float(tick.time)) < 2 and -1.0 <= age <= 5.0)
+        if (type(offset) not in (int, float) or not math.isfinite(offset) or not -12 <= offset <= 14):
+            facts["reason"] = "unknown_server_offset"
+            return facts
+        age = observed - (raw - offset * 3600)
+        facts.update(server_offset_hours=offset, age_sec=age)
+        if age < -GUARDIAN_MAX_CLOCK_LEAD:
+            facts["reason"] = "future_quote"
+        elif age > GUARDIAN_MAX_QUOTE_AGE:
+            facts["reason"] = "stale_quote"
+        else:
+            facts.update(valid=True, reason="fresh")
+        return facts
     except (AttributeError, TypeError, ValueError, OverflowError):
-        return False
+        return facts
+
+
+def fresh_guardian_quote(tick, observed, server_offset=None):
+    return guardian_quote_status(tick, observed, server_offset)["valid"]
 
 FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL", "").strip()
 FEISHU_WEBHOOK_SECRET = os.getenv("FEISHU_WEBHOOK_SECRET", "").strip()
@@ -1922,6 +1967,7 @@ class FibVolumePATrader:
         self.entry_confidence: Dict[int, str] = {}
         self.last_order_ticket = 0
         self._guardian_lock = threading.RLock()
+        self._guardian_quote_rejections = {}
         event_path = os.getenv("FIB_PA_STRATEGY_STATE_FILE", "").strip() or os.path.join(LOG_DIR, "strategy_event_state.json")
         guard_path = os.getenv("FIB_PA_GUARDIAN_STATE_FILE", "").strip() or os.path.join(os.path.dirname(event_path), "guardian_profit_state.json")
         self.guard_store = GuardStore(guard_path)
@@ -1929,6 +1975,8 @@ class FibVolumePATrader:
             logger.warning("锁盈状态读取失败，保留服务器保护并阻止新策略入场: %s", self.guard_store.error)
         logger.info("护盘版本=%s 新订单模式=%s 轮询=%ss；已开仓按原冻结规则，确认保护线只收紧不回退",
                     PROFIT_GUARD_VERSION, os.getenv("FIB_PA_GUARDIAN_POLICY", "profit_floor_v1"), POLL_SECONDS)
+        logger.info("护盘报价版本=%s 固定服务器UTC偏移；最大报价年龄=%ss 时钟领先容差=%ss",
+                    GUARDIAN_QUOTE_CLOCK_VERSION, GUARDIAN_MAX_QUOTE_AGE, GUARDIAN_MAX_CLOCK_LEAD)
         state_path = os.getenv("FIB_PA_STRATEGY_STATE_FILE", "").strip() or os.path.join(LOG_DIR, "strategy_event_state.json")
         self.strategy_ledger = EventLedger(state_path)
         self.positions_known = None
@@ -2376,8 +2424,7 @@ class FibVolumePATrader:
         state = getattr(self, "guardian_states", {}).get(ticket)
         guard = state.profit_floor if state else None
         if guard:
-            if state.identity != guardian_identity(live) or not fresh_guardian_quote(tick, time.time(), guard.server_offset):
-                logger.info("锁盈修改拒绝：身份或报价时效无效 ticket=%s", ticket)
+            if not self.guardian_quote_ready(state, live, tick, "modify_sl"):
                 return False
             guard.acknowledge(direction, current_sl)
             if not (new_sl == guard.protected_sl and current_sl != guard.protected_sl) and not sl_change_is_tighter(
@@ -2458,8 +2505,7 @@ class FibVolumePATrader:
         if tick is None:
             logger.error(f"❌ 护盘平仓失败，无法获取 {SYMBOL} 报价")
             return False
-        if state and state.profit_floor and not fresh_guardian_quote(tick, time.time(), state.profit_floor.server_offset):
-            logger.warning("锁盈平仓暂缓：报价过期 ticket=%s", ticket)
+        if state and state.profit_floor and not self.guardian_quote_ready(state, position, tick, "close"):
             return False
 
         if position.type == mt5.POSITION_TYPE_BUY:
@@ -2557,11 +2603,47 @@ class FibVolumePATrader:
         except (AttributeError, TypeError, ValueError, OverflowError):
             return None
 
+    def guardian_quote_ready(self, state, position, tick, operation):
+        guard = state.profit_floor
+        facts = guardian_quote_status(tick, time.time(), guard.server_offset)
+        try:
+            current_identity = guardian_identity(position)
+            changed = sorted(key for key in set(state.identity) | set(current_identity)
+                             if state.identity.get(key) != current_identity.get(key))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            changed = ["invalid_identity"]
+        reason = "identity_changed" if changed else facts["reason"]
+        key = (state.ticket, operation)
+        rejected = getattr(self, "_guardian_quote_rejections", None)
+        if rejected is None:
+            rejected = self._guardian_quote_rejections = {}
+        previous = rejected.get(key)
+        if not changed and facts["valid"]:
+            if rejected.pop(key, None):
+                logger.info("锁盈行情恢复 ticket=%s operation=%s age_sec=%s broker_sl=%s protected_sl=%s desired_sl=%s",
+                            state.ticket, operation, facts["age_sec"], getattr(position, "sl", None),
+                            guard.protected_sl, guard.desired_sl)
+            return True
+        # Still check every poll; throttle only identical diagnostics, never the checks.
+        guard.pending_price = guard.pending_since = guard.pending_last_at = 0.0
+        now = time.monotonic()
+        signature = (reason, tuple(changed))
+        if previous is None or previous[0] != signature or now - previous[1] >= 30:
+            logger.warning("锁盈护盘跳过 ticket=%s operation=%s reason=%s identity_fields=%s "
+                           "bid=%s ask=%s raw_time=%s raw_time_msc=%s observed_utc=%s "
+                           "offset_hours=%s age_sec=%s max_age_sec=%s max_lead_sec=%s "
+                           "broker_sl=%s protected_sl=%s desired_sl=%s",
+                           state.ticket, operation, reason, changed, facts["bid"], facts["ask"],
+                           facts["raw_time"], facts["raw_time_msc"], facts["observed_utc"],
+                           facts["server_offset_hours"], facts["age_sec"], facts["max_age_sec"],
+                           facts["max_lead_sec"], getattr(position, "sl", None), guard.protected_sl, guard.desired_sl)
+            rejected[key] = (signature, now)
+        return False
+
     def run_profit_guardian(self, position, state, tick, atr):
         guard = state.profit_floor
         now = time.time()
-        if state.identity != guardian_identity(position) or not fresh_guardian_quote(tick, now, guard.server_offset):
-            logger.warning("锁盈护盘跳过：身份或报价过期 ticket=%s", state.ticket)
+        if not self.guardian_quote_ready(state, position, tick, "poll"):
             return
         price = float(tick.bid) if state.direction == "BUY" else float(tick.ask)
         if guard.server_offset is None:
@@ -2688,6 +2770,9 @@ class FibVolumePATrader:
             if ticket not in active_tickets:
                 self.guardian_states.pop(ticket, None)
         if self.positions_known is True:
+            for key in list(self._guardian_quote_rejections):
+                if key[0] not in active_tickets:
+                    self._guardian_quote_rejections.pop(key, None)
             for ticket in list(self.guard_store.records):
                 if int(ticket) not in active_tickets:
                     self.guard_store.put(ticket, None)

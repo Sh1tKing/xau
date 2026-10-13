@@ -204,6 +204,7 @@ AI3_INSTRUCTIONS = (
     "不能从M1/M5收盘推断M15/H1已收盘破坏。对应周期或时间覆盖不足时失效证据为未知，不能凭此close。"
     "窄震荡里的上下影线和轻微回撤选择 hold，交给已冻结的本地保护规则。"
     "positions.profit_guard存在时，Python按实时平仓侧报价分级锁盈。protected_sl是已确认保护，desired_sl仅是未必执行的目标。"
+    "broker_sl是快照读到的实际服务器SL；quote_status无效表示本地报价检查阻断，不能把desired_sl或建议价说成已经锁定。"
     "hold不得撤回保护底线，tighten_sl也必须满足profit_guard.minimum_room的回撤空间；过近建议不会执行。"
     "本地只做利润保护、原SLTP及期限，原交易结构是否失效由你按已收盘证据判断。旧仓没有profit_guard时仍沿用旧护盘。"
     "不必等价格碰到初始止损才处理，但不能仅因当前浮亏或持仓时间提前退出。只有指定失效边界被已收盘K线越过，"
@@ -2963,6 +2964,9 @@ class ThreeAITrader(base.FibVolumePATrader):
                 state = self.guardian_states.get(ticket)
                 profit_guard = state.profit_floor.export() if state and state.profit_floor else None
                 if profit_guard:
+                    profit_guard["broker_sl"] = float(position.sl or 0.)
+                    profit_guard["quote_status"] = base.guardian_quote_status(
+                        tick, quote["observed_at"], state.profit_floor.server_offset)
                     broker_gap = 0.
                     try:
                         info = base.mt5.symbol_info(base.SYMBOL)
@@ -3038,6 +3042,13 @@ class ThreeAITrader(base.FibVolumePATrader):
         if state_changed:
             self.save_entry_contexts()
         for item in payload["positions"]:
+            guard = item.get("profit_guard")
+            if guard:
+                base.logger.info("AI-3保护证据 ticket=%s broker_sl=%s protected_sl=%s desired_sl=%s "
+                                 "quote_valid=%s quote_reason=%s age_sec=%s",
+                                 item["ticket"], guard["broker_sl"], guard["protected_sl"], guard["desired_sl"],
+                                 guard["quote_status"]["valid"], guard["quote_status"]["reason"],
+                                 guard["quote_status"]["age_sec"])
             base.logger.info(
                 "AI-3证据 ticket=%s context=%s risk=%s r_now=%s MFE=%s MAE=%s coverage=%s"
                 % (

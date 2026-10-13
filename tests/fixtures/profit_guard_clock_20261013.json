@@ -1,0 +1,23 @@
+{
+  "source": "Synced 2026-10-13 ai2_input at 11:11:26; market quotes only",
+  "ticket": 603681669,
+  "server_offset_hours": 3.0,
+  "quotes": [
+    {
+      "stage": "ai1_snapshot",
+      "bid": 4179.3,
+      "ask": 4179.63,
+      "time": 1791871803,
+      "time_msc": 1791871803787,
+      "observed_at": 1791861001.1528008
+    },
+    {
+      "stage": "ai2_live_quote",
+      "bid": 4180.04,
+      "ask": 4180.37,
+      "time": 1791871888,
+      "time_msc": 1791871888435,
+      "observed_at": 1791861086.125008
+    }
+  ]
+}
