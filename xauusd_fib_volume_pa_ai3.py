@@ -2110,7 +2110,7 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
     if missing_evidence:
         return None, "AI-1证据字段缺失: " + ",".join(missing_evidence)
     if confidence < min_confidence:
-        return None, "AI-1 置信度 %s < %s" % (confidence, min_confidence)
+        return None, "AI-1质量分 %s < %s" % (confidence, min_confidence)
     target_r = (strategy_contract or {}).get("target_max_reference_r", 1.8)
     blockers = (strategy_evidence or {}).get(action, {}).get("blockers", [])
     if blockers:
@@ -2594,6 +2594,13 @@ class ThreeAITrader(base.FibVolumePATrader):
         except (MarketSnapshotError, KeyError, TypeError, ValueError) as exc:
             return "执行数据无效: %s" % exc
 
+    def entry_score_lines(self, result):
+        return [
+            f"AI-1质量分（{result.action.upper()}方案）: {result.confidence}",
+            f"本地BUY粗筛分: {result.score_buy}",
+            f"本地SELL粗筛分: {result.score_sell}",
+        ]
+
     def place_order(self, result):
         with self._mt5_lock:
             guard = (result.details or {}).get("execution_guard", {})
@@ -2947,13 +2954,16 @@ class ThreeAITrader(base.FibVolumePATrader):
                 },
             )
             action_line = ("AI-1输出无效（原动作: %s）" if quality_error else "AI-1动作: %s") % format_ai_action(parsed)
-            confidence_line = "%s，本地置信度: %s (BUY=%s SELL=%s)，AI-1质量分: %s，门槛: 本地%s / AI%s" % (
+            local_threshold = "本地粗筛阈值%s" % base.CONFIDENCE_THRESHOLD
+            if (pack.get("strategy_contract") or {}).get("analysis_mode") is True:
+                local_threshold += "（自主模式仅供参考）"
+            confidence_line = "%s，本地粗筛分: %s（本地BUY粗筛分=%s 本地SELL粗筛分=%s），AI-1质量分: %s，阈值: %s / AI-1质量门槛%s" % (
                 action_line,
                 local_result.confidence,
                 local_result.score_buy,
                 local_result.score_sell,
                 "无" if ai_confidence is None else ai_confidence,
-                base.CONFIDENCE_THRESHOLD,
+                local_threshold,
                 AI_CONFIDENCE,
             )
             base.logger.info(

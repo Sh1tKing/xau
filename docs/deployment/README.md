@@ -12,8 +12,10 @@
 
 # 三AI黄金策略服务器部署
 
-此部署包的代码提交以 `MANIFEST.json` 为准，证据版本 `entry-evidence-v5`，评分版本 `entry-quality-v3`，行情刷新版本 `request-freshness-v2`，JSON契约版本 `response-contract-v3`。
+此部署包的代码提交以 `MANIFEST.json` 为准，证据版本 `entry-evidence-v5`，评分版本 `entry-quality-v4`，行情刷新版本 `request-freshness-v2`，JSON契约版本 `response-contract-v3`。
 运行入口是 `xauusd_fib_volume_pa_ai3.py`，它会导入同目录的 `xauusd_fib_volume_pa_trader.py` 和完整 `strategies/` 包。
+
+2026-10-14评分显示修订：覆盖两个黄金主脚本并自行重启后，开仓及DRY-RUN分别显示所选方案的AI-1质量分和本地BUY/SELL粗筛分；纯本地入口只显示本地粗筛分。平仓通知使用相同标签，缺少开仓评分时继续显示未知。自主模式的审核通知明确本地阈值仅供参考。本次仅修显示，保留服务器自己的`.env`、日志与三个持仓状态文件。
 
 若从GitHub源码部署：将这两个脚本、完整 `strategies/` 文件夹及 `docs/deployment` 下的 `requirements.txt`、`install.cmd`、`start.cmd` 放在同一目录，再将 `.env.example` 复制为 `.env` 并填写自己的账户及接口配置。公开仓库不包含私人 `server_deploy` 目录、实际 `.env`、日志或持仓状态。下述“部署包”指本机生成的私人目录。
 

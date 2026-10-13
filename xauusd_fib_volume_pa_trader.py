@@ -2133,8 +2133,15 @@ class FibVolumePATrader:
             remaining.append(position)
         return remaining
 
+    def entry_score_lines(self, result: StrategyResult) -> List[str]:
+        return [
+            f"本地粗筛分: {result.confidence}",
+            f"本地BUY粗筛分: {result.score_buy}",
+            f"本地SELL粗筛分: {result.score_sell}",
+        ]
+
     def entry_confidence_line(self, ticket: int) -> str:
-        return f"开仓置信度: {self.entry_confidence.get(int(ticket), '未知(非本进程开仓或已重启)')}"
+        return f"开仓评分: {self.entry_confidence.get(int(ticket), '未知(非本进程开仓或已重启)')}"
 
     def connect_mt5(self):
         if mt5.initialize():
@@ -3003,7 +3010,7 @@ class FibVolumePATrader:
                     f"参考价: {price}",
                     f"止损: {result.stop_loss}",
                     f"止盈: {result.take_profit}",
-                    f"置信度: {result.confidence}",
+                    *self.entry_score_lines(result),
                     f"理由: {result.reasoning}",
                     f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                 ],
@@ -3113,9 +3120,7 @@ class FibVolumePATrader:
                 logger.info("锁盈等待精确持仓绑定 ticket=%s；从已保存事件恢复原规则", order_ticket)
                 logger.info("锁盈绑定暂缓原因: %s", exc)
         if order_ticket > 0:
-            self.entry_confidence[order_ticket] = (
-                f"{result.confidence} (BUY={result.score_buy} SELL={result.score_sell})"
-            )
+            self.entry_confidence[order_ticket] = "；".join(self.entry_score_lines(result))
         try:
             self.sync_position_close_notifications()
         except Exception as exc:
@@ -3130,9 +3135,7 @@ class FibVolumePATrader:
                 f"止损: {result.stop_loss}",
                 f"止盈: {result.take_profit}",
                 f"提交报价盈亏比: {live_rr:.2f}",
-                f"置信度: {result.confidence}",
-                f"BUY评分: {result.score_buy}",
-                f"SELL评分: {result.score_sell}",
+                *self.entry_score_lines(result),
                 f"理由: {result.reasoning}",
                 f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             ],
