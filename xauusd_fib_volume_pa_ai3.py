@@ -29,6 +29,7 @@ from strategies.quality import (VERSION as QUALITY_VERSION, PREVIOUS_VERSION as 
                                 LEVEL_POINTS as QUALITY_LEVEL_POINTS, DIMENSIONS as QUALITY_DIMENSIONS,
                                 CAUSES as QUALITY_CAUSES, MINOR_CAUSES as QUALITY_MINOR_CAUSES,
                                 LEVEL_RULES as QUALITY_LEVEL_RULES,
+                                ISSUE_DEDUPLICATION_POLICY as QUALITY_DEDUPLICATION_POLICY,
                                 INSTRUCTIONS as QUALITY_INSTRUCTIONS, dimension_error as quality_dimension_error,
                                 dimension_schema as quality_dimension_schema, rubric_fields as quality_rubric_fields)
 
@@ -106,6 +107,10 @@ COST_CONTROL_VERSION = "cost-latency-v2"
 AI3_THINKING_CONTROL_VERSION = "xau-ai3-thinking-v1"
 AI_REVIEW_RELIABILITY_VERSION = "ai-review-reliability-v1"
 AI_OUTPUT_RELIABILITY_VERSION = "ai-output-reliability-v2"
+AI_REASONING_CAPABILITY_VERSION = "ai-reasoning-capability-v1"
+# Explicit IDs documented at docs.x.ai/.../text/reasoning (2026-10-13).
+# Do not generalize this to arbitrary relay aliases or other Grok versions.
+FIXED_REASONING_MODELS = frozenset(("grok-4.5", "grok-4.6", "grok-4.7"))
 MARKET_FRESHNESS_VERSION = "request-freshness-v2"
 RESPONSE_CONTRACT_VERSION = "response-contract-v3"
 LEGACY_QUALITY_VERSION = "entry-quality-v1"
@@ -1021,7 +1026,7 @@ def normalize_ai1_quality(payload, pack):
     decoded = copy.deepcopy(payload)
     decoded_card = {"version": version, "direction": card.get("direction"),
                     "dimensions": {}, "reservations": []}
-    seen_causes = set()
+    seen_causes = {}
     evidence_items = []
     for name in QUALITY_DIMENSIONS:
         item = dimensions[name]
@@ -1036,9 +1041,12 @@ def normalize_ai1_quality(payload, pack):
         for container in ("reservations", "observations"):
             for index, issue in enumerate(item.get(container, [])):
                 key = (issue["cause"], issue["event_group"] or tuple(sorted(issue["evidence_refs"])))
+                issue_path = "/quality_assessment/dimensions/%s/%s/%s" % (name, container, index)
                 if key in seen_causes:
-                    return payload, "AI-1质量评估重复扣分: /quality_assessment/dimensions/%s/%s/%s 同一原因和事件" % (name, container, index)
-                seen_causes.add(key)
+                    return payload, ("AI-1质量评估重复扣分/意见: %s cause=%s 与%s重复；"
+                                     "同一原因和事件只能声明一次，observations不另扣分" % (
+                                         issue_path, issue["cause"], seen_causes[key]))
+                seen_causes[key] = issue_path
                 evidence_items.append(issue)
         for index, issue in enumerate(item.get("reservations", []), 1):
             identifier = "%s:%s" % (name, index)
@@ -1278,6 +1286,7 @@ def response_json_schema(role, request_pack=None):
                                               for name in QUALITY_DIMENSIONS})}),
             "wait_basis": {"type": "array", "items": wait}})
         schema["$defs"] = {"quality_dimension": dimension}
+        schema["properties"]["quality_assessment"]["description"] = QUALITY_DEDUPLICATION_POLICY
         if evidence_ids:
             schema["$defs"]["evidence_ref"] = {"type": "string", "enum": list(evidence_ids)}
         return schema
@@ -1371,7 +1380,7 @@ AI1_INSTRUCTIONS += (
     "quality_assessment内部只有version/direction/dimensions，轻微观察放observations、扣分理由放reservations；strong维度不含这两个数组。以下仅示范层级，示例方向/等级/理由/路径不可复用，须按实际证据重填；"
     "有交易提案时wait_basis为空数组。按模板先写顶层wait_basis再写quality_assessment，末尾依次闭合最后维度、dimensions、quality_assessment、顶层对象。"
     "adequate/weak/missing的每一项都必须写reservations和observations；没有内容也写[]，不能省略。"
-    "输出前只检查括号闭合、字段层级和必填数组，不改交易判断或等级来满足格式。格式模板："
+    "输出前核对括号、字段层级、必填数组及意见唯一归属，不复制同一事实的意见条目，不改交易判断或等级来满足格式。格式模板："
     + json.dumps(ai1_json_template(), ensure_ascii=False, separators=(",", ":"))
 )
 
@@ -1591,6 +1600,19 @@ def request_thinking_mode(role, using_backup=False):
     return value or None
 
 
+def request_reasoning_configuration_error(model, thinking_mode, effort, omit_reasoning):
+    """Reject documented conflicts, not guessed capabilities of relay aliases."""
+    if str(model).strip().lower() not in FIXED_REASONING_MODELS:
+        return ""
+    if thinking_mode in ("disabled", "between_tools"):
+        return ("%s不支持关闭思考（thinking=%s）；对应THINKING须留空并通过EFFORT明确指定受支持档位（如low），"
+                "或选用支持该思考开关的模型。程序不会自动移除开关；未指定档位时官方默认high" % (
+                    model, thinking_mode))
+    if effort and omit_reasoning:
+        return "%s配置的推理档位%s无法发送；停止使用忽略档位的兼容缓存，避免落到官方默认high" % (model, effort)
+    return ""
+
+
 def reported_token_fields(result):
     """Keep original numeric token counters without saving provider text."""
     raw = result.get("usage") if isinstance(result, dict) else None
@@ -1646,7 +1668,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
         active, using_backup = backup, True
         low_retry, omit_reasoning = False, False
         token_fallback_used = False
-        base.logger.warning("%s 主接口失败，切换备用 host=%s model=%s（共用%s次请求预算）",
+        base.logger.warning("%s 主路线不可用，切换备用 host=%s model=%s（共用%s次请求预算）",
                             role, urlsplit(active["url"]).hostname, active["model"], AI_HTTP_RETRIES)
         return True
 
@@ -1658,6 +1680,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
     transport_failures = 0
     attempted = 0
     attempt_trace = []
+    configuration_problems = []
     while attempted < AI_HTTP_RETRIES:
         attempt = attempted + 1
         channel = "backup" if using_backup else "primary"
@@ -1687,6 +1710,16 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
         this_effort = "low" if low_retry else active["effort"]
         if thinking_mode == "between_tools" and this_effort not in (None, "", "low", "medium", "high"):
             raise AIRequestError(role, "thinking=between_tools要求effort为low/medium/high或接口默认；不自动降低用户档位")
+        fixed_reasoning = str(active["model"]).strip().lower() in FIXED_REASONING_MODELS
+        configuration_error = request_reasoning_configuration_error(
+            active["model"], thinking_mode, this_effort, omit_reasoning)
+        if configuration_error:
+            detail = "%s host=%s: %s" % (channel, urlsplit(active["url"]).hostname, configuration_error)
+            configuration_problems.append(detail)
+            base.logger.warning("%s 请求配置冲突，未发HTTP、未刷新或消费检查点: %s", role, detail)
+            if switch_to_backup():
+                continue
+            raise AIRequestError(role, "请求配置冲突，未发HTTP：" + "；".join(configuration_problems))
         sent_effort = this_effort if this_effort and not omit_reasoning and thinking_mode != "disabled" else None
         route_key = cap_route_key(role, active, protocol, token_field,
                                   AI_MAX_TOKENS.get(role, 4096), sent_effort, thinking_mode)
@@ -1777,7 +1810,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                     data[token_field], output, finish, thinking_mode or "provider_default", sent_effort or "omitted")
                 with _CAP_BLOCKED_ROUTES_LOCK:
                     _CAP_BLOCKED_ROUTES[route_key] = blocked_detail
-                base.logger.error("%s 上游输出超限，暂停该配置后续付费请求: %s", role, blocked_detail)
+                base.logger.error("%s 上游计量超客户端生成预算，暂停该配置后续付费请求: %s", role, blocked_detail)
             attempt_trace.append("%s host=%s model=%s wait=%ss %s" % (
                 channel, urlsplit(active["url"]).hostname, active["model"], request_timeout, outcome))
             response_headers = getattr(response, "headers", {}) or {}
@@ -1814,6 +1847,8 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 "thinking_mode_sent": thinking_mode,
                 "thinking_control_version": AI3_THINKING_CONTROL_VERSION if role == "AI-3" else AI_REVIEW_RELIABILITY_VERSION if role == "AI-2" else AI_OUTPUT_RELIABILITY_VERSION if role == "AI-1" else None,
                 "output_reliability_version": AI_OUTPUT_RELIABILITY_VERSION,
+                "reasoning_capability_version": AI_REASONING_CAPABILITY_VERSION,
+                "token_limit_interpretation": "client_total_generation_budget",
                 "response_shape_status": shape_status, "response_shape_error": shape_error,
                 "schema_enforcement": schema_enforcement,
                 "client_version": AI_REVIEW_RELIABILITY_VERSION, "citation_version": AI1_CITATION_VERSION,
@@ -1866,7 +1901,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             record_attempt("truncated", result, response)
             usage = normalized_chat_usage(result) or {}
             stats = response_content_stats(result)
-            raise AIRequestError(role, "输出达到token上限，拒绝不完整决策且不重复付费请求：max_tokens=%s effort=%s requested_effort=%s thinking=%s output=%s 思考token=%s 非思考输出token=%s 正文字符=%s 思考块=%s；上限包含思考，effort不是硬预算，查看ai_usage，本地护盘继续"
+            raise AIRequestError(role, "输出达到token上限，拒绝不完整决策且不重复付费请求：max_tokens=%s effort=%s requested_effort=%s thinking=%s output=%s 思考token=%s 非思考输出token=%s 正文字符=%s 思考块=%s；思考会计费，上限是否包括思考取决于模型/中转，effort不是硬预算，查看ai_usage，本地护盘继续"
                                  % (data[token_field], sent_effort or "omitted", this_effort,
                                     thinking_mode or "provider_default", usage.get("output_tokens"),
                                     usage.get("reasoning_tokens"), usage.get("non_reasoning_output_tokens"),
@@ -1875,8 +1910,8 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
         reported_output = usage.get("output_tokens")
         if reported_output is not None and reported_output > data[token_field]:
             record_attempt("token_limit_exceeded", result, response)
-            raise AIRequestError(role, "上游报告输出%s token超过发送上限%s，停止本轮且暂停该配置后续付费请求：%s host=%s model=%s finish=%s thinking=%s effort=%s；需核查中转参数映射/计量，已发生费用不能由客户端撤回"
-                                 % (reported_output, data[token_field], channel, urlsplit(active["url"]).hostname,
+            raise AIRequestError(role, "上游报告生成%s token超过客户端总生成预算%s（实发%s=%s），停止本轮且暂停该配置后续付费请求：%s host=%s model=%s finish=%s thinking=%s effort=%s；转换路线的上限可能只限正文，需核查思考计量及上限语义，已发生费用不能由客户端撤回"
+                                 % (reported_output, data[token_field], token_field, data[token_field], channel, urlsplit(active["url"]).hostname,
                                     active["model"], finish_reason, thinking_mode or "provider_default", sent_effort or "omitted"))
         error_object = result.get("error") if isinstance(result, dict) else None
         error_text = (str(error_object.get("message", "")) + " " + str(error_object.get("param", ""))
@@ -1893,6 +1928,15 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 "response_format", "json_schema", "output_config.format")))
             whole_config_rejected = (protocol == "anthropic" and "output_config" in error_text
                                      and ".format" not in error_text and ".effort" not in error_text)
+            effort_parameter_rejected = (("reasoning" in error_text and "reasoning_effort" in data)
+                                        or (protocol == "anthropic" and "effort" in error_text
+                                            and "effort" in data.get("output_config", {})))
+            if fixed_reasoning and sent_effort and (effort_parameter_rejected or whole_config_rejected):
+                record_attempt("unsupported_reasoning", result, response)
+                if switch_to_backup():
+                    continue
+                raise AIRequestError(role, "%s接口拒绝配置的推理档位%s；停止本路线，不移除档位后默认high，也不取消token上限" % (
+                    active["model"], sent_effort))
             if format_rejected or whole_config_rejected:
                 record_attempt("unsupported_json_format", result, response)
                 next_mode = "object" if (protocol == "chat" and json_mode == "schema"

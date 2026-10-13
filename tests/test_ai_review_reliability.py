@@ -57,23 +57,16 @@ class ReviewReliabilityTests(unittest.TestCase):
         self.assertIsNone(event['reasoning_effort_sent'])
         self.assertEqual(event['thinking_mode_sent'], 'disabled')
 
-    def test_logged_grok_messages_route_sends_native_cap_and_disabled_switch(self):
+    def test_logged_grok_disabled_route_is_not_sent_again(self):
         with patch.dict(ai.os.environ, {'FIB_PA_AI2_THINKING':'disabled'}), \
              patch.object(ai.requests, 'post', return_value=Response()) as post:
-            ai.call_chat('AI-2','grok-4.7','low','review instructions','live prices',120,
-                         'https://hapiopen.cc/v1/messages','mock-key')
-        data = post.call_args.kwargs['json']
-        self.assertEqual(data['max_tokens'], 4096)
-        self.assertNotIn('max_completion_tokens', data)
-        self.assertEqual(data['thinking'], {'type':'disabled'})
-        self.assertFalse(data['stream'])
-        self.assertEqual(data['system'], 'review instructions')
-        self.assertEqual(data['messages'], [{'role':'user','content':'live prices'}])
-        self.assertNotIn('reasoning_effort', data)
-        self.assertNotIn('effort', data.get('output_config', {}))
+            with self.assertRaises(ai.AIRequestError):
+                ai.call_chat('AI-2','grok-4.7','low','review instructions','live prices',120,
+                             'https://hapiopen.cc/v1/messages','mock-key')
+        post.assert_not_called()
 
     def test_logged_7814_overrun_rejects_and_quarantines_without_paid_repair(self):
-        with patch.dict(ai.os.environ, {'FIB_PA_AI2_THINKING':'disabled'}), \
+        with patch.dict(ai.os.environ, {'FIB_PA_AI2_THINKING':''}), \
              patch.object(ai.requests,'post',return_value=self.excessive(output=7814)) as post:
             with self.assertRaises(ai.AIRequestError): self.call(model='grok-4.7')
             with self.assertRaises(ai.AIRequestError): self.call(model='grok-4.7')

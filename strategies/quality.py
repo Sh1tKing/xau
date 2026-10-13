@@ -113,6 +113,13 @@ def dimension_schema(refs):
     return {"anyOf": branches}
 
 
+ISSUE_DEDUPLICATION_POLICY = (
+    "先确定每个cause/event的唯一意见归属，再填五项；全卡reservations和observations合计只声明一次。"
+    "同一事实可出现在多个维度的reason/evidence_refs，但不能复制意见条目。"
+    "例如同一根M15阴线若已在counter_evidence/observations，structure可描述它但不再放入reservations。"
+    "event_group为空时按同cause及引用集合判重复；改写reason或引用顺序不能变成新事件。"
+)
+
 RESERVATIONS_POLICY = (
     "level唯一声明程度：" + "/".join("%s%s" % (level, rule["points"]) for level, rule in LEVEL_RULES.items()) + "；"
     "strong只填level/reason/evidence_refs，不含reservations或observations。"
@@ -122,8 +129,9 @@ RESERVATIONS_POLICY = (
     "允许主题" + "/".join(sorted(OBSERVATION_CAUSES)) + "，例如单根M5反向但无反转确认；"
     "硬限制/必要数据缺失必须放reservations，独立及时的重大反证不能作为轻微观察。"
     + "/".join(sorted(MINOR_CAUSES)) + "只能放observations；观察无额外扣分、不能独立造成weak/missing或重大反证观望；"
-    "重大问题和轻微观察可并存，以重大原因定level。一个cause/event只归一项，包括observations。"
-    "每条意见含cause/event_group/reason/evidence_refs，Python生成ID/归属/程度，不由模型重复声明。"
+    "重大问题和轻微观察可并存，以重大原因定level。"
+    + ISSUE_DEDUPLICATION_POLICY
+    + "每条意见含cause/event_group/reason/evidence_refs，Python生成ID/归属/程度，不由模型重复声明。"
 )
 INSTRUCTIONS = (
     "按quality_rubric评五项，不猜胜率、不复制本地分、不抬分。"
