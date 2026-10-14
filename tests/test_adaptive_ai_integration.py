@@ -53,7 +53,10 @@ class AdaptiveAITests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
-        for scope in (patch.dict(ai.os.environ, {'FIB_PA_STRATEGY_STATE_FILE': str(self.directory/'events.json')}, clear=True),
+        # This historical synthetic-price fixture isolates the calendar. The real
+        # enabled news gate is exercised with dated schedules in test_news_entry_pause.
+        for scope in (patch.dict(ai.os.environ, {'FIB_PA_STRATEGY_STATE_FILE': str(self.directory/'events.json'),
+                                               'FIB_PA_NEWS_PAUSE_ENABLED': 'false'}, clear=True),
                       patch.object(ai, 'AI3_STATE_FILE', str(self.directory/'ai3.json')),
                       patch.object(ai, 'AI_USAGE_DIR', self.temp.name), patch.dict(ai._CHAT_OPTIONS, {}, clear=True),
                       patch.object(ai, 'AI1_URL', 'https://unit.test/chat'), patch.object(ai, 'AI1_KEY', 'mock'),

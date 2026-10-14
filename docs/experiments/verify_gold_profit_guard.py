@@ -2,11 +2,13 @@
 import argparse
 import fnmatch
 import hashlib
+import io
 import json
 import logging
 import os
 from pathlib import Path
 import sys
+import socket
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -31,8 +33,18 @@ def main():
     with tempfile.TemporaryDirectory(prefix="gold-profit-offline-") as temp:
         env = {"FIB_PA_GUARDIAN_STATE_FILE":str(Path(temp)/"guard.json"),
                "FIB_PA_STRATEGY_STATE_FILE":str(Path(temp)/"events.json"),
-               "FIB_PA_AI3_STATE_FILE":str(Path(temp)/"entry.json")}
+               "FIB_PA_AI3_STATE_FILE":str(Path(temp)/"entry.json"),
+               "FIB_PA_NEWS_CALENDAR_CACHE":str(Path(temp)/"news.json"),
+               # Historical synthetic bars have their own clock. Dedicated
+               # news tests inject enabled, dated schedules and HTTP failures.
+               "FIB_PA_NEWS_PAUSE_ENABLED":"false"}
         with patch.dict(os.environ, env):
+            original_log_open = logging.FileHandler._open
+            def isolated_log_open(handler):
+                target = Path(handler.baseFilename).resolve()
+                return io.StringIO() if target.is_relative_to(root/"xau_fib_pa_logs") else original_log_open(handler)
+            patches_log = patch.object(logging.FileHandler,"_open",isolated_log_open)
+            patches_log.start()
             import MetaTrader5 as mt5
             import requests
             import xauusd_fib_volume_pa_ai3 as ai
@@ -58,6 +70,9 @@ def main():
                 "shutdown","account_info","positions_get","symbol_info","symbol_info_tick",
                 "copy_rates_from_pos","history_deals_get","order_calc_profit")]
             patches += [patch.object(requests,"post",side_effect=forbidden)]
+            patches += [patch.object(requests.sessions.Session,"request",side_effect=forbidden),
+                        patch.object(socket.socket,"connect",side_effect=forbidden),
+                        patch.object(socket.socket,"connect_ex",side_effect=forbidden)]
             for scope in patches:scope.start()
             try:
                 if args.self_tests_only:
@@ -83,6 +98,7 @@ def main():
                 for scope in reversed(patches):scope.stop()
                 patches_store.stop()
                 patches_state.stop()
+                patches_log.stop()
     unchanged = before == digest()
     print(json.dumps(dict(tests=result.testsRun,failures=len(result.failures),errors=len(result.errors),
                           self_tests="PASS x2" if args.self_tests_only else None,

@@ -1,5 +1,9 @@
 # 当前默认策略：亚欧美三盘自主AI粗筛（模拟账户）
 
+黄金新闻休息默认启用：美国非农、CPI/PPI、GDP/PCE及FOMC决议、发布会、纪要前后各15分钟暂停新开仓，已持仓继续AI-3和本地锁盈。完整复制两个主脚本、`strategies/news_calendar.py`、`strategies/calendars/us_major_events.json`及其余strategies文件并自行重启。实际.env保留即可采用默认规则，无需改模型/超时。窗口相接会合并，结束后重新获取行情，不排队执行旧单。
+
+日历后台刷新，BLS、BEA、美联储为正式日程来源，BLS失败可用Forex Factory公开周历；启动备用及缓存最长核对有效期7天。当前开发机BLS返回403、公开周历超时、BEA/Fed可访问，这不是服务器网络测试。不能把加载备用称为所有来源实时联通；超过有效期且仍取不到必要来源会明确记录“新闻日历不可用”并暂停新入场，护盘继续。观察`news-pause-v1`日志与`xau_fib_pa_logs/news_calendar.json`；`python -m strategies.news_calendar`仅检查，`--refresh`主动取公开日历并写缓存，均不连接MT5/AI；命令读取当前进程环境变量及默认配置。不要删除服务器已核对的日历缓存来迁移。详见[设计](../superpowers/specs/2026-10-14-news-entry-pause.md)。
+
 默认启用`asia_adaptive`、`london_adaptive`、`us_adaptive`，旧固定/区域定义保留但默认禁用。新三盘本地只粗筛，AI-1自主选择打法；本地no、低分、没有首次回踩或不在旧开盘窗口都不阻止正常分析。详见[设计](../superpowers/specs/2026-10-10-adaptive-session-demo.md)。本机`server_deploy/`是完整同步包，更新时必须同时替换两个交易主脚本与完整`strategies/`包，包含`adaptive.py`、`framework.py`、`events.py`、`regions.py`、`patterns.py`及`lifecycle.py`。保留服务器自己的实际`.env`、事件ledger与AI3入场上下文，用户自行重启，只有一个实例。
 
 新三盘仅模拟账户，参考3R目标上限、90分钟持仓复核、60秒平仓冷却；北京时间亚盘07–15、欧盘15–20、美盘20–次日07，全时段覆盖，未把标签当作精确交易所/DST开盘钟。AI质量与实时风险门仍执行。先部署新辅助模块并重启，此后定义文件才支持下次评估自动加载。2026-10-14的holding-review-v1适用于新旧自主仓：保留原入场时钟与节点数值，到期进入常规AI-3复核，时间本身不强平；不重建其余契约/锁盈状态。历史非自主事件仍按原硬期限。辅助模块或实际`.env`改变仍需自行重启，旧仓时钟及冷却不随新定义改变。

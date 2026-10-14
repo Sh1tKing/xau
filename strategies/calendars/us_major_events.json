@@ -1,0 +1,427 @@
+{
+  "format": 1,
+  "version": "news-pause-v1",
+  "notes": "Official scheduled dates verified 2026-10-14. Bootstrap expires seven days after verified_at. Live refresh replaces coverage; no permanent fabricated schedule. BLS dates transcribed from official annual calendar; BEA and Fed parsed from official public documents.",
+  "frames": [
+    {
+      "provider": "bls",
+      "verified_at": 1791984966.965847,
+      "coverage_from": 1790827200.0,
+      "coverage_until": 1798779600.0,
+      "events": [
+        {
+          "family": "nfp",
+          "at": 1790944200.0,
+          "title": "美国非农",
+          "source": "https://www.bls.gov/schedule/2026/"
+        },
+        {
+          "family": "cpi",
+          "at": 1791981000.0,
+          "title": "美国CPI",
+          "source": "https://www.bls.gov/schedule/2026/"
+        },
+        {
+          "family": "ppi",
+          "at": 1792067400.0,
+          "title": "美国PPI",
+          "source": "https://www.bls.gov/schedule/2026/"
+        },
+        {
+          "family": "nfp",
+          "at": 1793971800.0,
+          "title": "美国非农",
+          "source": "https://www.bls.gov/schedule/2026/"
+        },
+        {
+          "family": "cpi",
+          "at": 1794317400.0,
+          "title": "美国CPI",
+          "source": "https://www.bls.gov/schedule/2026/"
+        },
+        {
+          "family": "ppi",
+          "at": 1794576600.0,
+          "title": "美国PPI",
+          "source": "https://www.bls.gov/schedule/2026/"
+        },
+        {
+          "family": "nfp",
+          "at": 1796391000.0,
+          "title": "美国非农",
+          "source": "https://www.bls.gov/schedule/2026/"
+        },
+        {
+          "family": "cpi",
+          "at": 1796909400.0,
+          "title": "美国CPI",
+          "source": "https://www.bls.gov/schedule/2026/"
+        },
+        {
+          "family": "ppi",
+          "at": 1797341400.0,
+          "title": "美国PPI",
+          "source": "https://www.bls.gov/schedule/2026/"
+        }
+      ]
+    },
+    {
+      "provider": "bea",
+      "verified_at": 1791984966.965847,
+      "coverage_from": 1769087700.0,
+      "coverage_until": 1829568600.0,
+      "events": [
+        {
+          "family": "gdp",
+          "at": 1769088600.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1769094000.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1771594200.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1771594200.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1773405000.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1773405000.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1775737800.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1775737800.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1777552200.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1777552200.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1779971400.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1779971400.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1782390600.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1782390600.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1785414600.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1785414600.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1787747400.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1787747400.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1790771400.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1790771400.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1793277000.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1793277000.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1795613400.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1795613400.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1798032600.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1798032600.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1801143000.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1801143000.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1803562200.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1803562200.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1806496200.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1806496200.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1809001800.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1809001800.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1811421000.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1811421000.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1813926600.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1813926600.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1816864200.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1816864200.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1819197000.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1819197000.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1822307400.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1822307400.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1824726600.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1824726600.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1827063000.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1827063000.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1829482200.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1829482200.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        }
+      ]
+    },
+    {
+      "provider": "fed",
+      "verified_at": 1791984966.965847,
+      "coverage_from": 1790827200.0,
+      "coverage_until": 1798779600.0,
+      "events": [
+        {
+          "family": "fomc_minutes",
+          "at": 1791396000.0,
+          "title": "FOMC会议纪要",
+          "source": "https://www.federalreserve.gov/newsevents/2026-october.htm"
+        },
+        {
+          "family": "fomc_decision",
+          "at": 1793210400.0,
+          "title": "美联储利率决议",
+          "source": "https://www.federalreserve.gov/newsevents/2026-october.htm"
+        },
+        {
+          "family": "fomc_press_conference",
+          "at": 1793212200.0,
+          "title": "美联储发布会",
+          "source": "https://www.federalreserve.gov/newsevents/2026-october.htm"
+        },
+        {
+          "family": "fomc_minutes",
+          "at": 1795028400.0,
+          "title": "FOMC会议纪要",
+          "source": "https://www.federalreserve.gov/newsevents/2026-november.htm"
+        },
+        {
+          "family": "fomc_decision",
+          "at": 1796842800.0,
+          "title": "美联储利率决议",
+          "source": "https://www.federalreserve.gov/newsevents/2026-december.htm"
+        },
+        {
+          "family": "fomc_press_conference",
+          "at": 1796844600.0,
+          "title": "美联储发布会",
+          "source": "https://www.federalreserve.gov/newsevents/2026-december.htm"
+        },
+        {
+          "family": "fomc_minutes",
+          "at": 1798657200.0,
+          "title": "FOMC会议纪要",
+          "source": "https://www.federalreserve.gov/newsevents/2026-december.htm"
+        }
+      ]
+    }
+  ]
+}

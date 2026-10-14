@@ -127,6 +127,8 @@ def loaded_code_signature():
                      os.path.join(BASE_DIR, "strategies", "quality.py"),
                      os.path.join(BASE_DIR, "strategies", "profit_guard.py"),
                      os.path.join(BASE_DIR, "strategies", "settlement.py"),
+                     os.path.join(BASE_DIR, "strategies", "news_calendar.py"),
+                     os.path.join(BASE_DIR, "strategies", "calendars", "us_major_events.json"),
                      os.path.join(BASE_DIR, "strategies", "lifecycle.py"),
                      os.path.join(BASE_DIR, "strategies", "framework.py")):
         try:
@@ -914,6 +916,10 @@ def plan_feasibility(action, reference_entry, stop_loss, take_profit, quote, atr
 
 class MarketSnapshotError(RuntimeError):
     """Fresh evidence is unavailable or the reviewed plan no longer applies."""
+
+
+class EntryNewsPaused(MarketSnapshotError):
+    """A scheduled rest or unavailable calendar stopped an entry, not an API failure."""
 
 
 def quote_from_tick(tick):
@@ -1811,7 +1817,6 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                     "name": role.replace("-", "_").lower() + "_decision", "strict": True, "schema": request_schema}}
             elif json_mode == "object":
                 data["response_format"] = {"type": "json_object"}
-        attempted = attempt
         sent_effort = (data.get("output_config", {}).get("effort") if protocol == "anthropic"
                        else data.get("reasoning_effort"))
         base.logger.info("%s 请求准备 model=%s effort=%s requested_effort=%s thinking=%s max_tokens=%s refresh=%.2fs prompt_chars=%s system_chars=%s (%s %s/%s)",
@@ -1891,6 +1896,10 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 "cost": None,  # Rates and timeout billing belong to the provider, not guesses.
             })
 
+        before_post = snapshot.get("before_post")
+        if before_post is not None:
+            before_post()
+        attempted = attempt
         try:
             response = requests.post(active["url"], headers=headers, json=data, timeout=request_timeout,
                                      hooks={"response": response_headers_received})
@@ -2544,6 +2553,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 raise MarketSnapshotError("自主分析持仓状态未知或已达到单仓上限，AI not called")
 
     def collect_entry_snapshot(self, decision_id):
+        self.ensure_entry_news_ready()
         df_m15, df_h1, df_m5 = self.get_context()
         local_result = self.evaluate_context(df_m15, df_h1, df_m5)
         if (local_result.details or {}).get("strategy_error"):
@@ -2571,8 +2581,14 @@ class ThreeAITrader(base.FibVolumePATrader):
         if any(current[name] != expected.get(name) for name in current):
             raise MarketSnapshotError("已有新的已收盘H1/M15/M5，旧提案停止审核/执行，等待下一轮重新分析")
 
-    def prepare_review_request(self, proposal, ai1_pack, parsed, reason, decision_id, trigger):
+    def ensure_entry_news_ready(self, since=None):
+        error = self.entry_news_error(since)
+        if error:
+            raise EntryNewsPaused(error)
+
+    def prepare_review_request(self, proposal, ai1_pack, parsed, reason, decision_id, trigger, news_started=None):
         self.ensure_strategy_current(ai1_pack)
+        self.ensure_entry_news_ready(news_started)
         contract = (proposal.details or {}).get("strategy_contract", {})
         if contract.get("analysis_mode"):
             self.ensure_entry_account_ready(contract)
@@ -2829,6 +2845,8 @@ class ThreeAITrader(base.FibVolumePATrader):
         self.dispatch_entry(bar_time, trigger="M5")
 
     def dispatch_entry(self, bar_time, trigger="M15"):
+        if self.entry_news_error():
+            return
         seq = self.claim_task("entry", bar_time, ENTRY_TAKEOVER_SEC)
         if seq is None:
             base.logger.info("AI-1/2 仍在进行，跳过本根K线")
@@ -2853,10 +2871,12 @@ class ThreeAITrader(base.FibVolumePATrader):
 
     def entry_task(self, bar_time, seq, trigger="M15"):
         ai_started = False
+        decision_id = "%s-%s" % (bar_time, seq)
+        news_started = time.time()
         try:
             if self._stop.is_set():
                 return
-            decision_id = "%s-%s" % (bar_time, seq)
+            self.ensure_entry_news_ready(news_started)
             df_m15, df_h1, df_m5, local_result, pack, fib, atr, price = self.collect_entry_snapshot(decision_id)
             append_decision_snapshot(
                 decision_id,
@@ -2908,6 +2928,7 @@ class ThreeAITrader(base.FibVolumePATrader):
             scope_claimed = False
             def refresh_ai1_request():
                 nonlocal df_m15, df_h1, df_m5, local_result, pack, fib, atr, price, request_pack, scope_claimed
+                self.ensure_entry_news_ready(news_started)
                 df_m15, df_h1, df_m5, local_result, pack, fib, atr, price = self.collect_entry_snapshot(decision_id)
                 if "opportunities" in pack and not pack["opportunities"]:
                     append_decision_snapshot(decision_id, "local_prefilter", {"reason": "no_eligible_structural_opportunity",
@@ -2920,19 +2941,34 @@ class ThreeAITrader(base.FibVolumePATrader):
                             "instructions": role_instructions("AI-1", request_contracts(pack)),
                             "profile_rules": role_rules("AI-1", request_contracts(pack)),
                             "response_schema": response_json_schema("AI-1", request_pack)}
-                if not scope_claimed:
-                    if not self.claim_analysis_scope(pack):
-                        raise MarketSnapshotError("同分析检查点已经派发，AI not called")
-                    scope_claimed = True
-                else:
-                    scopes = analysis_scope_keys(pack)
-                    if scopes:
-                        with self._entry_lock:
-                            self._analysis_request_scopes = scopes
-                append_decision_snapshot(decision_id, "ai1_input", {
-                    "market_evidence": pack, "local_result": local_result.to_decision(), "trigger": trigger,
-                    "cost_control_version": COST_CONTROL_VERSION, "freshness_version": MARKET_FRESHNESS_VERSION,
-                    "citation_version": AI1_CITATION_VERSION, "evidence_catalog": request_pack["evidence_catalog"]})
+                def before_ai1_post():
+                    nonlocal scope_claimed
+                    self.ensure_entry_news_ready(news_started)
+                    first_claim = not scope_claimed
+                    previous_scopes = getattr(self, "_analysis_request_scopes", set()).copy()
+                    if not scope_claimed:
+                        if not self.claim_analysis_scope(pack):
+                            raise MarketSnapshotError("同分析检查点已经派发，AI not called")
+                        scope_claimed = True
+                    else:
+                        scopes = analysis_scope_keys(pack)
+                        if scopes:
+                            with self._entry_lock:
+                                self._analysis_request_scopes = scopes
+                    append_decision_snapshot(decision_id, "ai1_input", {
+                        "market_evidence": pack, "local_result": local_result.to_decision(), "trigger": trigger,
+                        "cost_control_version": COST_CONTROL_VERSION, "freshness_version": MARKET_FRESHNESS_VERSION,
+                        "citation_version": AI1_CITATION_VERSION, "evidence_catalog": request_pack["evidence_catalog"]})
+                    try:
+                        self.ensure_entry_news_ready(news_started)
+                    except EntryNewsPaused:
+                        if first_claim:
+                            with self._entry_lock:
+                                if getattr(self, "_analysis_request_scopes", set()) == analysis_scope_keys(pack):
+                                    self._analysis_request_scopes = previous_scopes
+                            scope_claimed = False
+                        raise
+                snapshot["before_post"] = before_ai1_post
                 return snapshot
 
             ai_started = True
@@ -2955,6 +2991,7 @@ class ThreeAITrader(base.FibVolumePATrader):
             if not self.entry_is_current(seq, bar_time) or self._stop.is_set():
                 base.logger.info("AI-1 返回已过期，丢弃 seq=%s" % seq)
                 return
+            self.ensure_entry_news_ready(news_started)
             if not raw:
                 append_decision_snapshot(decision_id, "ai1_empty", {"reason": "no_visible_json"})
                 self.alert_api_failure("AI-1", "没有可见 JSON")
@@ -3091,6 +3128,11 @@ class ThreeAITrader(base.FibVolumePATrader):
                 "atr": atr, "ema21": pack.get("m15_ema21"), "bar_closure": pack["bar_closure"],
                 "ai1_snapshot_id": pack.get("snapshot_id"), "reference_entry_price": final_entry_price,
             }
+            proposal.details["entry_news_started_at"] = news_started
+            def refresh_ai2_request():
+                snapshot = self.prepare_review_request(proposal, pack, parsed, reason, decision_id, trigger, news_started)
+                snapshot["before_post"] = lambda: self.ensure_entry_news_ready(news_started)
+                return snapshot
             review_raw = call_chat(
                 "AI-2",
                 AI2_MODEL,
@@ -3102,11 +3144,12 @@ class ThreeAITrader(base.FibVolumePATrader):
                 AI2_KEY,
                 still_current=lambda: self.entry_is_current(seq, bar_time) and not self._stop.is_set(),
                 request_context={"decision_id": decision_id, "bar_time": bar_time, "trigger": trigger},
-                refresh_request=lambda: self.prepare_review_request(proposal, pack, parsed, reason, decision_id, trigger),
+                refresh_request=refresh_ai2_request,
             )
             if not self.entry_is_current(seq, bar_time) or self._stop.is_set():
                 base.logger.info("AI-2 返回已过期，丢弃 seq=%s" % seq)
                 return
+            self.ensure_entry_news_ready(news_started)
             if not review_raw:
                 append_decision_snapshot(decision_id, "ai2_empty", {"proposal": proposal.to_decision()})
                 self.alert_api_failure("AI-2", "没有可见 JSON，拒绝开仓")
@@ -3151,6 +3194,9 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "proposal": proposal.to_decision(),
                 },
             )
+        except EntryNewsPaused as exc:
+            append_decision_snapshot(decision_id, "news_pause", {"reason": str(exc), "version": base.NEWS_PAUSE_VERSION})
+            base.logger.info("%s 停止新入场: %s；护盘继续", base.NEWS_PAUSE_VERSION, exc)
         except MarketSnapshotError as exc:
             append_decision_snapshot(decision_id, "entry_stopped", {"reason": str(exc)})
             base.logger.info("%s: %s", "行情刷新或执行复核停止本轮" if ai_started else "AI not called 本地粗筛/来源阻断", exc)

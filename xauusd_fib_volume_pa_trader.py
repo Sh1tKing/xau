@@ -24,6 +24,7 @@ from strategies.profit_guard import (ProfitFloor, GuardStore, validate_identity 
                                     policy as profit_policy, VERSION as PROFIT_GUARD_VERSION)
 from strategies.settlement import (PositionSettlement, SettlementError, settle_position_deals,
                                    VERSION as CLOSE_SETTLEMENT_VERSION)
+from strategies.news_calendar import NewsCalendar, VERSION as NEWS_PAUSE_VERSION
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -2000,8 +2001,18 @@ class FibVolumePATrader:
         self.positions_known = None
         self._entry_clock_defer_markers = None
         self._entry_clock_defer_reasons = set()
+        self.news_calendar = NewsCalendar.from_environment(BASE_DIR, LOG_DIR, logger)
+
+    def entry_news_error(self, since=None):
+        calendar = getattr(self, "news_calendar", None)
+        if calendar is None:
+            self.news_calendar = calendar = NewsCalendar.from_environment(BASE_DIR, LOG_DIR, logger)
+        status = calendar.status(since=since)
+        return "" if status.allowed else status.reason
 
     def entry_clock_ready(self, m15_marker, m5_marker):
+        if self.entry_news_error():
+            return False
         observed = time.time()
         tick = mt5.symbol_info_tick(SYMBOL)
         facts = closed_entry_readiness(m15_marker, m5_marker, tick, observed)
@@ -2977,6 +2988,10 @@ class FibVolumePATrader:
         if strategy_error:
             logger.info("策略执行拒绝: %s", strategy_error)
             return False
+        news_error = self.entry_news_error((result.details or {}).get("entry_news_started_at"))
+        if news_error:
+            logger.info("%s 拒绝新入场: %s", NEWS_PAUSE_VERSION, news_error)
+            return False
         try:
             guardian_rules = frozen_guardian_policy()
         except (ValueError, OverflowError) as exc:
@@ -3101,6 +3116,10 @@ class FibVolumePATrader:
             except StrategyError as exc:
                 logger.warning("提交前策略已改变: %s", exc)
                 return False
+        news_error = self.entry_news_error(result.details.get("entry_news_started_at"))
+        if news_error:
+            logger.info("%s 提交前停止，尚未预留事件: %s", NEWS_PAUSE_VERSION, news_error)
+            return False
         event_id = None
         if contract.get("one_entry_per_event"):
             if self.validate_strategy_entry(result):
@@ -3122,6 +3141,10 @@ class FibVolumePATrader:
                 logger.info("策略事件无法持久保留或行情时差不明，停止提交订单")
                 return False
             request_body["comment"] = "_SR_" + token if contract.get("id") == "session_retest" else token
+        news_error = self.entry_news_error(result.details.get("entry_news_started_at"))
+        if news_error:
+            logger.info("%s 最终发送前停止: %s；已发生的事件预留不回滚", NEWS_PAUSE_VERSION, news_error)
+            return False
         order_result = mt5.order_send(request_body)
         if order_result is None:
             logger.error("❌ 订单发送失败: 返回 None")
