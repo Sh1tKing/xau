@@ -16,7 +16,9 @@
 
 2026-10-14的`ai1-issue-first-v1`调整AI-1的Schema、模板与rubric，先输出唯一意见清单，再按独立证据评五项，避免同一反向事件同时撑触发和反证两项扣分；仍是v4，重复坏卡继续拒绝。同时修正“报告全部输出为思考，却有可见正文”的计量诊断，正文token显示未知。完整覆盖AI脚本及strategies后自行重启，保留服务器最新.env与状态；本次未改模型、档位、超时或上限。若自行将AI-1上限调至6144，费用按实际用量计，长请求可能增加费用与等待。详见[验证与费用分析](../experiments/2026-10-14-ai1-issue-first-validation.md)。
 
-2026-10-14的`ai3-cache-prefix-v1`仅调整AI-3请求数据顺序：原入场契约及完整双向证据放在前面，动态观察/报价/K线放在后面，便于DeepSeek自动复用相同前缀。所有数据值、每分钟AI复核及每0.5秒本地锁盈保持，实际`.env`、模型、档位、上限和超时不改。用户更新部署清单内代码并自行重启后，启动日志及`ai_usage`应显示输入版本`ai3-cache-prefix-v1`，代码签名`e07e4d930251246e`；比较新轮次的`cache_read_tokens/input_tokens`与账单验证效果。缓存为供应商尽力服务，首轮或原持仓契约改变时仍可能未命中，不能承诺固定节省比例。详见[护盘费用分析与验证](../experiments/2026-10-14-ai3-cost-review.md)。
+2026-10-14的`ai3-cache-prefix-v1`仅调整AI-3请求数据顺序：原入场契约及完整双向证据放在前面，动态观察/报价/K线放在后面，便于DeepSeek自动复用相同前缀。所有数据值、每分钟AI复核及每0.5秒本地锁盈保持，实际`.env`、模型、档位、上限和超时不改。用户更新部署清单内代码并自行重启后，启动日志及`ai_usage`应显示输入版本`ai3-cache-prefix-v1`，当前代码签名以MANIFEST和启动输出为准；比较新轮次的`cache_read_tokens/input_tokens`与账单验证效果。缓存为供应商尽力服务，首轮或原持仓契约改变时仍可能未命中，不能承诺固定节省比例。详见[护盘费用分析与验证](../experiments/2026-10-14-ai3-cost-review.md)。
+
+2026-10-14的`close-settlement-v1`修复平仓通知结算：按稳定持仓标识查询全部真实成交，汇总开仓和平仓的利润/佣金/库存费/手续费，分批成交价格按成交量加权，不用最后浮盈代替结果，也不借同品种邻单。历史回执未齐时普通轮询继续核对，最终通知删除“未知（未查到历史成交）”、最后浮盈及缺失评分。待结算通知新增`close_notification_state.json`，默认在`xau_fib_pa_logs`、跟随guardian状态目录；迁移同一账户时连同原三个状态文件保存，用户不要用本机旧状态覆盖。更新两个主脚本和包含`settlement.py`的完整strategies后自行重启，启动应显示平仓结算版本，当前签名`4cc1c2c83cc0a4c7`。本次保持实际.env和所有交易/护盘规则。详见[结算说明与验证](../experiments/2026-10-14-close-settlement-review.md)。
 
 运行入口是 `xauusd_fib_volume_pa_ai3.py`，它会导入同目录的 `xauusd_fib_volume_pa_trader.py` 和完整 `strategies/` 包。
 

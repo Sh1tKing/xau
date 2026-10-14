@@ -126,6 +126,7 @@ def loaded_code_signature():
     for filename in (__file__, base.__file__, os.path.join(BASE_DIR, "strategies", "citations.py"),
                      os.path.join(BASE_DIR, "strategies", "quality.py"),
                      os.path.join(BASE_DIR, "strategies", "profit_guard.py"),
+                     os.path.join(BASE_DIR, "strategies", "settlement.py"),
                      os.path.join(BASE_DIR, "strategies", "lifecycle.py"),
                      os.path.join(BASE_DIR, "strategies", "framework.py")):
         try:
@@ -2700,14 +2701,21 @@ class ThreeAITrader(base.FibVolumePATrader):
             return closed
 
     def sync_position_close_notifications(self):
-        super().sync_position_close_notifications()
-        active = {str(int(item.ticket)) for item in self.get_positions()}
+        positions = super().sync_position_close_notifications()
+        if positions is None:
+            return None
+        active = {str(int(item.ticket)) for item in positions}
         with self._state_lock:
             stale = [ticket for ticket in self.entry_contexts if ticket not in active]
             for ticket in stale:
                 self.entry_contexts.pop(ticket, None)
         if stale:
             self.save_entry_contexts()
+        return positions
+
+    def find_recent_close_deal(self, ticket, snapshot):
+        with self._mt5_lock:
+            return super().find_recent_close_deal(ticket, snapshot)
 
     def latest_bar_time(self, timeframe):
         with self._mt5_lock:

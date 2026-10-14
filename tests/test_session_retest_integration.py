@@ -203,15 +203,16 @@ class ResearchIntegrationTests(unittest.TestCase):
         trader.strategy_ledger.reserve("event",self.now,{"max_hold_minutes":180,"cooldown_seconds":600})
         trader.strategy_ledger.record_position(123,"event",self.now,180,600)
         position=SimpleNamespace(ticket=123,type=base.mt5.POSITION_TYPE_BUY,volume=.01)
-        def history(*args):
+        def queue(*args, **kwargs):
             self.assertIn("cooldown",trader.strategy_ledger.entry_error("next",self.now))
-            return None
-        with patch.object(base,"ENABLE_TRADING",True),patch.object(base.time,"sleep"), \
+        with patch.object(base,"ENABLE_TRADING",True),patch.object(base.time,"sleep") as sleep, \
              patch.object(trader,"create_position_snapshot",return_value=SimpleNamespace()), \
              patch.object(base.mt5,"symbol_info_tick",return_value=SimpleNamespace(bid=100.,ask=100.33)), \
              patch.object(base.mt5,"order_send",return_value=SimpleNamespace(retcode=base.mt5.TRADE_RETCODE_DONE)), \
-             patch.object(trader,"find_recent_close_deal",side_effect=history),patch.object(trader,"notify_position_closed"):
+             patch.object(trader,"notify_position_closed",side_effect=queue) as notify:
             self.assertTrue(trader.close_position_by_ticket(position,"test"))
+            notify.assert_called_once()
+            sleep.assert_not_called()
         self.assertNotIn("123",trader.strategy_ledger.snapshot()["positions"])
         self.assertEqual(trader.strategy_ledger.entry_error("next",self.now+600),"")
 

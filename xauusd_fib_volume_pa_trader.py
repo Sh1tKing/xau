@@ -11,6 +11,7 @@ from numbers import Real
 import os
 import sys
 import threading
+import tempfile
 import time
 from types import SimpleNamespace
 from strategies.framework import Context, DEFAULT_REGISTRY, StrategyError, VERSION as STRATEGY_FRAMEWORK_VERSION
@@ -21,7 +22,9 @@ from strategies.adaptive import validate_analysis_checkpoint
 from strategies.regions import region_facts
 from strategies.profit_guard import (ProfitFloor, GuardStore, validate_identity as validate_guard_identity,
                                     policy as profit_policy, VERSION as PROFIT_GUARD_VERSION)
-from dataclasses import dataclass, field
+from strategies.settlement import (PositionSettlement, SettlementError, settle_position_deals,
+                                   VERSION as CLOSE_SETTLEMENT_VERSION)
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Dict, List, Optional, Set, Tuple
@@ -609,25 +612,30 @@ def format_signed_money(value) -> str:
     return "-$%.2f" % abs(amount)
 
 
-def account_balance_lines() -> List[str]:
+def account_balance_lines(omit_missing=False) -> List[str]:
     """Return a compact, best-effort account balance/equity snapshot for alerts."""
     try:
         info = mt5.account_info()
     except Exception:
         info = None
     if info is None:
-        return ["当前余额: 未知", "当前净值: 未知"]
+        return [] if omit_missing else ["当前余额: 未知", "当前净值: 未知"]
     balance = getattr(info, "balance", None)
     equity = getattr(info, "equity", None)
     try:
         balance_text = "$%.2f" % float(balance)
+        if not math.isfinite(float(balance)):
+            raise ValueError("invalid balance")
     except (TypeError, ValueError):
         balance_text = "未知"
     try:
         equity_text = "$%.2f" % float(equity)
+        if not math.isfinite(float(equity)):
+            raise ValueError("invalid equity")
     except (TypeError, ValueError):
         equity_text = "未知"
-    return [f"当前余额: {balance_text}", f"当前净值: {equity_text}"]
+    lines = [f"当前余额: {balance_text}", f"当前净值: {equity_text}"]
+    return [line for line in lines if not omit_missing or "未知" not in line]
 
 
 def normalize_rates(rates) -> pd.DataFrame:
@@ -1972,6 +1980,10 @@ class FibVolumePATrader:
         event_path = os.getenv("FIB_PA_STRATEGY_STATE_FILE", "").strip() or os.path.join(LOG_DIR, "strategy_event_state.json")
         guard_path = os.getenv("FIB_PA_GUARDIAN_STATE_FILE", "").strip() or os.path.join(os.path.dirname(event_path), "guardian_profit_state.json")
         self.guard_store = GuardStore(guard_path)
+        self._close_state_path = os.path.join(os.path.dirname(str(self.guard_store.path)), "close_notification_state.json")
+        self._close_notification_lock = threading.RLock()
+        self.pending_close_notifications = {}
+        self._close_state_loaded = False
         if self.guard_store.error:
             logger.warning("锁盈状态读取失败，保留服务器保护并阻止新策略入场: %s", self.guard_store.error)
         logger.info("护盘版本=%s 新订单模式=%s 轮询=%ss；已开仓按原冻结规则，确认保护线只收紧不回退",
@@ -1983,6 +1995,8 @@ class FibVolumePATrader:
         self._holding_review_logged = set()
         logger.info("持仓时间规则=%s 自主AI仓到期复核，时间本身不强平；原SLTP及锁盈继续保护",
                     HOLD_REVIEW_VERSION)
+        logger.info("平仓结算=%s 按position_id汇总全部成交及费用；历史回执到达后通知，不用浮盈替代",
+                    CLOSE_SETTLEMENT_VERSION)
         self.positions_known = None
         self._entry_clock_defer_markers = None
         self._entry_clock_defer_reasons = set()
@@ -2244,56 +2258,81 @@ class FibVolumePATrader:
             getattr(mt5, "DEAL_REASON_MOBILE", object()): "移动端手动平仓",
             getattr(mt5, "DEAL_REASON_WEB", object()): "网页端手动平仓",
         }
-        return reason_map.get(reason, f"外部/未知平仓(reason={reason})")
+        return reason_map.get(reason, f"其他平仓(reason={reason})")
 
     def find_recent_close_deal(self, ticket: int, snapshot: PositionSnapshot):
-        start_time = datetime.now() - timedelta(days=3)
-        if snapshot.open_time > 0:
-            start_time = datetime.fromtimestamp(snapshot.open_time) - timedelta(minutes=5)
-
-        deals = mt5.history_deals_get(start_time, datetime.now())
-        if not deals:
+        # POSITION_IDENTIFIER is stable even when the broker changes its ticket.
+        # A position query avoids mixing local UTC time with broker-wall timestamps.
+        try:
+            identifier = int(snapshot.identifier or ticket)
+            deals = mt5.history_deals_get(position=identifier)
+            settled = settle_position_deals(deals, identifier, snapshot.symbol, snapshot.direction)
+            if settled.volume + 1e-8 < snapshot.volume:
+                raise SettlementError("history omits known position volume")
+            return settled
+        except (SettlementError, AttributeError, TypeError, ValueError, OverflowError, RuntimeError, OSError) as exc:
+            logger.debug("平仓历史待核实 ticket=%s: %s", ticket, exc)
             return None
 
-        position_ids = {int(ticket)}
-        if snapshot.identifier:
-            position_ids.add(int(snapshot.identifier))
+    def _prepare_close_notifications(self):
+        if not hasattr(self, "_close_notification_lock"):
+            self._close_notification_lock = threading.RLock()
+        with self._close_notification_lock:
+            self._load_close_notifications()
 
-        out_entries = {
-            getattr(mt5, "DEAL_ENTRY_OUT", None),
-            getattr(mt5, "DEAL_ENTRY_INOUT", None),
-            getattr(mt5, "DEAL_ENTRY_OUT_BY", None),
-        }
+    def _load_close_notifications(self):
+        if not hasattr(self, "pending_close_notifications"):
+            self.pending_close_notifications = {}
+        if getattr(self, "_close_state_loaded", False):
+            return
+        account = getattr(self, "account_info", None)
+        self._close_state_account = {"login": getattr(account, "login", None),
+                                     "server": getattr(account, "server", None), "symbol": SYMBOL, "magic": MAGIC}
+        self._close_state_loaded = True
+        path = getattr(self, "_close_state_path", "")
+        if not path or not self._close_state_account["login"]:
+            return
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            if data.get("version") != CLOSE_SETTLEMENT_VERSION or data.get("account") != self._close_state_account:
+                return
+            for key, record in data.get("pending", {}).items():
+                snapshot = PositionSnapshot(**record["snapshot"])
+                if int(key) != snapshot.ticket or snapshot.symbol != SYMBOL or snapshot.direction not in ("BUY", "SELL"):
+                    raise ValueError("invalid pending close identity")
+                record["attempts"] = max(0, int(record.get("attempts", 0)))
+                record["next_retry_at"] = 0.
+                self.pending_close_notifications[int(key)] = record
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            logger.warning("平仓通知待核对状态读取失败，保留当前内存队列: %s", exc)
 
-        candidates = []
-        fallback_candidates = []
-        for deal in deals:
-            if getattr(deal, "symbol", None) != snapshot.symbol:
-                continue
-
-            deal_entry = getattr(deal, "entry", None)
-            if deal_entry not in out_entries:
-                continue
-
-            deal_position_id = int(getattr(deal, "position_id", 0) or 0)
-            deal_order = int(getattr(deal, "order", 0) or 0)
-            if deal_position_id in position_ids or deal_order == int(ticket):
-                candidates.append(deal)
-                continue
-
-            deal_time = int(getattr(deal, "time", 0) or 0)
-            if deal_time and abs(deal_time - int(snapshot.last_seen_at)) <= 3600:
-                fallback_candidates.append(deal)
-
-        matched = candidates or fallback_candidates
-        if not matched:
-            return None
-
-        return sorted(
-            matched,
-            key=lambda item: (getattr(item, "time_msc", 0), getattr(item, "time", 0)),
-            reverse=True,
-        )[0]
+    def _save_close_notifications(self):
+        path = getattr(self, "_close_state_path", "")
+        account = getattr(self, "_close_state_account", {})
+        if not path or not account.get("login"):
+            return
+        temporary = None
+        try:
+            parent = os.path.dirname(os.path.abspath(path))
+            os.makedirs(parent, exist_ok=True)
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=parent, delete=False) as handle:
+                temporary = handle.name
+                json.dump({"version": CLOSE_SETTLEMENT_VERSION, "account": account,
+                           "pending": self.pending_close_notifications}, handle, ensure_ascii=False, allow_nan=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning("平仓待核对队列保存失败，继续内存重试: %s", exc)
+        finally:
+            if temporary and os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
 
     def notify_position_closed(
         self,
@@ -2303,57 +2342,61 @@ class FibVolumePATrader:
         close_reason: Optional[str] = None,
         title_prefix: str = "✅",
     ):
-        balance_lines = account_balance_lines()
+        self._prepare_close_notifications()
+        if ticket in self.notified_close_tickets:
+            return True
         if deal is None:
-            send_feishu_notification(
-                f"⚠️ {snapshot.symbol} {snapshot.direction}平仓",
-                [
-                    "【平仓结果】",
-                    "本次盈亏: 未知（未查到历史成交）",
-                    *balance_lines,
-                    "【平仓信息】",
-                    f"平仓原因: {close_reason or '持仓已消失'}",
-                    f"最后浮动盈亏: {format_signed_money(snapshot.profit)}",
-                    "【开仓信息】",
-                    self.entry_confidence_line(ticket),
-                    f"手数/开仓价: {snapshot.volume} / {snapshot.price_open}",
-                    f"原止损/止盈: {snapshot.sl} / {snapshot.tp}",
-                    f"ticket: {ticket}",
-                    f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                ],
-            )
-            return
-
-        server_reason = self.deal_reason_text(getattr(deal, "reason", None))
+            with self._close_notification_lock:
+                if ticket not in self.pending_close_notifications:
+                    self.pending_close_notifications[ticket] = {
+                        "snapshot": asdict(snapshot), "close_reason": close_reason, "title_prefix": title_prefix,
+                        "entry_score": self.entry_confidence.get(ticket), "attempts": 0, "next_retry_at": 0.}
+                    self._save_close_notifications()
+            return False
+        if not isinstance(deal, PositionSettlement) or deal.position_id != int(snapshot.identifier or ticket):
+            logger.warning("拒绝未经汇总结算的平仓结果 ticket=%s", ticket)
+            return False
+        server_reason = self.deal_reason_text(deal.reason)
         reason = close_reason or server_reason
-        profit = float(getattr(deal, "profit", snapshot.profit) or 0.0)
-        commission = float(getattr(deal, "commission", 0.0) or 0.0)
-        swap = float(getattr(deal, "swap", 0.0) or 0.0)
-        fee = float(getattr(deal, "fee", 0.0) or 0.0)
-        net_profit = profit + commission + swap + fee
-
-        send_feishu_notification(
+        score = self.pending_close_notifications.get(ticket, {}).get("entry_score") or self.entry_confidence.get(ticket)
+        sent = send_feishu_notification(
             f"{title_prefix} {snapshot.symbol} {snapshot.direction}平仓",
             [
                 "【平仓结果】",
-                f"本次盈亏: {format_signed_money(net_profit)}",
-                *balance_lines,
+                f"本次净盈亏: {format_signed_money(deal.net_profit)}",
+                *account_balance_lines(omit_missing=True),
                 "【平仓信息】",
                 f"平仓原因: {reason}",
-                f"开仓价 → 平仓价: {snapshot.price_open} → {float(getattr(deal, 'price', 0.0) or 0.0)}",
-                f"成交盈亏/费用: {format_signed_money(profit)} / {format_signed_money(commission + swap + fee)}",
+                f"开仓价 → 平仓价: {deal.price_open:.2f} → {deal.price_close:.2f}",
+                f"成交盈亏/总费用: {format_signed_money(deal.profit)} / {format_signed_money(deal.commission + deal.swap + deal.fee)}",
                 "【开仓信息】",
-                self.entry_confidence_line(ticket),
-                f"手数: {float(getattr(deal, 'volume', snapshot.volume) or snapshot.volume)}",
-                f"原止损/止盈: {snapshot.sl} / {snapshot.tp}",
-                f"ticket: {ticket}  成交: {getattr(deal, 'ticket', '')}",
+                f"开仓评分: {score}" if score and "未知" not in score else None,
+                f"手数: {deal.volume}",
+                f"平仓前止损/止盈: {snapshot.sl} / {snapshot.tp}",
+                f"ticket: {ticket}  成交: {','.join(map(str, deal.deal_ids))}",
                 f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             ],
         )
+        if sent or not FEISHU_NOTIFY_ENABLED or not FEISHU_WEBHOOK_URL:
+            logger.info("平仓结算 ticket=%s position_id=%s source=broker_history reason=%s "
+                        "price_open=%s price_close=%s profit=%s commission=%s swap=%s fee=%s net_profit=%s deals=%s",
+                        ticket, deal.position_id, reason, deal.price_open, deal.price_close, deal.profit,
+                        deal.commission, deal.swap, deal.fee, deal.net_profit, deal.deal_ids)
+            with self._close_notification_lock:
+                self.notified_close_tickets.add(ticket)
+                self.pending_close_notifications.pop(ticket, None)
+                self.entry_confidence.pop(ticket, None)
+                self._save_close_notifications()
+            return True
+        return False
 
     def sync_position_close_notifications(self):
         positions = self.get_positions()
+        if self.positions_known is False:
+            return None
+        self._prepare_close_notifications()
         current_tickets = set()
+        current_ids = {int(getattr(p, "identifier", 0) or 0) for p in positions} - {0}
 
         for position in positions:
             ticket = int(getattr(position, "ticket", 0) or 0)
@@ -2369,14 +2412,39 @@ class FibVolumePATrader:
             if snapshot is None:
                 continue
 
-            if ticket in self.notified_close_tickets:
-                self.notified_close_tickets.discard(ticket)
+            if ticket in self.notified_close_tickets or snapshot.identifier and snapshot.identifier in current_ids:
                 continue
-
-            deal = self.find_recent_close_deal(ticket, snapshot)
-            self.notify_position_closed(ticket, snapshot, deal)
-            self.notified_close_tickets.add(ticket)
-            self.entry_confidence.pop(ticket, None)
+            self.notify_position_closed(ticket, snapshot)
+        for ticket in list(self.pending_close_notifications):
+            with self._close_notification_lock:
+                record = self.pending_close_notifications.get(ticket)
+                processing = getattr(self, "_processing_close_tickets", set())
+                self._processing_close_tickets = processing
+                if record is None or ticket in processing:
+                    continue
+                snapshot = PositionSnapshot(**record["snapshot"])
+                now = time.time()
+                if ticket in current_tickets or snapshot.identifier and snapshot.identifier in current_ids:
+                    continue
+                if now < record["next_retry_at"]:
+                    continue
+                processing.add(ticket)
+            try:
+                deal = self.find_recent_close_deal(ticket, snapshot)
+                if deal is not None and self.notify_position_closed(
+                        ticket, snapshot, deal, record.get("close_reason"), record.get("title_prefix", "✅")):
+                    continue
+                with self._close_notification_lock:
+                    record["attempts"] += 1
+                    record["next_retry_at"] = now + min(30., 2. ** min(record["attempts"], 5))
+                    if record["attempts"] == 1 or record["attempts"] % 10 == 0:
+                        logger.info("平仓结算等待历史回执 ticket=%s position_id=%s attempts=%s；不发送估算盈亏",
+                                    ticket, snapshot.identifier or ticket, record["attempts"])
+                    self._save_close_notifications()
+            finally:
+                with self._close_notification_lock:
+                    processing.discard(ticket)
+        return positions
 
     def validate_order_prices(self, action, entry_price, stop_loss, take_profit):
         if action == "buy":
@@ -2562,21 +2630,12 @@ class FibVolumePATrader:
             self.guardian_states.pop(ticket, None)
             if getattr(self, "guard_store", None):
                 self.guard_store.put(ticket, None)
-            self.notified_close_tickets.add(ticket)
-            close_deal = None
-            for _ in range(3):
-                close_deal = self.find_recent_close_deal(ticket, snapshot)
-                if close_deal is not None:
-                    break
-                time.sleep(0.2)
             self.notify_position_closed(
                 ticket,
                 snapshot,
-                close_deal,
                 close_reason=reason,
                 title_prefix="🛡️",
             )
-            self.entry_confidence.pop(ticket, None)
             return True
 
         retcode = result.retcode if result else "None"
