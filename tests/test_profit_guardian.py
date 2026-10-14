@@ -47,7 +47,7 @@ class ProfitMathTests(unittest.TestCase):
 
     def test_losses_and_unaffordable_room_never_make_a_profit_stop(self):
         for price in (99.,100.1,101.,102.):
-            self.assertIsNone(self.promote(self.guard(), price))
+            self.assertIsNone(self.promote(self.guard(version="profit-floor-v1"), price))
 
     def test_net_stages_increase_retention(self):
         guard = self.guard()
@@ -93,7 +93,7 @@ class ProfitMathTests(unittest.TestCase):
 
     def test_broker_and_spread_constraints_can_defer_new_lock(self):
         for changes in (dict(broker_gap=4.),dict(spread=2.),dict(atr=8.)):
-            self.assertIsNone(self.promote(self.guard(),103.,**changes))
+            self.assertIsNone(self.promote(self.guard(version="profit-floor-v1"),103.,**changes))
 
     def test_invalid_facts_or_policy_never_produce_prices(self):
         for key in ("price","atr","cash_per_price","costs","now"):

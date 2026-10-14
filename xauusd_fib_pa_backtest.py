@@ -154,11 +154,13 @@ def reject_key(reasoning):
 class Backtest:
     def __init__(self, data, meta, threshold, spread_points=None, *, strategies=None,
                  entry_delay_seconds=0, spread_multiplier=1.0, guardian_policy=None):
-        if guardian_policy not in (None, "legacy", "profit_floor_v1"):
+        if guardian_policy not in (None, "legacy", "profit_floor_v1", "profit_floor_v2"):
             raise ValueError("unknown guardian policy")
         self.guardian_policy = (None if guardian_policy == "legacy" else base.frozen_guardian_policy())
-        if guardian_policy == "profit_floor_v1" and self.guardian_policy is None:
-            self.guardian_policy = base.profit_policy()
+        if guardian_policy in ("profit_floor_v1", "profit_floor_v2"):
+            values = copy.deepcopy(self.guardian_policy) if self.guardian_policy else {}
+            values["version"] = guardian_policy.replace("_", "-")
+            self.guardian_policy = base.profit_policy(**values)
         self.guard_fee = float(meta.get("guardian_fee_cash", self.guardian_policy["fee_reserve"] if self.guardian_policy else 0.))
         if not math.isfinite(self.guard_fee) or self.guard_fee < 0:
             raise ValueError("invalid replay guardian costs")
@@ -506,9 +508,16 @@ class Backtest:
             if target:
                 target = base.round_protective_stop(pos["side"], target)
                 sign = 1 if pos["side"] == "buy" else -1
+                permitted = guard.early_reduction_target(
+                    direction=state.direction, entry=state.entry_price, price=price, atr=atr,
+                    spread=self.spreads[i], broker_gap=self.point,
+                    cash_per_price=self.lot_value, costs=self.guard_fee)
+                reduction_ok = (permitted is not None and sign * (target - permitted) <= 1e-8
+                                and sign * (target - guard.desired_sl) <= 1e-8)
                 if (base.sl_change_is_tighter(state.direction, pos["sl"], target)
                         and sign * (price - target) + 1e-8 >= guard.room(atr, self.spreads[i], self.point)
-                        and sign * (target - state.entry_price) * self.lot_value - self.guard_fee + 1e-8 >= guard.rules["min_net_lock"]):
+                        and (sign * (target - state.entry_price) * self.lot_value - self.guard_fee + 1e-8 >= guard.rules["min_net_lock"]
+                             or reduction_ok)):
                     pos["sl"] = target
                     guard.acknowledge(state.direction, target)
             return
@@ -730,7 +739,7 @@ def main():
     parser.add_argument("--spread", type=float, default=None, help="固定点差(points)，默认用每根K线自带的点差")
     parser.add_argument("--server-offset", type=float, default=None, help="MT5 服务器相对 UTC 的小时数，默认自动检测")
     parser.add_argument("--offline", action="store_true", help="不连 MT5，直接用上次保存的 CSV")
-    parser.add_argument("--guardian-policy", choices=("profit_floor_v1", "legacy"), default=None,
+    parser.add_argument("--guardian-policy", choices=("profit_floor_v1", "profit_floor_v2", "legacy"), default=None,
                         help="冻结护盘对照；profit为M1收盘代理，无AI3/秒级路径")
     parser.add_argument("--strategies", default=None, help="离线启用ID列表，不修改定义或.env")
     parser.add_argument("--entry-delay-seconds", type=int, default=0, help="冻结方案延迟，非负整分钟秒数")

@@ -24,6 +24,9 @@ class OutputReliabilityTests(unittest.TestCase):
         self.addCleanup(folder.cleanup)
         self.folder = Path(folder.name)
         for scope in (patch.dict(ai.os.environ, {}, clear=True),
+                      # Role limits are loaded at import; clearing environ alone
+                      # must not let a private deployment .env change this fixture.
+                      patch.dict(ai.AI_MAX_TOKENS, {'AI-1':4096, 'AI-2':4096, 'AI-3':2048}),
                       patch.dict(ai._CHAT_OPTIONS, {}, clear=True),
                       patch.dict(ai._CAP_BLOCKED_ROUTES, {}, clear=True),
                       patch.object(ai, 'AI_USAGE_DIR', folder.name),

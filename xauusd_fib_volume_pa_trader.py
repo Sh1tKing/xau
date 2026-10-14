@@ -395,11 +395,13 @@ ENTRY_BAR_TIMEFRAME = mt5.TIMEFRAME_M15
 
 
 def frozen_guardian_policy():
-    mode = os.getenv("FIB_PA_GUARDIAN_POLICY", "profit_floor_v1").strip()
+    mode = os.getenv("FIB_PA_GUARDIAN_POLICY", "profit_floor_v2").strip()
     if mode == "legacy":
         return None
-    if mode != "profit_floor_v1":
-        raise ValueError("FIB_PA_GUARDIAN_POLICY must be profit_floor_v1 or legacy")
+    # v1 remains an engine configuration alias. Frozen position rules, however,
+    # retain their own exact version and are never rebuilt from this default.
+    if mode not in ("profit_floor_v1", "profit_floor_v2"):
+        raise ValueError("FIB_PA_GUARDIAN_POLICY must be profit_floor_v2, profit_floor_v1 or legacy")
     names = {"min_net_lock": ("MIN_NET", .20), "fee_reserve": ("FEE_RESERVE", .10),
              "room_atr": ("ROOM_ATR", 1.), "room_spread": ("ROOM_SPREAD", 3.),
              "room_abs": ("ROOM_ABS", .50), "advance_abs": ("ADVANCE_ABS", .20),
@@ -1988,7 +1990,7 @@ class FibVolumePATrader:
         if self.guard_store.error:
             logger.warning("锁盈状态读取失败，保留服务器保护并阻止新策略入场: %s", self.guard_store.error)
         logger.info("护盘版本=%s 新订单模式=%s 轮询=%ss；已开仓按原冻结规则，确认保护线只收紧不回退",
-                    PROFIT_GUARD_VERSION, os.getenv("FIB_PA_GUARDIAN_POLICY", "profit_floor_v1"), POLL_SECONDS)
+                    PROFIT_GUARD_VERSION, os.getenv("FIB_PA_GUARDIAN_POLICY", "profit_floor_v2"), POLL_SECONDS)
         logger.info("护盘报价版本=%s 固定服务器UTC偏移；最大报价年龄=%ss 时钟领先容差=%ss",
                     GUARDIAN_QUOTE_CLOCK_VERSION, GUARDIAN_MAX_QUOTE_AGE, GUARDIAN_MAX_CLOCK_LEAD)
         state_path = os.getenv("FIB_PA_STRATEGY_STATE_FILE", "").strip() or os.path.join(LOG_DIR, "strategy_event_state.json")
@@ -2538,14 +2540,27 @@ class FibVolumePATrader:
                 logger.info("锁盈修改暂缓：回撤空间不足 ticket=%s target=%s room=%s (%s)",
                             ticket, new_sl, guard.room(guard.atr_floor, ask - bid, required_gap), reason)
                 return False
-            if reason == "local profit floor":
+            if reason in ("local profit floor", "local loss reduction"):
                 cash = self.profit_cash_facts(live, state)
                 projected = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY if sign > 0 else mt5.ORDER_TYPE_SELL,
                                                  SYMBOL, float(live.volume), state.entry_price, new_sl)
-                if (cash is None or projected is None or not math.isfinite(projected)
-                        or projected - cash[1] + 1e-8 < guard.rules["min_net_lock"]):
-                    logger.info("锁盈修改暂缓：量化后预计净利润不足或利润模型无效 ticket=%s", ticket)
+                if cash is None or projected is None or not math.isfinite(projected):
+                    logger.info("保护修改暂缓：利润模型无效 ticket=%s", ticket)
                     return False
+                if reason == "local profit floor":
+                    if projected - cash[1] + 1e-8 < guard.rules["min_net_lock"]:
+                        logger.info("锁盈修改暂缓：量化后预计净利润不足 ticket=%s", ticket)
+                        return False
+                else:
+                    permitted = guard.early_reduction_target(
+                        direction=direction, entry=state.entry_price, price=close_price,
+                        atr=guard.atr_floor, spread=ask - bid, broker_gap=required_gap,
+                        cash_per_price=cash[0], costs=cash[1]) if guard.atr_floor > 0 else None
+                    if (permitted is None or guard.desired_sl <= 0
+                            or sign * (new_sl - permitted) > tick_size * 1e-8
+                            or sign * (new_sl - guard.desired_sl) > tick_size * 1e-8):
+                        logger.info("减亏修改暂缓：无冻结确认目标、当前净浮盈不足或量化目标过近 ticket=%s", ticket)
+                        return False
         frozen_sl = current_sl > 0 and sign * (close_price - current_sl) <= freeze * point
         frozen_tp = current_tp > 0 and sign * (current_tp - close_price) <= freeze * point
         invalid_tp = current_tp > 0 and sign * (current_tp - close_price) < stops * point
@@ -2573,10 +2588,12 @@ class FibVolumePATrader:
             if guard:
                 guard.acknowledge(direction, new_sl)
                 self.persist_guardian_state(state)
-                estimated = (sign * (new_sl - state.entry_price) * guard.cash_per_price - guard.cost_cash
-                             if guard.cash_per_price > 0 else None)
-                logger.info("锁盈确认 ticket=%s policy=%s protected_sl=%s estimated_net=%s peak_net=%s fee_status=%s",
-                            ticket, PROFIT_GUARD_VERSION, guard.protected_sl,
+                facts = guard.protection_details(direction, state.entry_price, state.initial_sl)
+                estimated = facts["protected_estimated_net"]
+                label = {"profit_lock": "锁盈确认", "breakeven": "保本确认",
+                         "loss_reduction": "减亏确认"}.get(facts["protected_phase"], "保护确认")
+                logger.info("%s ticket=%s policy=%s protected_sl=%s estimated_net=%s peak_net=%s fee_status=%s",
+                            label, ticket, guard.rules["version"], guard.protected_sl,
                             round(estimated, 2) if estimated is not None else None, round(guard.peak_net, 2),
                             "opening_history_plus_exit_reserve" if guard.fees_known else "estimated_reserve")
             return True
@@ -2774,7 +2791,11 @@ class FibVolumePATrader:
         durable = self.persist_guardian_state(state)
         if target and durable and sl_change_is_tighter(state.direction, guard.protected_sl, target):
             if sign * (target - guard.protected_sl) >= max(grid, guard.rules["advance_abs"]):
-                self.modify_position_sl(position, target, "local profit floor")
+                projected = guard.net_at_stop(state.direction, state.entry_price, target)
+                reason = ("local loss reduction" if guard.rules["version"] == PROFIT_GUARD_VERSION
+                          and projected is not None and projected < guard.rules["min_net_lock"]
+                          else "local profit floor")
+                self.modify_position_sl(position, target, reason)
 
     def get_or_create_guardian_state(self, position, tick, *, frozen=None, original_sl=None, original_tp=None) -> GuardianState:
         ticket = int(position.ticket)
@@ -2798,7 +2819,7 @@ class FibVolumePATrader:
             state.profit_floor.acknowledge(direction, sl)
             self.guardian_states[ticket] = state
             logger.info("锁盈恢复 ticket=%s policy=%s protected=%s peak_net=%s 原风险=%s", ticket,
-                        PROFIT_GUARD_VERSION, state.profit_floor.protected_sl, state.profit_floor.peak_net, state.risk)
+                        state.profit_floor.rules["version"], state.profit_floor.protected_sl, state.profit_floor.peak_net, state.risk)
             return state
         if record:
             logger.warning("保存锁盈身份不符 ticket=%s，不接管或套用旧水位", ticket)
@@ -2851,7 +2872,7 @@ class FibVolumePATrader:
         self.guardian_states[ticket] = state
         self.persist_guardian_state(state)
         logger.info("🛡️ 初始化护盘状态 ticket=%s direction=%s risk=%.2f policy=%s", ticket, direction, state.risk,
-                    PROFIT_GUARD_VERSION if frozen else "legacy")
+                    state.profit_floor.rules["version"] if frozen else "legacy")
         return state
 
     def run_guardian(self):

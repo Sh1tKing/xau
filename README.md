@@ -6,7 +6,7 @@
 
 开仓通知分别显示“AI-1质量分（所选BUY/SELL方案）”“本地BUY粗筛分”和“本地SELL粗筛分”。AI质量分是所选方案的质量评分，不是胜率；本地多空分用于行情粗筛，不表示AI对两个方向的评分。自主模式的审核通知标明本地阈值仅供参考，平仓通知沿用开仓时记录的评分标签；缺失历史评分继续显示未知。
 
-新订单使用分级利润保护：本地按实时平仓侧报价先锁可执行的一小部分预计净利润，保留波动空间，确认后的止损只收紧；AI-3继续判断原交易结构，hold保留保护线，过近/更松的tighten不执行。旧仓仍用原护盘。设计与回放限制见[锁盈护盘验证](docs/experiments/2026-10-13-profit-floor-validation.md)；纯本地对照较差，尚不能证明含AI3组合收益提升。
+新订单使用`profit-floor-v2`：持续确认净浮盈后先收紧SL减小可能亏损，空间够时再保本、锁正利润；保留原M5波动空间，止损只收紧。AI-3继续判断原交易结构，hold保留保护线，过近/更松的tighten不执行。已有v1或legacy仓保留原冻结规则。见[提前减亏设计](docs/superpowers/specs/2026-10-15-early-loss-reduction.md)及[原锁盈回放限制](docs/experiments/2026-10-13-profit-floor-validation.md)，不能以纯本地对照证明含AI3组合收益提升。
 
 - `xauusd_fib_volume_pa_ai3.py`：三AI运行入口。
 - `xauusd_fib_volume_pa_trader.py`：本地策略、下单与护盘。

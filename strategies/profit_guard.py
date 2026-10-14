@@ -7,7 +7,10 @@ import os
 from pathlib import Path
 import tempfile
 
-VERSION = "profit-floor-v1"
+VERSION = "profit-floor-v2"
+LEGACY_VERSION = "profit-floor-v1"
+# The container schema is unchanged; policies inside it keep their entry version.
+STORE_VERSION = LEGACY_VERSION
 
 
 def finite(value, low=0.0, *, positive=False):
@@ -28,7 +31,8 @@ def policy(**overrides):
 def validate_policy(value):
     keys = {"version", "min_net_lock", "fee_reserve", "room_atr", "room_spread",
             "room_abs", "advance_abs", "advance_atr", "confirm_seconds", "stages"}
-    if not isinstance(value, dict) or set(value) != keys or value.get("version") != VERSION:
+    if (not isinstance(value, dict) or set(value) != keys
+            or value.get("version") not in (LEGACY_VERSION, VERSION)):
         raise ValueError("unknown profit guardian policy")
     for key in keys - {"version", "stages"}:
         if not finite(value[key], positive=key != "fee_reserve"):
@@ -106,6 +110,49 @@ class ProfitFloor:
         return max(self.rules["room_atr"] * max(self.atr_floor, atr),
                    self.rules["room_spread"] * spread, self.rules["room_abs"], broker_gap)
 
+    def net_at_stop(self, direction, entry, stop):
+        if (direction not in ("BUY", "SELL") or not finite(entry, positive=True)
+                or not finite(stop, positive=True) or self.cash_per_price <= 0):
+            return None
+        sign = 1 if direction == "BUY" else -1
+        return sign * (stop - entry) * self.cash_per_price - self.cost_cash
+
+    def protection_details(self, direction, entry, initial_sl):
+        """Estimated stages, never a broker execution receipt or realized P/L."""
+        result = {}
+        for name, stop in (("protected", self.protected_sl), ("desired", self.desired_sl)):
+            net = self.net_at_stop(direction, entry, stop)
+            if not finite(stop, positive=True) or net is None:
+                phase = "unknown"
+            elif not tighter(direction, initial_sl, stop):
+                phase = "initial_risk"
+            elif net + 1e-8 >= self.rules["min_net_lock"]:
+                phase = "profit_lock"
+            elif net >= -1e-8:
+                phase = "breakeven"
+            else:
+                phase = "loss_reduction"
+            result[name + "_phase"] = phase
+            result[name + "_estimated_net"] = net
+        return result
+
+    def early_reduction_target(self, *, direction, entry, price, atr, spread,
+                               broker_gap, cash_per_price, costs):
+        """Bound early reduction by confirmed AND current quotes, up to net breakeven."""
+        if self.rules["version"] != VERSION:
+            return None
+        if (direction not in ("BUY", "SELL") or not all(finite(x, positive=True)
+                for x in (entry, price, atr, cash_per_price))
+                or not all(finite(x) for x in (spread, broker_gap, costs))):
+            raise ValueError("invalid loss reduction quote or cash model")
+        sign = 1 if direction == "BUY" else -1
+        confirmed_net = sign * (self.confirmed_price - entry) * cash_per_price - costs
+        live_net = sign * (price - entry) * cash_per_price - costs
+        if min(confirmed_net, live_net) <= 1e-10:
+            return None
+        available = min(confirmed_net, live_net) - self.room(atr, spread, broker_gap) * cash_per_price
+        return entry + sign * ((min(available, 0.) + costs) / cash_per_price)
+
     def observe(self, *, direction, entry, risk, price, atr, spread, broker_gap,
                 cash_per_price, costs, now, closed_bar_proxy=False):
         """Propose only from sustained new favorable quotes, never from falling ATR.
@@ -140,7 +187,7 @@ class ProfitFloor:
         self.pending_price = self.pending_since = self.pending_last_at = 0.0
         net = sign * (self.confirmed_price - entry) * cash_per_price - costs
         self.peak_net = max(self.peak_net, net)
-        if net <= 0:
+        if net <= 1e-10:
             return self.desired_sl or None
         r = net / (risk * cash_per_price)
         fraction = self.rules["stages"][0][1]
@@ -149,10 +196,18 @@ class ProfitFloor:
                 fraction = retained
         available = sign * (price - entry) * cash_per_price - costs
         available -= self.room(atr, spread, broker_gap) * cash_per_price
+        if self.rules["version"] == VERSION:
+            # Even positive locks cannot borrow room from an unconfirmed spike.
+            available = min(available, net - self.room(atr, spread, broker_gap) * cash_per_price)
         lock_cash = min(net * fraction, available)
         if lock_cash + 1e-10 < self.rules["min_net_lock"]:
-            return self.desired_sl or None
-        candidate = entry + sign * ((lock_cash + costs) / cash_per_price)
+            candidate = self.early_reduction_target(
+                direction=direction, entry=entry, price=price, atr=atr, spread=spread,
+                broker_gap=broker_gap, cash_per_price=cash_per_price, costs=costs)
+            if candidate is None or not tighter(direction, self.protected_sl, candidate):
+                return self.desired_sl or None
+        else:
+            candidate = entry + sign * ((lock_cash + costs) / cash_per_price)
         if tighter(direction, self.desired_sl, candidate):
             self.desired_sl = candidate
         return self.desired_sl or None
@@ -170,7 +225,7 @@ class GuardStore:
         self.error = ""
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            if (not isinstance(data, dict) or data.get("version") != VERSION
+            if (not isinstance(data, dict) or data.get("version") != STORE_VERSION
                     or not isinstance(data.get("positions"), dict)):
                 raise ValueError("invalid guardian store")
             for ticket, record in data["positions"].items():
@@ -213,7 +268,7 @@ class GuardStore:
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent,
                                              prefix=self.path.name + ".", delete=False) as handle:
                 temp = handle.name
-                json.dump({"version": VERSION, "positions": updated}, handle, allow_nan=False,
+                json.dump({"version": STORE_VERSION, "positions": updated}, handle, allow_nan=False,
                           ensure_ascii=False, sort_keys=True)
                 handle.flush()
                 os.fsync(handle.fileno())

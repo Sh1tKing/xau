@@ -26,6 +26,8 @@
 
 ## 当前架构
 
+黄金主系统新仓护盘（2026-10-15用户授权提前减亏，替代下方历史v1默认）：新仓默认`profit-floor-v2`，`strategies/profit_guard.py`在确认及最新报价扣费用后均有正浮盈时先按原M5回撤空间收紧SL减小可能亏损，空间够时保本/锁正利润，日志和AI3事实区分阶段及预计净额。不能缩小M5 ATR水位、用未确认尖峰抬SL或把负净额说成锁盈。已有`profit-floor-v1`及无标记legacy仓不迁移，GuardStore容器仍v1，内层逐仓保存确切规则版本；实际.env中的`profit_floor_v1`是新引擎兼容入口，新订单冻结v2，显式回放v1仍是旧规则。最终broker执行复核当前身份/报价/费用/已保存确认目标、网格与原回撤空间，失败不确认、SL只收紧、原SLTP/风险/AI策略判断不变；实际.env、日志状态、crypto及local_guard_demo不改，完整三个黄金脚本+strategies由用户复制重启。设计见docs/superpowers/specs/2026-10-15-early-loss-reduction.md。
+
 黄金新闻入场休息（2026-10-14用户批准）：`strategies/news_calendar.py`统一`news-pause-v1`。非农/CPI/PPI/GDP/PCE/FOMC决议、发布会、纪要使用有来源的发布时间，UTC计算前后各15分钟，America/New_York处理DST，相接窗口合并；不是整段美盘禁入。BLS ICS、BEA全国JSON和Fed月历后台刷新，BLS失败可用公开Forex Factory周历；`strategies/calendars/us_major_events.json`是2026-10-14官方核对的有期限启动备用，不是永久日程。成功每6小时刷新，失败15分钟重试，已核对数据最多7天；缺少/过期/不覆盖只暂停新入场并明确日志，现仓AI3/锁盈/原SLTP/平仓监听继续。实际本机BLS403、周历超时，BEA/Fed可访问；不能宣传所有服务器已能实时取得日历。启动/M15/M5、每POST及下单预留前/最终发送前都检查；跨窗口旧提案丢弃、结束后取新行情；未POST的普通scope不消费，最终时刻若事件已持久预留则不回滚。默认启用，实际.env无需追加即采用；显式false仅供关闭或隔离历史测试，未知值拒绝入场。必须同步两主脚本、完整strategies及日程文件后用户重启。纯历史回放不获取当期日历，crypto和local_guard_demo保持原系统。不得因新闻时间强平、放宽SL、加仓重入或靠AI臆造日历。见docs/superpowers/specs/2026-10-14-news-entry-pause.md。
 
 黄金自主仓时间处理（2026-10-14用户明确否定盲目时间平仓）：`strategies/lifecycle.py`统一`holding-review-v1`，原持仓契约明确analysis_mode=True即ai_review，新manifest显式声明holding_policy。原max_hold_minutes（默认90）作为复核节点，时间本身不再强平；沿用常规M1 AI3派发，不增加付费请求。已有自主仓同样适用这个用户授权的处理变更，保留原契约/时间/SLTP/风险/锁盈水位，不改状态结构或用当前定义重建旧仓；旧强制期限提示词由positions.holding_review的有效规则明确覆盖。AI3超时/坏JSON不靠时间兜底平仓，原SLTP/实时单向锁盈/保护恢复及越线退出继续。非自主历史固定事件保留hard_exit；不能按策略名称猜仓模式。入场检查点TTL、手数、单仓、风险/质量门及私有.env不变。回放不替自主仓伪造AI时间退出，纯本地结果不能证明AI3收益。部署完整三个脚本+strategies，保留三个状态文件，由用户重启，设计见docs/superpowers/specs/2026-10-14-holding-review.md。

@@ -218,7 +218,9 @@ AI3_INSTRUCTIONS = (
     "核实入场理由失效时必须使用该理由指定周期的已收盘K线：M15边界用m15_bars，H1边界用h1_bars，"
     "不能从M1/M5收盘推断M15/H1已收盘破坏。对应周期或时间覆盖不足时失效证据为未知，不能凭此close。"
     "窄震荡里的上下影线和轻微回撤选择 hold，交给已冻结的本地保护规则。"
-    "positions.profit_guard存在时，Python按实时平仓侧报价分级锁盈。protected_sl是已确认保护，desired_sl仅是未必执行的目标。"
+    "positions.profit_guard存在时，按原冻结rules.version护盘：profit-floor-v2在持续净浮盈时先减亏、再保本和分级锁盈，v1只锁正利润。"
+    "protected_sl是已确认保护，desired_sl仅是未必执行的目标。protected_phase/desired_phase区分阶段；"
+    "protected_estimated_net/desired_estimated_net是扣费用后的预计金额，负数只减亏、零附近为保本，不能说成已锁正利润或实际成交盈亏。"
     "broker_sl是快照读到的实际服务器SL；quote_status无效表示本地报价检查阻断，不能把desired_sl或建议价说成已经锁定。"
     "hold不得撤回保护底线，tighten_sl也必须满足profit_guard.minimum_room的回撤空间；过近建议不会执行。"
     "持仓时间处理以positions.holding_review的Python有效规则为准。policy=ai_review时，原max_hold_minutes仅为复核节点，"
@@ -3257,6 +3259,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                 state = self.guardian_states.get(ticket)
                 profit_guard = state.profit_floor.export() if state and state.profit_floor else None
                 if profit_guard:
+                    profit_guard.update(state.profit_floor.protection_details(
+                        state.direction, state.entry_price, state.initial_sl))
                     profit_guard["broker_sl"] = float(position.sl or 0.)
                     profit_guard["quote_status"] = base.guardian_quote_status(
                         tick, quote["observed_at"], state.profit_floor.server_offset)
@@ -3339,8 +3343,9 @@ class ThreeAITrader(base.FibVolumePATrader):
             guard = item.get("profit_guard")
             if guard:
                 base.logger.info("AI-3保护证据 ticket=%s broker_sl=%s protected_sl=%s desired_sl=%s "
-                                 "quote_valid=%s quote_reason=%s age_sec=%s",
+                                 "phase=%s estimated_net=%s policy=%s quote_valid=%s quote_reason=%s age_sec=%s",
                                  item["ticket"], guard["broker_sl"], guard["protected_sl"], guard["desired_sl"],
+                                 guard["protected_phase"], guard["protected_estimated_net"], guard["rules"]["version"],
                                  guard["quote_status"]["valid"], guard["quote_status"]["reason"],
                                  guard["quote_status"]["age_sec"])
             base.logger.info(
