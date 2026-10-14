@@ -108,6 +108,7 @@ _CAP_BLOCKED_ROUTES = {}
 _CAP_BLOCKED_ROUTES_LOCK = threading.RLock()
 COST_CONTROL_VERSION = "cost-latency-v2"
 AI3_THINKING_CONTROL_VERSION = "xau-ai3-thinking-v1"
+AI3_INPUT_PACK_VERSION = "ai3-cache-prefix-v1"
 AI_REVIEW_RELIABILITY_VERSION = "ai-review-reliability-v1"
 AI_OUTPUT_RELIABILITY_VERSION = "ai-output-reliability-v2"
 AI_REASONING_CAPABILITY_VERSION = "ai-reasoning-capability-v1"
@@ -1867,6 +1868,7 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 "headers_elapsed_sec": response_progress.get("headers_elapsed_sec"),
                 "body_complete": response is not None,
                 "prompt_chars": len(request_prompt), "instructions_chars": len(request_instructions), "profile_rules": snapshot.get("profile_rules"),
+                "input_pack_version": snapshot.get("input_pack_version"),
                 "snapshot_id": snapshot.get("snapshot_id"), "request_quote": snapshot.get("quote"),
                 "protocol": protocol, "response_contract_version": RESPONSE_CONTRACT_VERSION,
                 "json_mode_sent": json_mode, "json_error": json_error,
@@ -2296,6 +2298,39 @@ def task_is_current(seq, bar_time, current_seq, current_bar):
 
 def prompt_json(title, payload):
     return title + "\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def cache_ordered_guardian_pack(pack):
+    """Keep every value; put the original thesis before changing quote/state fields."""
+    result = copy.deepcopy(pack)
+
+    def canonical(value):
+        if isinstance(value, dict):
+            return {key: canonical(value[key]) for key in sorted(value, key=str)}
+        if isinstance(value, list):
+            return [canonical(item) for item in value]
+        return value
+
+    dynamic_context = ("last_observed_at", "observed_mfe", "observed_mae")
+    positions = []
+    for item in result.get("positions", []):
+        if not isinstance(item, dict):
+            positions.append(item)
+            continue
+        context = item.get("entry_context")
+        if isinstance(context, dict):
+            ordered = {key: canonical(context[key]) for key in sorted(context, key=str)
+                       if key not in dynamic_context}
+            ordered.update({key: canonical(context[key]) for key in dynamic_context if key in context})
+            item["entry_context"] = ordered
+        stable = ("entry_context", "ticket", "direction", "volume", "entry", "initial_risk")
+        positions.append({**{key: item[key] for key in stable if key in item},
+                          **{key: value for key, value in item.items() if key not in stable}})
+    if "positions" in result:
+        result["positions"] = positions
+    stable = ("symbol", "positions")
+    return {**{key: result[key] for key in stable if key in result},
+            **{key: value for key, value in result.items() if key not in stable}}
 
 
 def append_decision_snapshot(decision_id, stage, payload):
@@ -3270,9 +3305,11 @@ class ThreeAITrader(base.FibVolumePATrader):
         for item in payload["positions"]:
             # The complete card remains persisted; guardian uses the entry thesis.
             item["entry_context"].pop("quality_assessment", None)
+        payload = cache_ordered_guardian_pack(payload)
         return {"prompt": prompt_json(
             '请只输出 JSON: {"action":"hold|tighten_sl|close","ticket":0,"new_stop_loss":0,"reasoning":"..."}', payload),
                 "snapshot_id": payload["snapshot_id"], "quote": quote,
+                "input_pack_version": AI3_INPUT_PACK_VERSION,
                 "tickets": {int(item["ticket"]) for item in payload["positions"]},
                 "instructions": role_instructions("AI-3", [item["entry_context"].get("strategy_contract") or {} for item in payload["positions"]]),
                 "profile_rules": role_rules("AI-3", [item["entry_context"].get("strategy_contract") or {} for item in payload["positions"]])}
@@ -3399,6 +3436,8 @@ class ThreeAITrader(base.FibVolumePATrader):
         )
         base.logger.info("AI质量评分=%s，意见生成=%s，等级分值=%s，门槛=%s（非胜率）",
                          QUALITY_VERSION, QUALITY_GRADING_ORDER_VERSION, QUALITY_LEVEL_POINTS, AI_CONFIDENCE)
+        base.logger.info("AI-3输入=%s 原入场证据前置、动态报价后置，保持M1复核与完整证据；实际缓存以ai_usage为准",
+                         AI3_INPUT_PACK_VERSION)
         base.logger.info("AI-1证据引用=%s 每次POST声明快照绑定目录，ID解码后严格核候选隔离和事实路径，不修补错误旧引用",
                          AI1_CITATION_VERSION)
         base.logger.info("止损价格=%s BUY向下/SELL向上量化，严格保留M5极值缓冲与止损上限", base.STOP_PRICE_VERSION)

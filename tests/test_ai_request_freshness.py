@@ -224,6 +224,13 @@ class FreshnessTests(unittest.TestCase):
                     for c in post.call_args_list]
         self.assertEqual([p["bid"] for p in payloads], [101., 102.])
         self.assertEqual([p["positions"][0]["profit"] for p in payloads], [1., 2.])
+        for sent in payloads:
+            self.assertLess(list(sent).index("positions"), list(sent).index("snapshot_id"))
+            position_keys = list(sent["positions"][0])
+            self.assertLess(position_keys.index("entry_context"), position_keys.index("profit"))
+        usage = [json.loads(line) for p in Path(self.temp.name).glob("*.jsonl")
+                 for line in p.read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(all(event["input_pack_version"] == ai.AI3_INPUT_PACK_VERSION for event in usage))
 
     def test_ai3_does_not_retry_for_a_new_replacement_position(self):
         original, replacement = self.guardian_position(), self.guardian_position()
