@@ -1,0 +1,2475 @@
+{
+  "decision_id": "1791969000-112",
+  "timestamp": "2026-10-14T14:10:48",
+  "source_code_signature": "6c8a8d4d7449231e",
+  "request_pack": {
+    "symbol": "XAUUSD",
+    "timeframe": "M15",
+    "direction_timeframe": "H1",
+    "bars_are_closed": true,
+    "rules": {
+      "h1_sets_direction": true,
+      "m15_opposite_is_pullback": false,
+      "h4_is_not_a_veto": true,
+      "pullback_tight_range_is_no": false,
+      "pullback_wide_range_only_at_edges": false,
+      "breakout_and_range_edge_use_own_conditions": true,
+      "max_stop_abs": 8.0,
+      "chase_max_atr": 1.5,
+      "min_rr": 1.5,
+      "price_finalization": {
+        "reference": "selected opportunity successful AI1 request live Ask for BUY / Bid for SELL",
+        "stop_price_version": "protective-stop-v1",
+        "stop_rounding": "BUY floor / SELL ceiling to 0.01, then enforce max_stop_abs",
+        "generation_min_risk": 3.527571428571407,
+        "target_max_reference_r": 3.0,
+        "execution_min_stop_clearance": 1.7637857142857034,
+        "execution_clearance_price": "BUY bid / SELL ask",
+        "generation_floor_is_not_execution_floor": true
+      }
+    },
+    "quality_rubric": {
+      "version": "entry-quality-v4",
+      "level_points": {
+        "strong": 20,
+        "adequate": 16,
+        "weak": 8,
+        "missing": 0
+      },
+      "reservations_policy": "level唯一声明程度：strong20/adequate16/weak8/missing0；五个dimensions只含level/reason/evidence_refs；保留意见和轻微观察统一声明在quality_assessment/issues。每条issues含dimension/kind/cause/event_group/reason/evidence_refs，dimension是唯一归属，kind为reservation或observation；不要在五项内重复填写意见数组。同cause和同event全卡只声明一次；event_group为空时以实际引用集合识别，改写reason或引用顺序不是新事件。同一事实仍可在多个维度reason/evidence_refs描述，不能重复成两条issues。例如同一M15阴线只有一条opposing_structure意见，可归counter_evidence，structure只描述事实。strong不得归属任何意见；adequate的reservation为minor，weak为material，missing为blocking；weak/missing必须各有至少一条归属本维度的reservation，不能借其他维度的意见撑扣分。observation永远minor且无额外扣分，不能独立支撑weak/missing或重大反证观望。cause是问题主题，不自动决定程度；普通量volume/浅回撤shallow_retrace仅可observation，硬限制hard_limit/必要数据缺失missing_data仅可reservation。单根M5反向、暂时M15反向及未确认反转可作opposing_structure observation，独立及时的重大反证必须reservation；重大意见与独立轻微观察可以并存。没有意见也必须写issues=[]；Python生成原因ID和程度，不由模型声明分数或修改判断来满足格式。",
+      "reservation_causes": [
+        "execution_drift",
+        "hard_limit",
+        "missing_data",
+        "opposing_structure",
+        "shallow_retrace",
+        "stop_vulnerability",
+        "target_uncertainty",
+        "trigger_weakness",
+        "volume"
+      ],
+      "cause_rules": {
+        "volume": {
+          "minor_only": true,
+          "observation_allowed": true,
+          "meaning": "普通或偏弱量能，仅轻微观察；必要量数据缺失用missing_data。"
+        },
+        "shallow_retrace": {
+          "minor_only": true,
+          "observation_allowed": true,
+          "meaning": "回撤深度略浅，仅轻微观察；深度下行、远离EMA不属于浅回撤。"
+        },
+        "trigger_weakness": {
+          "minor_only": false,
+          "observation_allowed": true,
+          "meaning": "真实收盘触发不足或较弱；不得把已成立的触发说成不存在。轻微不足可观察，缺必要触发须保留意见。"
+        },
+        "opposing_structure": {
+          "minor_only": false,
+          "observation_allowed": true,
+          "meaning": "有真实证据的反向信息；M15暂反向、单根M5颜色、未确认反转仅可作轻微观察，独立及时的重大反向结构须放reservations。"
+        },
+        "stop_vulnerability": {
+          "minor_only": false,
+          "observation_allowed": true,
+          "meaning": "保护结构的风险意见；硬保护已满足的轻微顾虑可观察，命名结构或M5极值保护不足须保留意见并引用保护价和缓冲。"
+        },
+        "target_uncertainty": {
+          "minor_only": false,
+          "observation_allowed": true,
+          "meaning": "有依据的目标或障碍意见；硬空间已满足的轻微不确定性可观察，重要障碍前空间不足须保留意见，不猜未来收益。"
+        },
+        "execution_drift": {
+          "minor_only": false,
+          "observation_allowed": true,
+          "meaning": "报价变化影响当前执行；未影响合法执行的轻微波动可观察，实质执行风险须保留意见；旧收盘价与新报价不同本身不是冲突。"
+        },
+        "missing_data": {
+          "minor_only": false,
+          "observation_allowed": false,
+          "meaning": "本次方案必需且输入确实缺失的数据，必须放reservations，不包括未知外部新闻。"
+        },
+        "hard_limit": {
+          "minor_only": false,
+          "observation_allowed": false,
+          "meaning": "违反明确风险限制，必须放reservations；EMA偏离超过1.5ATR归此类，不归浅回撤。"
+        }
+      },
+      "issue_layout": "single_ledger_unique_dimension_owner",
+      "meaning": "entry_quality_not_win_probability",
+      "dimensions": {
+        "structure": "按真实原始K线、位置及H1方向评价自主打法有效性，分盘菜单是参考；不要求固定Fib/建箱/首次事件。",
+        "trigger": "真实原始已收盘K线所证自主打法触发可为adequate，无需固定检测器；analysis_checkpoint本身不能证明触发。",
+        "protection": "止损保护命名结构且覆盖最近3根M5极值和缓冲、距离不超过上限为adequate；不能只因相对ATR较紧就认定无保护。",
+        "target": "目标有给定依据、重要未克服障碍之前有空间且有效报价RR至少1.5为adequate；刚过1.5无需在其他项重复扣分。",
+        "counter_evidence": "没有可核实反向证据为strong；普通量用volume、浅回撤用shallow_retrace放observations；H1旧影线、单根M5反向、M15暂反向或未确认反转仅是minor，可用opposing_structure放observations；仅有这些轻微观察评adequate。独立及时的重大反向结构须放reservations并评weak。"
+      },
+      "proposal_policy": "硬伤或必要证据缺失则no；已成立的候选仅有minor意见时给出提案，最终分数及Python/AI2决定是否放行。不要将不确定未来获利当成必要字段缺失。",
+      "quote_policy": "自主候选reference_price是本次成功POST live_quote的BUY Ask/SELL Bid；coarse_reference_price与local_plan_feasibility保留原本地M15方案诊断。AI2/Python再核新报价。",
+      "reference_paths": [
+        "/h1_trend",
+        "/live_quote",
+        "/local_plan_feasibility",
+        "/computed_evidence/fib",
+        "/computed_evidence/m5_timing",
+        "/computed_evidence/price_action",
+        "/computed_evidence/obstacles"
+      ],
+      "reference_path_policy": "路径相对本次输入根对象；local_plan_feasibility是顶层，不能放进computed_evidence。引用列表中的实际方向和索引，不照抄示例占位符。"
+    },
+    "strategy_framework": "strategy-framework-v2",
+    "evidence_windows": {
+      "m15_structure_lookback": 24,
+      "breakout_box_lookback": 16,
+      "breakout_recent_bars": 4,
+      "m5_rejection_lookback": 3
+    },
+    "bar_closure": {
+      "source_shift": 1,
+      "m15_last_closed_bar_time": 1791967500,
+      "m5_last_closed_bar_time": 1791968700,
+      "h1_last_closed_bar_time": 1791964800,
+      "live_quote_is_not_a_bar": true
+    },
+    "risk_timeframe": "M15",
+    "price": 4148.83,
+    "decision_id": "1791969000-112",
+    "strategy_fingerprint": "e94bed95be34dd5fdde973d88296b328fcb75007158837eb801b6ff7a710882c",
+    "live_quote": {
+      "bid": 4154.79,
+      "ask": 4155.12,
+      "time": 1791969002,
+      "time_msc": 1791969002023,
+      "observed_at": 1791958201.3582504
+    },
+    "atr": 5.88,
+    "m15_ema21": 4159.825450235652,
+    "h1_trend": "bear",
+    "m15_trend": "bear",
+    "m15_ema21_distance_atr": -1.87,
+    "regime": "trend",
+    "regime_text": "趋势: H1=bear, ADX=20.1, 净位移=3.22ATR, 区间=3.75ATR",
+    "session": "asia",
+    "momentum": "",
+    "local_action": "no",
+    "local_confidence": 49,
+    "score_buy": 55,
+    "score_sell": 49,
+    "computed_evidence": {
+      "price_action": {
+        "M15": {
+          "sell": {
+            "available": true,
+            "action": "sell",
+            "atr": 5.879285714285678,
+            "min_body": 0.7055142857142813,
+            "prior_extreme": 4167.15,
+            "prior_extreme_field": "high",
+            "checks": {
+              "engulfing": true,
+              "wick_rejection": false,
+              "false_break": false,
+              "previous_bar_break_confirm": true,
+              "liquidity_sweep": false
+            },
+            "timeframe": "M15",
+            "score": 30,
+            "description": "空头吞没，跌破前K低点确认",
+            "bar_time": 1791967500,
+            "bars": [
+              {
+                "time": 1791961200,
+                "open": 4162.64,
+                "high": 4162.92,
+                "low": 4155.87,
+                "close": 4156.1,
+                "tick_volume": 3057.0,
+                "candle_parts": {
+                  "body": 6.54,
+                  "range": 7.05,
+                  "upper": 0.28,
+                  "lower": 0.23
+                }
+              },
+              {
+                "time": 1791962100,
+                "open": 4156.1,
+                "high": 4161.84,
+                "low": 4155.5,
+                "close": 4161.29,
+                "tick_volume": 2493.0,
+                "candle_parts": {
+                  "body": 5.19,
+                  "range": 6.34,
+                  "upper": 0.55,
+                  "lower": 0.6
+                }
+              },
+              {
+                "time": 1791963000,
+                "open": 4161.27,
+                "high": 4166.38,
+                "low": 4161.15,
+                "close": 4165.91,
+                "tick_volume": 2780.0,
+                "candle_parts": {
+                  "body": 4.64,
+                  "range": 5.23,
+                  "upper": 0.47,
+                  "lower": 0.12
+                }
+              },
+              {
+                "time": 1791963900,
+                "open": 4165.91,
+                "high": 4167.15,
+                "low": 4164.85,
+                "close": 4165.8,
+                "tick_volume": 2508.0,
+                "candle_parts": {
+                  "body": 0.11,
+                  "range": 2.3,
+                  "upper": 1.24,
+                  "lower": 0.95
+                }
+              },
+              {
+                "time": 1791964800,
+                "open": 4165.68,
+                "high": 4166.23,
+                "low": 4158.04,
+                "close": 4162.54,
+                "tick_volume": 4041.0,
+                "candle_parts": {
+                  "body": 3.14,
+                  "range": 8.19,
+                  "upper": 0.55,
+                  "lower": 4.5
+                }
+              },
+              {
+                "time": 1791965700,
+                "open": 4162.54,
+                "high": 4162.76,
+                "low": 4157.16,
+                "close": 4157.56,
+                "tick_volume": 3864.0,
+                "candle_parts": {
+                  "body": 4.98,
+                  "range": 5.6,
+                  "upper": 0.22,
+                  "lower": 0.4
+                }
+              },
+              {
+                "time": 1791966600,
+                "open": 4157.56,
+                "high": 4163.21,
+                "low": 4156.75,
+                "close": 4157.78,
+                "tick_volume": 5303.0,
+                "candle_parts": {
+                  "body": 0.22,
+                  "range": 6.46,
+                  "upper": 5.43,
+                  "lower": 0.81
+                }
+              },
+              {
+                "time": 1791967500,
+                "open": 4157.78,
+                "high": 4157.78,
+                "low": 4148.45,
+                "close": 4148.83,
+                "tick_volume": 5690.0,
+                "candle_parts": {
+                  "body": 8.95,
+                  "range": 9.33,
+                  "upper": 0.0,
+                  "lower": 0.38
+                }
+              }
+            ],
+            "prior_bar_times": [
+              1791962100,
+              1791963000,
+              1791963900,
+              1791964800,
+              1791965700,
+              1791966600
+            ],
+            "source": "classify_price_action"
+          }
+        },
+        "M5": {
+          "sell": {
+            "available": true,
+            "action": "sell",
+            "atr": 4.53785714285693,
+            "min_body": 0.5445428571428316,
+            "prior_extreme": 4163.21,
+            "prior_extreme_field": "high",
+            "checks": {
+              "engulfing": false,
+              "wick_rejection": false,
+              "false_break": false,
+              "previous_bar_break_confirm": false,
+              "liquidity_sweep": false
+            },
+            "timeframe": "M5",
+            "score": 0,
+            "description": "无明确价格行为触发",
+            "bar_time": 1791968700,
+            "bars": [
+              {
+                "time": 1791966600,
+                "open": 4157.56,
+                "high": 4162.91,
+                "low": 4157.02,
+                "close": 4161.43,
+                "tick_volume": 2166.0,
+                "candle_parts": {
+                  "body": 3.87,
+                  "range": 5.89,
+                  "upper": 1.48,
+                  "lower": 0.54
+                }
+              },
+              {
+                "time": 1791966900,
+                "open": 4161.44,
+                "high": 4163.21,
+                "low": 4157.89,
+                "close": 4158.19,
+                "tick_volume": 1622.0,
+                "candle_parts": {
+                  "body": 3.25,
+                  "range": 5.32,
+                  "upper": 1.77,
+                  "lower": 0.3
+                }
+              },
+              {
+                "time": 1791967200,
+                "open": 4158.19,
+                "high": 4159.19,
+                "low": 4156.75,
+                "close": 4157.78,
+                "tick_volume": 1515.0,
+                "candle_parts": {
+                  "body": 0.41,
+                  "range": 2.44,
+                  "upper": 1.0,
+                  "lower": 1.03
+                }
+              },
+              {
+                "time": 1791967500,
+                "open": 4157.78,
+                "high": 4157.78,
+                "low": 4154.79,
+                "close": 4156.63,
+                "tick_volume": 1524.0,
+                "candle_parts": {
+                  "body": 1.15,
+                  "range": 2.99,
+                  "upper": 0.0,
+                  "lower": 1.84
+                }
+              },
+              {
+                "time": 1791967800,
+                "open": 4156.62,
+                "high": 4157.69,
+                "low": 4153.39,
+                "close": 4154.13,
+                "tick_volume": 1823.0,
+                "candle_parts": {
+                  "body": 2.49,
+                  "range": 4.3,
+                  "upper": 1.07,
+                  "lower": 0.74
+                }
+              },
+              {
+                "time": 1791968100,
+                "open": 4154.13,
+                "high": 4155.38,
+                "low": 4148.45,
+                "close": 4148.83,
+                "tick_volume": 2343.0,
+                "candle_parts": {
+                  "body": 5.3,
+                  "range": 6.93,
+                  "upper": 1.25,
+                  "lower": 0.38
+                }
+              },
+              {
+                "time": 1791968400,
+                "open": 4148.78,
+                "high": 4148.96,
+                "low": 4145.99,
+                "close": 4147.06,
+                "tick_volume": 2656.0,
+                "candle_parts": {
+                  "body": 1.72,
+                  "range": 2.97,
+                  "upper": 0.18,
+                  "lower": 1.07
+                }
+              },
+              {
+                "time": 1791968700,
+                "open": 4147.06,
+                "high": 4157.69,
+                "low": 4146.1,
+                "close": 4154.72,
+                "tick_volume": 2413.0,
+                "candle_parts": {
+                  "body": 7.66,
+                  "range": 11.59,
+                  "upper": 2.97,
+                  "lower": 0.96
+                }
+              }
+            ],
+            "prior_bar_times": [
+              1791966900,
+              1791967200,
+              1791967500,
+              1791967800,
+              1791968100,
+              1791968400
+            ],
+            "source": "classify_price_action"
+          }
+        }
+      }
+    },
+    "m15_bars": [
+      {
+        "time": 1791939600,
+        "open": 4161.85,
+        "high": 4162.87,
+        "low": 4159.79,
+        "close": 4160.15,
+        "tick_volume": 1469.0
+      },
+      {
+        "time": 1791940500,
+        "open": 4160.15,
+        "high": 4161.6,
+        "low": 4159.33,
+        "close": 4160.83,
+        "tick_volume": 1354.0
+      },
+      {
+        "time": 1791941400,
+        "open": 4160.83,
+        "high": 4161.55,
+        "low": 4159.12,
+        "close": 4161.49,
+        "tick_volume": 1339.0
+      },
+      {
+        "time": 1791942300,
+        "open": 4161.49,
+        "high": 4162.97,
+        "low": 4160.63,
+        "close": 4161.37,
+        "tick_volume": 1607.0
+      },
+      {
+        "time": 1791943200,
+        "open": 4161.25,
+        "high": 4161.91,
+        "low": 4157.4,
+        "close": 4157.84,
+        "tick_volume": 1979.0
+      },
+      {
+        "time": 1791944100,
+        "open": 4157.85,
+        "high": 4158.15,
+        "low": 4155.05,
+        "close": 4156.44,
+        "tick_volume": 2006.0
+      },
+      {
+        "time": 1791945000,
+        "open": 4156.31,
+        "high": 4157.21,
+        "low": 4155.51,
+        "close": 4155.79,
+        "tick_volume": 1789.0
+      },
+      {
+        "time": 1791945900,
+        "open": 4155.79,
+        "high": 4157.3,
+        "low": 4154.84,
+        "close": 4155.24,
+        "tick_volume": 1968.0
+      },
+      {
+        "time": 1791946800,
+        "open": 4155.24,
+        "high": 4163.6,
+        "low": 4154.89,
+        "close": 4162.99,
+        "tick_volume": 4563.0
+      },
+      {
+        "time": 1791947700,
+        "open": 4162.99,
+        "high": 4163.28,
+        "low": 4157.86,
+        "close": 4160.58,
+        "tick_volume": 3811.0
+      },
+      {
+        "time": 1791948600,
+        "open": 4160.55,
+        "high": 4161.58,
+        "low": 4154.6,
+        "close": 4157.08,
+        "tick_volume": 4221.0
+      },
+      {
+        "time": 1791949500,
+        "open": 4157.08,
+        "high": 4158.46,
+        "low": 4154.6,
+        "close": 4155.15,
+        "tick_volume": 4062.0
+      },
+      {
+        "time": 1791950400,
+        "open": 4155.15,
+        "high": 4159.28,
+        "low": 4151.24,
+        "close": 4151.83,
+        "tick_volume": 6826.0
+      },
+      {
+        "time": 1791951300,
+        "open": 4151.82,
+        "high": 4164.94,
+        "low": 4147.55,
+        "close": 4164.86,
+        "tick_volume": 6283.0
+      },
+      {
+        "time": 1791952200,
+        "open": 4164.86,
+        "high": 4166.23,
+        "low": 4145.98,
+        "close": 4146.19,
+        "tick_volume": 6940.0
+      },
+      {
+        "time": 1791953100,
+        "open": 4146.19,
+        "high": 4159.17,
+        "low": 4144.47,
+        "close": 4154.93,
+        "tick_volume": 6074.0
+      },
+      {
+        "time": 1791954000,
+        "open": 4154.93,
+        "high": 4164.07,
+        "low": 4153.13,
+        "close": 4160.11,
+        "tick_volume": 5417.0
+      },
+      {
+        "time": 1791954900,
+        "open": 4160.13,
+        "high": 4162.91,
+        "low": 4159.06,
+        "close": 4160.66,
+        "tick_volume": 3446.0
+      },
+      {
+        "time": 1791955800,
+        "open": 4160.61,
+        "high": 4163.48,
+        "low": 4158.93,
+        "close": 4160.09,
+        "tick_volume": 4181.0
+      },
+      {
+        "time": 1791956700,
+        "open": 4159.97,
+        "high": 4167.92,
+        "low": 4159.02,
+        "close": 4167.77,
+        "tick_volume": 4546.0
+      },
+      {
+        "time": 1791957600,
+        "open": 4167.85,
+        "high": 4168.81,
+        "low": 4161.64,
+        "close": 4167.74,
+        "tick_volume": 4539.0
+      },
+      {
+        "time": 1791958500,
+        "open": 4167.74,
+        "high": 4170.52,
+        "low": 4164.82,
+        "close": 4164.92,
+        "tick_volume": 3976.0
+      },
+      {
+        "time": 1791959400,
+        "open": 4164.92,
+        "high": 4165.89,
+        "low": 4163.43,
+        "close": 4163.55,
+        "tick_volume": 2364.0
+      },
+      {
+        "time": 1791960300,
+        "open": 4163.55,
+        "high": 4164.74,
+        "low": 4161.71,
+        "close": 4162.64,
+        "tick_volume": 1921.0
+      },
+      {
+        "time": 1791961200,
+        "open": 4162.64,
+        "high": 4162.92,
+        "low": 4155.87,
+        "close": 4156.1,
+        "tick_volume": 3057.0
+      },
+      {
+        "time": 1791962100,
+        "open": 4156.1,
+        "high": 4161.84,
+        "low": 4155.5,
+        "close": 4161.29,
+        "tick_volume": 2493.0
+      },
+      {
+        "time": 1791963000,
+        "open": 4161.27,
+        "high": 4166.38,
+        "low": 4161.15,
+        "close": 4165.91,
+        "tick_volume": 2780.0
+      },
+      {
+        "time": 1791963900,
+        "open": 4165.91,
+        "high": 4167.15,
+        "low": 4164.85,
+        "close": 4165.8,
+        "tick_volume": 2508.0
+      },
+      {
+        "time": 1791964800,
+        "open": 4165.68,
+        "high": 4166.23,
+        "low": 4158.04,
+        "close": 4162.54,
+        "tick_volume": 4041.0
+      },
+      {
+        "time": 1791965700,
+        "open": 4162.54,
+        "high": 4162.76,
+        "low": 4157.16,
+        "close": 4157.56,
+        "tick_volume": 3864.0
+      },
+      {
+        "time": 1791966600,
+        "open": 4157.56,
+        "high": 4163.21,
+        "low": 4156.75,
+        "close": 4157.78,
+        "tick_volume": 5303.0
+      },
+      {
+        "time": 1791967500,
+        "open": 4157.78,
+        "high": 4157.78,
+        "low": 4148.45,
+        "close": 4148.83,
+        "tick_volume": 5690.0
+      }
+    ],
+    "h1_bars": [
+      {
+        "time": 1791939600,
+        "open": 4161.85,
+        "high": 4162.97,
+        "low": 4159.12,
+        "close": 4161.37,
+        "tick_volume": 5769.0
+      },
+      {
+        "time": 1791943200,
+        "open": 4161.25,
+        "high": 4161.91,
+        "low": 4154.84,
+        "close": 4155.24,
+        "tick_volume": 7742.0
+      },
+      {
+        "time": 1791946800,
+        "open": 4155.24,
+        "high": 4163.6,
+        "low": 4154.6,
+        "close": 4155.15,
+        "tick_volume": 16657.0
+      },
+      {
+        "time": 1791950400,
+        "open": 4155.15,
+        "high": 4166.23,
+        "low": 4144.47,
+        "close": 4154.93,
+        "tick_volume": 26123.0
+      },
+      {
+        "time": 1791954000,
+        "open": 4154.93,
+        "high": 4167.92,
+        "low": 4153.13,
+        "close": 4167.77,
+        "tick_volume": 17590.0
+      },
+      {
+        "time": 1791957600,
+        "open": 4167.85,
+        "high": 4170.52,
+        "low": 4161.64,
+        "close": 4162.64,
+        "tick_volume": 12800.0
+      },
+      {
+        "time": 1791961200,
+        "open": 4162.64,
+        "high": 4167.15,
+        "low": 4155.5,
+        "close": 4165.8,
+        "tick_volume": 10838.0
+      },
+      {
+        "time": 1791964800,
+        "open": 4165.68,
+        "high": 4166.23,
+        "low": 4148.45,
+        "close": 4148.83,
+        "tick_volume": 18898.0
+      }
+    ],
+    "m5_bars": [
+      {
+        "time": 1791945000,
+        "open": 4156.31,
+        "high": 4156.95,
+        "low": 4155.74,
+        "close": 4155.86,
+        "tick_volume": 505.0
+      },
+      {
+        "time": 1791945300,
+        "open": 4155.86,
+        "high": 4157.21,
+        "low": 4155.79,
+        "close": 4156.89,
+        "tick_volume": 629.0
+      },
+      {
+        "time": 1791945600,
+        "open": 4156.89,
+        "high": 4157.15,
+        "low": 4155.51,
+        "close": 4155.79,
+        "tick_volume": 655.0
+      },
+      {
+        "time": 1791945900,
+        "open": 4155.79,
+        "high": 4157.22,
+        "low": 4155.63,
+        "close": 4156.33,
+        "tick_volume": 775.0
+      },
+      {
+        "time": 1791946200,
+        "open": 4156.33,
+        "high": 4157.3,
+        "low": 4155.67,
+        "close": 4156.5,
+        "tick_volume": 561.0
+      },
+      {
+        "time": 1791946500,
+        "open": 4156.5,
+        "high": 4156.57,
+        "low": 4154.84,
+        "close": 4155.24,
+        "tick_volume": 632.0
+      },
+      {
+        "time": 1791946800,
+        "open": 4155.24,
+        "high": 4157.72,
+        "low": 4154.89,
+        "close": 4156.62,
+        "tick_volume": 1465.0
+      },
+      {
+        "time": 1791947100,
+        "open": 4156.61,
+        "high": 4163.6,
+        "low": 4156.61,
+        "close": 4162.25,
+        "tick_volume": 1670.0
+      },
+      {
+        "time": 1791947400,
+        "open": 4162.25,
+        "high": 4163.25,
+        "low": 4160.5,
+        "close": 4162.99,
+        "tick_volume": 1428.0
+      },
+      {
+        "time": 1791947700,
+        "open": 4162.99,
+        "high": 4163.28,
+        "low": 4160.23,
+        "close": 4162.26,
+        "tick_volume": 1236.0
+      },
+      {
+        "time": 1791948000,
+        "open": 4162.14,
+        "high": 4163.28,
+        "low": 4158.71,
+        "close": 4159.28,
+        "tick_volume": 1240.0
+      },
+      {
+        "time": 1791948300,
+        "open": 4159.28,
+        "high": 4160.93,
+        "low": 4157.86,
+        "close": 4160.58,
+        "tick_volume": 1335.0
+      },
+      {
+        "time": 1791948600,
+        "open": 4160.55,
+        "high": 4161.58,
+        "low": 4156.08,
+        "close": 4158.17,
+        "tick_volume": 1616.0
+      },
+      {
+        "time": 1791948900,
+        "open": 4158.17,
+        "high": 4161.1,
+        "low": 4157.87,
+        "close": 4159.26,
+        "tick_volume": 1336.0
+      },
+      {
+        "time": 1791949200,
+        "open": 4159.26,
+        "high": 4160.0,
+        "low": 4154.6,
+        "close": 4157.08,
+        "tick_volume": 1269.0
+      },
+      {
+        "time": 1791949500,
+        "open": 4157.08,
+        "high": 4157.78,
+        "low": 4155.94,
+        "close": 4157.39,
+        "tick_volume": 1192.0
+      },
+      {
+        "time": 1791949800,
+        "open": 4157.39,
+        "high": 4157.67,
+        "low": 4155.71,
+        "close": 4156.2,
+        "tick_volume": 1293.0
+      },
+      {
+        "time": 1791950100,
+        "open": 4156.2,
+        "high": 4158.46,
+        "low": 4154.6,
+        "close": 4155.15,
+        "tick_volume": 1577.0
+      },
+      {
+        "time": 1791950400,
+        "open": 4155.15,
+        "high": 4158.4,
+        "low": 4152.3,
+        "close": 4155.4,
+        "tick_volume": 2749.0
+      },
+      {
+        "time": 1791950700,
+        "open": 4155.4,
+        "high": 4159.28,
+        "low": 4152.45,
+        "close": 4152.53,
+        "tick_volume": 2153.0
+      },
+      {
+        "time": 1791951000,
+        "open": 4152.53,
+        "high": 4155.58,
+        "low": 4151.24,
+        "close": 4151.83,
+        "tick_volume": 1924.0
+      },
+      {
+        "time": 1791951300,
+        "open": 4151.82,
+        "high": 4151.85,
+        "low": 4147.55,
+        "close": 4150.76,
+        "tick_volume": 1963.0
+      },
+      {
+        "time": 1791951600,
+        "open": 4150.76,
+        "high": 4159.66,
+        "low": 4149.51,
+        "close": 4157.56,
+        "tick_volume": 2176.0
+      },
+      {
+        "time": 1791951900,
+        "open": 4157.55,
+        "high": 4164.94,
+        "low": 4157.48,
+        "close": 4164.86,
+        "tick_volume": 2144.0
+      },
+      {
+        "time": 1791952200,
+        "open": 4164.86,
+        "high": 4166.23,
+        "low": 4155.94,
+        "close": 4157.23,
+        "tick_volume": 2235.0
+      },
+      {
+        "time": 1791952500,
+        "open": 4157.23,
+        "high": 4157.23,
+        "low": 4145.98,
+        "close": 4147.11,
+        "tick_volume": 2486.0
+      },
+      {
+        "time": 1791952800,
+        "open": 4147.07,
+        "high": 4151.24,
+        "low": 4146.11,
+        "close": 4146.19,
+        "tick_volume": 2219.0
+      },
+      {
+        "time": 1791953100,
+        "open": 4146.19,
+        "high": 4147.86,
+        "low": 4144.47,
+        "close": 4146.8,
+        "tick_volume": 2194.0
+      },
+      {
+        "time": 1791953400,
+        "open": 4146.92,
+        "high": 4159.17,
+        "low": 4146.57,
+        "close": 4155.06,
+        "tick_volume": 2178.0
+      },
+      {
+        "time": 1791953700,
+        "open": 4154.78,
+        "high": 4156.1,
+        "low": 4152.04,
+        "close": 4154.93,
+        "tick_volume": 1702.0
+      },
+      {
+        "time": 1791954000,
+        "open": 4154.93,
+        "high": 4158.93,
+        "low": 4153.13,
+        "close": 4153.86,
+        "tick_volume": 1833.0
+      },
+      {
+        "time": 1791954300,
+        "open": 4153.86,
+        "high": 4162.03,
+        "low": 4153.15,
+        "close": 4161.47,
+        "tick_volume": 1721.0
+      },
+      {
+        "time": 1791954600,
+        "open": 4161.47,
+        "high": 4164.07,
+        "low": 4159.22,
+        "close": 4160.11,
+        "tick_volume": 1863.0
+      },
+      {
+        "time": 1791954900,
+        "open": 4160.13,
+        "high": 4161.6,
+        "low": 4159.06,
+        "close": 4160.04,
+        "tick_volume": 1321.0
+      },
+      {
+        "time": 1791955200,
+        "open": 4160.04,
+        "high": 4162.91,
+        "low": 4159.15,
+        "close": 4162.21,
+        "tick_volume": 1192.0
+      },
+      {
+        "time": 1791955500,
+        "open": 4162.21,
+        "high": 4162.33,
+        "low": 4160.46,
+        "close": 4160.66,
+        "tick_volume": 933.0
+      },
+      {
+        "time": 1791955800,
+        "open": 4160.61,
+        "high": 4163.48,
+        "low": 4159.81,
+        "close": 4162.05,
+        "tick_volume": 1750.0
+      },
+      {
+        "time": 1791956100,
+        "open": 4162.05,
+        "high": 4162.91,
+        "low": 4161.32,
+        "close": 4162.28,
+        "tick_volume": 1249.0
+      },
+      {
+        "time": 1791956400,
+        "open": 4162.4,
+        "high": 4163.22,
+        "low": 4158.93,
+        "close": 4160.09,
+        "tick_volume": 1182.0
+      },
+      {
+        "time": 1791956700,
+        "open": 4159.97,
+        "high": 4163.46,
+        "low": 4159.02,
+        "close": 4161.72,
+        "tick_volume": 1404.0
+      },
+      {
+        "time": 1791957000,
+        "open": 4161.71,
+        "high": 4164.5,
+        "low": 4159.66,
+        "close": 4164.5,
+        "tick_volume": 1690.0
+      },
+      {
+        "time": 1791957300,
+        "open": 4164.5,
+        "high": 4167.92,
+        "low": 4164.29,
+        "close": 4167.77,
+        "tick_volume": 1452.0
+      },
+      {
+        "time": 1791957600,
+        "open": 4167.85,
+        "high": 4168.31,
+        "low": 4163.74,
+        "close": 4163.74,
+        "tick_volume": 1524.0
+      },
+      {
+        "time": 1791957900,
+        "open": 4163.74,
+        "high": 4166.11,
+        "low": 4161.64,
+        "close": 4166.01,
+        "tick_volume": 1402.0
+      },
+      {
+        "time": 1791958200,
+        "open": 4166.13,
+        "high": 4168.81,
+        "low": 4164.65,
+        "close": 4167.74,
+        "tick_volume": 1613.0
+      },
+      {
+        "time": 1791958500,
+        "open": 4167.74,
+        "high": 4170.52,
+        "low": 4167.6,
+        "close": 4167.78,
+        "tick_volume": 1391.0
+      },
+      {
+        "time": 1791958800,
+        "open": 4167.78,
+        "high": 4169.73,
+        "low": 4166.09,
+        "close": 4166.5,
+        "tick_volume": 1320.0
+      },
+      {
+        "time": 1791959100,
+        "open": 4166.5,
+        "high": 4167.33,
+        "low": 4164.82,
+        "close": 4164.92,
+        "tick_volume": 1265.0
+      },
+      {
+        "time": 1791959400,
+        "open": 4164.92,
+        "high": 4165.89,
+        "low": 4163.48,
+        "close": 4163.83,
+        "tick_volume": 879.0
+      },
+      {
+        "time": 1791959700,
+        "open": 4163.83,
+        "high": 4165.09,
+        "low": 4163.66,
+        "close": 4163.98,
+        "tick_volume": 747.0
+      },
+      {
+        "time": 1791960000,
+        "open": 4163.92,
+        "high": 4164.6,
+        "low": 4163.43,
+        "close": 4163.55,
+        "tick_volume": 738.0
+      },
+      {
+        "time": 1791960300,
+        "open": 4163.55,
+        "high": 4164.74,
+        "low": 4163.02,
+        "close": 4163.81,
+        "tick_volume": 819.0
+      },
+      {
+        "time": 1791960600,
+        "open": 4163.78,
+        "high": 4163.78,
+        "low": 4162.47,
+        "close": 4162.73,
+        "tick_volume": 570.0
+      },
+      {
+        "time": 1791960900,
+        "open": 4162.61,
+        "high": 4163.01,
+        "low": 4161.71,
+        "close": 4162.64,
+        "tick_volume": 532.0
+      },
+      {
+        "time": 1791961200,
+        "open": 4162.64,
+        "high": 4162.92,
+        "low": 4160.7,
+        "close": 4161.5,
+        "tick_volume": 703.0
+      },
+      {
+        "time": 1791961500,
+        "open": 4161.5,
+        "high": 4162.26,
+        "low": 4158.0,
+        "close": 4159.86,
+        "tick_volume": 1255.0
+      },
+      {
+        "time": 1791961800,
+        "open": 4159.86,
+        "high": 4160.9,
+        "low": 4155.87,
+        "close": 4156.1,
+        "tick_volume": 1099.0
+      },
+      {
+        "time": 1791962100,
+        "open": 4156.1,
+        "high": 4156.63,
+        "low": 4155.5,
+        "close": 4156.25,
+        "tick_volume": 901.0
+      },
+      {
+        "time": 1791962400,
+        "open": 4156.25,
+        "high": 4159.84,
+        "low": 4156.25,
+        "close": 4159.41,
+        "tick_volume": 812.0
+      },
+      {
+        "time": 1791962700,
+        "open": 4159.41,
+        "high": 4161.84,
+        "low": 4159.38,
+        "close": 4161.29,
+        "tick_volume": 780.0
+      },
+      {
+        "time": 1791963000,
+        "open": 4161.27,
+        "high": 4163.3,
+        "low": 4161.15,
+        "close": 4161.82,
+        "tick_volume": 978.0
+      },
+      {
+        "time": 1791963300,
+        "open": 4161.82,
+        "high": 4164.35,
+        "low": 4161.71,
+        "close": 4162.58,
+        "tick_volume": 883.0
+      },
+      {
+        "time": 1791963600,
+        "open": 4162.7,
+        "high": 4166.38,
+        "low": 4162.49,
+        "close": 4165.91,
+        "tick_volume": 919.0
+      },
+      {
+        "time": 1791963900,
+        "open": 4165.91,
+        "high": 4166.86,
+        "low": 4164.85,
+        "close": 4165.71,
+        "tick_volume": 948.0
+      },
+      {
+        "time": 1791964200,
+        "open": 4165.74,
+        "high": 4167.15,
+        "low": 4165.52,
+        "close": 4166.92,
+        "tick_volume": 833.0
+      },
+      {
+        "time": 1791964500,
+        "open": 4166.8,
+        "high": 4166.94,
+        "low": 4165.58,
+        "close": 4165.8,
+        "tick_volume": 727.0
+      },
+      {
+        "time": 1791964800,
+        "open": 4165.68,
+        "high": 4166.23,
+        "low": 4163.87,
+        "close": 4164.1,
+        "tick_volume": 1416.0
+      },
+      {
+        "time": 1791965100,
+        "open": 4164.1,
+        "high": 4165.02,
+        "low": 4158.04,
+        "close": 4159.13,
+        "tick_volume": 1324.0
+      },
+      {
+        "time": 1791965400,
+        "open": 4159.13,
+        "high": 4163.0,
+        "low": 4159.13,
+        "close": 4162.54,
+        "tick_volume": 1301.0
+      },
+      {
+        "time": 1791965700,
+        "open": 4162.54,
+        "high": 4162.76,
+        "low": 4160.1,
+        "close": 4161.79,
+        "tick_volume": 1439.0
+      },
+      {
+        "time": 1791966000,
+        "open": 4161.79,
+        "high": 4162.12,
+        "low": 4160.09,
+        "close": 4160.3,
+        "tick_volume": 1183.0
+      },
+      {
+        "time": 1791966300,
+        "open": 4160.3,
+        "high": 4160.36,
+        "low": 4157.16,
+        "close": 4157.56,
+        "tick_volume": 1242.0
+      },
+      {
+        "time": 1791966600,
+        "open": 4157.56,
+        "high": 4162.91,
+        "low": 4157.02,
+        "close": 4161.43,
+        "tick_volume": 2166.0
+      },
+      {
+        "time": 1791966900,
+        "open": 4161.44,
+        "high": 4163.21,
+        "low": 4157.89,
+        "close": 4158.19,
+        "tick_volume": 1622.0
+      },
+      {
+        "time": 1791967200,
+        "open": 4158.19,
+        "high": 4159.19,
+        "low": 4156.75,
+        "close": 4157.78,
+        "tick_volume": 1515.0
+      },
+      {
+        "time": 1791967500,
+        "open": 4157.78,
+        "high": 4157.78,
+        "low": 4154.79,
+        "close": 4156.63,
+        "tick_volume": 1524.0
+      },
+      {
+        "time": 1791967800,
+        "open": 4156.62,
+        "high": 4157.69,
+        "low": 4153.39,
+        "close": 4154.13,
+        "tick_volume": 1823.0
+      },
+      {
+        "time": 1791968100,
+        "open": 4154.13,
+        "high": 4155.38,
+        "low": 4148.45,
+        "close": 4148.83,
+        "tick_volume": 2343.0
+      },
+      {
+        "time": 1791968400,
+        "open": 4148.78,
+        "high": 4148.96,
+        "low": 4145.99,
+        "close": 4147.06,
+        "tick_volume": 2656.0
+      },
+      {
+        "time": 1791968700,
+        "open": 4147.06,
+        "high": 4157.69,
+        "low": 4146.1,
+        "close": 4154.72,
+        "tick_volume": 2413.0
+      }
+    ],
+    "opportunities": [
+      {
+        "opportunity_id": "b6a3dfcebe2e04df618cc713",
+        "action": "sell",
+        "local_score": 49,
+        "strategy_contract": {
+          "id": "asia_adaptive",
+          "name": "亚盘自主分析",
+          "version": "1",
+          "sessions": {
+            "asia": 0
+          },
+          "parameters": {
+            "profile": "asia_adaptive",
+            "target_r": 3.0,
+            "max_hold_minutes": 90,
+            "cooldown_seconds": 60,
+            "soft_scoring": {
+              "range_edge_fraction": 0.3,
+              "small_trend_max_atr": 1.0,
+              "reaction_range_atr": 1.25,
+              "weights": {
+                "directional_change": 5,
+                "same_direction_m5": 5,
+                "range_edge": 10,
+                "m5_reclaim": 10,
+                "small_trend": 8,
+                "directional_expansion": 2,
+                "prior_extreme_cross_hold": 2,
+                "volatility_reaction": 0
+              }
+            }
+          },
+          "ai_rules": {
+            "entry": "亚盘自主分析：区间边缘回收、流动性扫回、小趋势整理可优先考虑；明显趋势也可回撤或续势，不假定亚盘永远震荡。AI-1自主选择打法、真实证据及SL/TP或观望，菜单不是固定路由，未匹配本地形态也可由原始收盘K线证明。analysis_checkpoint只限定本次分析/去重，不是已确认交易触发；本地低分、无Fib38–62%、无首次开盘突破回踩和反向单根M5均不自动否决。引用真实OHLC、位置、极值、ATR/EMA与量能代理，并说明反向M5等风险及未知；宏观/新闻无实际来源则未知。知识仅参考位置、支撑阻力区域与回收，不声称完整复现B站算法/胜率。H1同向、SL8/RR1.5、近三M5极值加缓冲、EMA21追价1.5ATR及实时触发侧2倍buffer仍为Python硬门。成功请求实时买Ask/卖Bid为AI参考，目标上限3R，不硬拉SL。仅DEMO/.01手/单仓，有效JSON/质量门保持。",
+            "review": "亚盘AI-2审核已选打法与原始位置、区间边缘/扫回/整理证据是否一致，不再次强迫固定回收或拒绝形态。检查点不是触发，提案仍须真实闭合K线证明；区间中部、追价及单根反向M5可构成事实风险，不能凭时段直接否决。核对绑定来源、方向、UTC偏移/期限/指纹及当次新Bid/Ask；审核Python固定SL/TP的SL8、RR1.5、M5保护、EMA1.5ATR及止损触发侧2倍buffer。未知新闻不臆造，量能只是代理。仅模拟账户、单仓、同检查点一次、冷却60秒由Python执行；不给no/REJECT换模型重审。",
+            "guardian": "亚盘AI-3按入场保存的自主打法、回收区域或小趋势整理理由及失效证据护盘；若当时自主选趋势续势，按原理由判断而非强制区间规则。引用真实周期收盘及新持仓/报价，区间再次回收失败或原趋势失效必须说明证据，未知新闻不可推断。只持有、收紧或平仓，不能扩大SL/加仓；目标3R不保证收益或强迫持有。原契约冻结，90分钟为持仓复核节点，不能仅因时间到直接平仓；原理由仍有效则继续护仓，原SLTP和单向锁盈保持。"
+          },
+          "target_max_reference_r": 3.0,
+          "regime_filter": "none",
+          "entry_reference": "closed_m15",
+          "stop_reference": "m5_extreme",
+          "max_hold_minutes": 90,
+          "cooldown_seconds": 60,
+          "one_entry_per_event": true,
+          "demo_only": true,
+          "analysis_mode": true,
+          "holding_policy": "ai_review"
+        },
+        "strategy_fingerprint": "e94bed95be34dd5fdde973d88296b328fcb75007158837eb801b6ff7a710882c",
+        "strategy_evidence": {
+          "sell": {
+            "score": 49,
+            "evidence": {
+              "profile": "asia_adaptive",
+              "action": "sell",
+              "trade_trigger_confirmed": false,
+              "profile_prior": "亚盘参考区间边缘回收、扫回和小趋势整理；趋势明显仍可顺势回撤或续势，不能假定永远震荡。",
+              "style_menu": [
+                "区间边缘回收",
+                "流动性扫回",
+                "小趋势整理",
+                "趋势回撤",
+                "顺势续势",
+                "自主打法",
+                "观望"
+              ],
+              "uncertainty": [
+                "宏观事件/新闻日历未知：没有外部实际信息",
+                "tick_volume仅为经纪商成交量代理",
+                "分盘为北京时间固定策略分段，非交易所开盘钟",
+                "分析检查点不证明交易触发",
+                "学习材料只作位置/角色转换/整理参考，不是完整作者算法或胜率证明"
+              ],
+              "h1_permitted": true,
+              "analysis_checkpoint": {
+                "kind": "analysis-checkpoint-v1",
+                "checkpoint_id": "analysis-checkpoint-v1/2870a5cdcf4874fcbe71ba4217cf5b90",
+                "profile": "asia_adaptive",
+                "action": "sell",
+                "m5_bar_time": 1791968700,
+                "m15_bar_time": 1791967500,
+                "server_offset_hours": 3.0,
+                "observed_utc": 1791958201.225409,
+                "valid_until_utc": 1791958500.0,
+                "source_refs": [
+                  {
+                    "timeframe": "M5",
+                    "bar_time": 1791968100
+                  },
+                  {
+                    "timeframe": "M5",
+                    "bar_time": 1791968400
+                  },
+                  {
+                    "timeframe": "M5",
+                    "bar_time": 1791968700
+                  },
+                  {
+                    "timeframe": "M15",
+                    "bar_time": 1791967500
+                  }
+                ]
+              },
+              "event_id": "analysis-checkpoint-v1/2870a5cdcf4874fcbe71ba4217cf5b90",
+              "server_offset_hours": 3.0,
+              "regime": {
+                "host_m15_trend": "bear",
+                "h1_trend": "bear",
+                "adx": 20.127381429644235,
+                "recent_width_atr": 4.43081035111171,
+                "recent_close_change_atr": -2.9051148098651494,
+                "classification": "context_only"
+              },
+              "position": {
+                "reference_close": 4148.83,
+                "reference_bar_time": 1791967500,
+                "ema21": 4159.825450235654,
+                "ema_distance_atr": -1.8702017166706089,
+                "recent_range_location": 0.16737044145871946,
+                "lookback_bars": 24
+              },
+              "recent_extremes": {
+                "m15_low": 4144.47,
+                "m15_high": 4170.52,
+                "m15_source_bars": [
+                  {
+                    "time": 1791946800,
+                    "open": 4155.24,
+                    "high": 4163.6,
+                    "low": 4154.89,
+                    "close": 4162.99
+                  },
+                  {
+                    "time": 1791947700,
+                    "open": 4162.99,
+                    "high": 4163.28,
+                    "low": 4157.86,
+                    "close": 4160.58
+                  },
+                  {
+                    "time": 1791948600,
+                    "open": 4160.55,
+                    "high": 4161.58,
+                    "low": 4154.6,
+                    "close": 4157.08
+                  },
+                  {
+                    "time": 1791949500,
+                    "open": 4157.08,
+                    "high": 4158.46,
+                    "low": 4154.6,
+                    "close": 4155.15
+                  },
+                  {
+                    "time": 1791950400,
+                    "open": 4155.15,
+                    "high": 4159.28,
+                    "low": 4151.24,
+                    "close": 4151.83
+                  },
+                  {
+                    "time": 1791951300,
+                    "open": 4151.82,
+                    "high": 4164.94,
+                    "low": 4147.55,
+                    "close": 4164.86
+                  },
+                  {
+                    "time": 1791952200,
+                    "open": 4164.86,
+                    "high": 4166.23,
+                    "low": 4145.98,
+                    "close": 4146.19
+                  },
+                  {
+                    "time": 1791953100,
+                    "open": 4146.19,
+                    "high": 4159.17,
+                    "low": 4144.47,
+                    "close": 4154.93
+                  },
+                  {
+                    "time": 1791954000,
+                    "open": 4154.93,
+                    "high": 4164.07,
+                    "low": 4153.13,
+                    "close": 4160.11
+                  },
+                  {
+                    "time": 1791954900,
+                    "open": 4160.13,
+                    "high": 4162.91,
+                    "low": 4159.06,
+                    "close": 4160.66
+                  },
+                  {
+                    "time": 1791955800,
+                    "open": 4160.61,
+                    "high": 4163.48,
+                    "low": 4158.93,
+                    "close": 4160.09
+                  },
+                  {
+                    "time": 1791956700,
+                    "open": 4159.97,
+                    "high": 4167.92,
+                    "low": 4159.02,
+                    "close": 4167.77
+                  },
+                  {
+                    "time": 1791957600,
+                    "open": 4167.85,
+                    "high": 4168.81,
+                    "low": 4161.64,
+                    "close": 4167.74
+                  },
+                  {
+                    "time": 1791958500,
+                    "open": 4167.74,
+                    "high": 4170.52,
+                    "low": 4164.82,
+                    "close": 4164.92
+                  },
+                  {
+                    "time": 1791959400,
+                    "open": 4164.92,
+                    "high": 4165.89,
+                    "low": 4163.43,
+                    "close": 4163.55
+                  },
+                  {
+                    "time": 1791960300,
+                    "open": 4163.55,
+                    "high": 4164.74,
+                    "low": 4161.71,
+                    "close": 4162.64
+                  },
+                  {
+                    "time": 1791961200,
+                    "open": 4162.64,
+                    "high": 4162.92,
+                    "low": 4155.87,
+                    "close": 4156.1
+                  },
+                  {
+                    "time": 1791962100,
+                    "open": 4156.1,
+                    "high": 4161.84,
+                    "low": 4155.5,
+                    "close": 4161.29
+                  },
+                  {
+                    "time": 1791963000,
+                    "open": 4161.27,
+                    "high": 4166.38,
+                    "low": 4161.15,
+                    "close": 4165.91
+                  },
+                  {
+                    "time": 1791963900,
+                    "open": 4165.91,
+                    "high": 4167.15,
+                    "low": 4164.85,
+                    "close": 4165.8
+                  },
+                  {
+                    "time": 1791964800,
+                    "open": 4165.68,
+                    "high": 4166.23,
+                    "low": 4158.04,
+                    "close": 4162.54
+                  },
+                  {
+                    "time": 1791965700,
+                    "open": 4162.54,
+                    "high": 4162.76,
+                    "low": 4157.16,
+                    "close": 4157.56
+                  },
+                  {
+                    "time": 1791966600,
+                    "open": 4157.56,
+                    "high": 4163.21,
+                    "low": 4156.75,
+                    "close": 4157.78
+                  },
+                  {
+                    "time": 1791967500,
+                    "open": 4157.78,
+                    "high": 4157.78,
+                    "low": 4148.45,
+                    "close": 4148.83
+                  }
+                ],
+                "m5_protection_low": 4145.99,
+                "m5_protection_high": 4157.69,
+                "m5_protection_bars": [
+                  {
+                    "time": 1791968100,
+                    "open": 4154.13,
+                    "high": 4155.38,
+                    "low": 4148.45,
+                    "close": 4148.83
+                  },
+                  {
+                    "time": 1791968400,
+                    "open": 4148.78,
+                    "high": 4148.96,
+                    "low": 4145.99,
+                    "close": 4147.06
+                  },
+                  {
+                    "time": 1791968700,
+                    "open": 4147.06,
+                    "high": 4157.69,
+                    "low": 4146.1,
+                    "close": 4154.72
+                  }
+                ]
+              },
+              "atr": {
+                "timeframe": "M15",
+                "value": 5.879285714285678,
+                "source": "host_calculate_atr",
+                "latest_bar_time": 1791967500
+              },
+              "bar_behavior": {
+                "latest_m5": {
+                  "time": 1791968700,
+                  "open": 4147.06,
+                  "high": 4157.69,
+                  "low": 4146.1,
+                  "close": 4154.72
+                },
+                "latest_m15": {
+                  "time": 1791967500,
+                  "open": 4157.78,
+                  "high": 4157.78,
+                  "low": 4148.45,
+                  "close": 4148.83
+                },
+                "latest_h1": {
+                  "time": 1791964800,
+                  "open": 4165.68,
+                  "high": 4166.23,
+                  "low": 4148.45,
+                  "close": 4148.83
+                },
+                "m5_candle_parts": {
+                  "body": 7.6599999999998545,
+                  "range": 11.589999999999236,
+                  "upper": 2.969999999999345,
+                  "lower": 0.9600000000000364
+                },
+                "m5_opposes_action": true,
+                "m5_patterns": {
+                  "available": true,
+                  "timeframe": "M5",
+                  "blockers": [],
+                  "coverage_start": 1791964800,
+                  "bar_time": 1791968700,
+                  "body_engulf_previous": true,
+                  "full_range_engulf_previous": false,
+                  "current_doji": false,
+                  "previous_doji": false,
+                  "equal_body": false,
+                  "equal_range": false,
+                  "contiguous_opposite_bodies_covered": 2,
+                  "covered_bars": [
+                    {
+                      "time": 1791968400,
+                      "open": 4148.78,
+                      "high": 4148.96,
+                      "low": 4145.99,
+                      "close": 4147.06
+                    },
+                    {
+                      "time": 1791968100,
+                      "open": 4154.13,
+                      "high": 4155.38,
+                      "low": 4148.45,
+                      "close": 4148.83
+                    }
+                  ],
+                  "source_bars": [
+                    {
+                      "time": 1791968400,
+                      "open": 4148.78,
+                      "high": 4148.96,
+                      "low": 4145.99,
+                      "close": 4147.06
+                    },
+                    {
+                      "time": 1791968700,
+                      "open": 4147.06,
+                      "high": 4157.69,
+                      "low": 4146.1,
+                      "close": 4154.72
+                    }
+                  ],
+                  "past8_same_pattern_times": [
+                    1791966600
+                  ],
+                  "prior_in_covered_window": true,
+                  "first_in_trend": "unknown"
+                },
+                "m15_patterns": {
+                  "available": true,
+                  "timeframe": "M15",
+                  "blockers": [],
+                  "coverage_start": 1791955800,
+                  "bar_time": 1791967500,
+                  "body_engulf_previous": true,
+                  "full_range_engulf_previous": false,
+                  "current_doji": false,
+                  "previous_doji": false,
+                  "equal_body": false,
+                  "equal_range": false,
+                  "contiguous_opposite_bodies_covered": 1,
+                  "covered_bars": [
+                    {
+                      "time": 1791966600,
+                      "open": 4157.56,
+                      "high": 4163.21,
+                      "low": 4156.75,
+                      "close": 4157.78
+                    }
+                  ],
+                  "source_bars": [
+                    {
+                      "time": 1791966600,
+                      "open": 4157.56,
+                      "high": 4163.21,
+                      "low": 4156.75,
+                      "close": 4157.78
+                    },
+                    {
+                      "time": 1791967500,
+                      "open": 4157.78,
+                      "high": 4157.78,
+                      "low": 4148.45,
+                      "close": 4148.83
+                    }
+                  ],
+                  "past8_same_pattern_times": [],
+                  "prior_in_covered_window": false,
+                  "first_in_trend": "unknown"
+                }
+              },
+              "volume": {
+                "latest_m15_tick_volume": 5690,
+                "recent_mean_tick_volume": 4312.45,
+                "relative_tick_volume": 1.3194355876589874,
+                "source": "broker_tick_volume_proxy"
+              },
+              "soft_scoring": {
+                "base_score": 40,
+                "raw_score": 49,
+                "score": 49,
+                "components": {
+                  "directional_change": {
+                    "fact": true,
+                    "weight": 5,
+                    "contribution": 5
+                  },
+                  "same_direction_m5": {
+                    "fact": false,
+                    "weight": 5,
+                    "contribution": 0
+                  },
+                  "range_edge": {
+                    "fact": false,
+                    "weight": 10,
+                    "contribution": 0
+                  },
+                  "m5_reclaim": {
+                    "fact": false,
+                    "weight": 10,
+                    "contribution": 0
+                  },
+                  "small_trend": {
+                    "fact": false,
+                    "weight": 8,
+                    "contribution": 0
+                  },
+                  "directional_expansion": {
+                    "fact": true,
+                    "weight": 2,
+                    "contribution": 2
+                  },
+                  "prior_extreme_cross_hold": {
+                    "fact": true,
+                    "weight": 2,
+                    "contribution": 2
+                  },
+                  "volatility_reaction": {
+                    "fact": false,
+                    "weight": 0,
+                    "contribution": 0
+                  }
+                },
+                "thresholds": {
+                  "range_edge_fraction": 0.3,
+                  "small_trend_max_atr": 1.0,
+                  "reaction_range_atr": 1.25
+                },
+                "meaning": "soft contextual facts, not mandatory patterns or confirmed triggers"
+              }
+            },
+            "blockers": []
+          }
+        },
+        "structural_blockers": [],
+        "local_plan_status": {
+          "valid": false,
+          "reason": "[亚盘 07-15/亚盘自主分析] SELL策略确认，score=49。趋势: H1=bear, ADX=20.1, 净位移=3.22ATR, 区间=3.75ATR。自主分析粗筛，不强制Fib回撤或固定形态；量能代理仅作参考；真实收盘数据供AI自主判断；H1=bear；。拒绝: 最近3根M5极值加缓冲超过小资金上限 8.00，拒绝把止损拉进影线；价格离M15 EMA21过远(-1.87ATR)，不追空"
+        },
+        "reference_price": {
+          "price": 4154.79,
+          "source": "ai1_request_live_bid",
+          "snapshot_time": 1791958201.3582504,
+          "tick_time": 1791969002
+        },
+        "local_plan": {
+          "action": "no",
+          "stop_loss": 0.0,
+          "take_profit": 0.0,
+          "reasoning": "[亚盘 07-15/亚盘自主分析] SELL策略确认，score=49。趋势: H1=bear, ADX=20.1, 净位移=3.22ATR, 区间=3.75ATR。自主分析粗筛，不强制Fib回撤或固定形态；量能代理仅作参考；真实收盘数据供AI自主判断；H1=bear；。拒绝: 最近3根M5极值加缓冲超过小资金上限 8.00，拒绝把止损拉进影线；价格离M15 EMA21过远(-1.87ATR)，不追空",
+          "details": {
+            "fib": "自主分析粗筛，不强制Fib回撤或固定形态",
+            "pa_score": "0",
+            "location": "0.0172",
+            "setup": "asia_adaptive",
+            "entry_price": "4148.83"
+          }
+        },
+        "event_id": "analysis-checkpoint-v1/2870a5cdcf4874fcbe71ba4217cf5b90",
+        "entry_event": null,
+        "coarse_reference_price": {
+          "price": 4148.83,
+          "source": "previous_closed_m15_close",
+          "bar_time": 1791967500
+        },
+        "local_plan_feasibility": {
+          "action": "sell",
+          "reference_entry": 4148.83,
+          "stop_loss": 0.0,
+          "take_profit": 0.0,
+          "quote_time": 1791969002,
+          "available": false
+        }
+      }
+    ],
+    "opportunity_blockers": [
+      {
+        "opportunity_id": "3d9836de7a8a6b98b72e1e6a",
+        "blockers": [
+          "自主分析仍要求H1同向",
+          "BUY 与H1不同向(H1=bear, M15=bear)"
+        ],
+        "local_plan_status": {
+          "valid": false,
+          "reason": "[亚盘 07-15/亚盘自主分析] BUY策略确认，score=55。趋势: H1=bear, ADX=20.1, 净位移=3.22ATR, 区间=3.75ATR。自主分析粗筛，不强制Fib回撤或固定形态；量能代理仅作参考；真实收盘数据供AI自主判断；H1=bear；。拒绝: 自主分析仍要求H1同向；BUY 与H1不同向(H1=bear, M15=bear)"
+        }
+      },
+      {
+        "opportunity_id": "b6a3dfcebe2e04df618cc713",
+        "blockers": [],
+        "local_plan_status": {
+          "valid": false,
+          "reason": "[亚盘 07-15/亚盘自主分析] SELL策略确认，score=49。趋势: H1=bear, ADX=20.1, 净位移=3.22ATR, 区间=3.75ATR。自主分析粗筛，不强制Fib回撤或固定形态；量能代理仅作参考；真实收盘数据供AI自主判断；H1=bear；。拒绝: 最近3根M5极值加缓冲超过小资金上限 8.00，拒绝把止损拉进影线；价格离M15 EMA21过远(-1.87ATR)，不追空"
+        }
+      }
+    ],
+    "patterns": {
+      "M15": {
+        "available": true,
+        "timeframe": "M15",
+        "blockers": [],
+        "coverage_start": 1791955800,
+        "bar_time": 1791967500,
+        "body_engulf_previous": true,
+        "full_range_engulf_previous": false,
+        "current_doji": false,
+        "previous_doji": false,
+        "equal_body": false,
+        "equal_range": false,
+        "contiguous_opposite_bodies_covered": 1,
+        "covered_bars": [
+          {
+            "time": 1791966600,
+            "open": 4157.56,
+            "high": 4163.21,
+            "low": 4156.75,
+            "close": 4157.78
+          }
+        ],
+        "source_bars": [
+          {
+            "time": 1791966600,
+            "open": 4157.56,
+            "high": 4163.21,
+            "low": 4156.75,
+            "close": 4157.78
+          },
+          {
+            "time": 1791967500,
+            "open": 4157.78,
+            "high": 4157.78,
+            "low": 4148.45,
+            "close": 4148.83
+          }
+        ],
+        "past8_same_pattern_times": [],
+        "prior_in_covered_window": false,
+        "first_in_trend": "unknown"
+      },
+      "M5": {
+        "available": true,
+        "timeframe": "M5",
+        "blockers": [],
+        "coverage_start": 1791964800,
+        "bar_time": 1791968700,
+        "body_engulf_previous": true,
+        "full_range_engulf_previous": false,
+        "current_doji": false,
+        "previous_doji": false,
+        "equal_body": false,
+        "equal_range": false,
+        "contiguous_opposite_bodies_covered": 2,
+        "covered_bars": [
+          {
+            "time": 1791968400,
+            "open": 4148.78,
+            "high": 4148.96,
+            "low": 4145.99,
+            "close": 4147.06
+          },
+          {
+            "time": 1791968100,
+            "open": 4154.13,
+            "high": 4155.38,
+            "low": 4148.45,
+            "close": 4148.83
+          }
+        ],
+        "source_bars": [
+          {
+            "time": 1791968400,
+            "open": 4148.78,
+            "high": 4148.96,
+            "low": 4145.99,
+            "close": 4147.06
+          },
+          {
+            "time": 1791968700,
+            "open": 4147.06,
+            "high": 4157.69,
+            "low": 4146.1,
+            "close": 4154.72
+          }
+        ],
+        "past8_same_pattern_times": [
+          1791966600
+        ],
+        "prior_in_covered_window": true,
+        "first_in_trend": "unknown"
+      }
+    },
+    "snapshot_id": "1791969000-112-ai1-1791958201726369700-c65ec7cff0c54242aada1e3c35f10ce7",
+    "evidence_catalog": {
+      "version": "ai1-citations-v1",
+      "scope": "2d44ead43f",
+      "groups": [
+        {
+          "base": "/bar_closure",
+          "refs": {
+            "2d44ead43f.0.0": "",
+            "2d44ead43f.0.1": "/h1_last_closed_bar_time",
+            "2d44ead43f.0.2": "/live_quote_is_not_a_bar",
+            "2d44ead43f.0.3": "/m15_last_closed_bar_time",
+            "2d44ead43f.0.4": "/m5_last_closed_bar_time",
+            "2d44ead43f.0.5": "/source_shift"
+          }
+        },
+        {
+          "base": "/h1_bars",
+          "refs": {
+            "2d44ead43f.1.0": "",
+            "2d44ead43f.1.1": "/0",
+            "2d44ead43f.1.2": "/1",
+            "2d44ead43f.1.3": "/2",
+            "2d44ead43f.1.4": "/3",
+            "2d44ead43f.1.5": "/4",
+            "2d44ead43f.1.6": "/5",
+            "2d44ead43f.1.7": "/6",
+            "2d44ead43f.1.8": "/7"
+          }
+        },
+        {
+          "base": "/live_quote",
+          "refs": {
+            "2d44ead43f.2.0": "",
+            "2d44ead43f.2.1": "/ask",
+            "2d44ead43f.2.2": "/bid",
+            "2d44ead43f.2.3": "/observed_at",
+            "2d44ead43f.2.4": "/time",
+            "2d44ead43f.2.5": "/time_msc"
+          }
+        },
+        {
+          "base": "/m15_bars",
+          "refs": {
+            "2d44ead43f.3.0": "",
+            "2d44ead43f.3.1": "/24",
+            "2d44ead43f.3.2": "/25",
+            "2d44ead43f.3.3": "/26",
+            "2d44ead43f.3.4": "/27",
+            "2d44ead43f.3.5": "/28",
+            "2d44ead43f.3.6": "/29",
+            "2d44ead43f.3.7": "/30",
+            "2d44ead43f.3.8": "/31"
+          }
+        },
+        {
+          "base": "/m5_bars",
+          "refs": {
+            "2d44ead43f.4.0": "",
+            "2d44ead43f.4.1": "/72",
+            "2d44ead43f.4.2": "/73",
+            "2d44ead43f.4.3": "/74",
+            "2d44ead43f.4.4": "/75",
+            "2d44ead43f.4.5": "/76",
+            "2d44ead43f.4.6": "/77",
+            "2d44ead43f.4.7": "/78",
+            "2d44ead43f.4.8": "/79"
+          }
+        },
+        {
+          "base": "/patterns",
+          "refs": {
+            "2d44ead43f.5.0": "",
+            "2d44ead43f.5.1": "/M15",
+            "2d44ead43f.5.2": "/M5"
+          }
+        },
+        {
+          "base": "",
+          "refs": {
+            "2d44ead43f.6.0": "/atr",
+            "2d44ead43f.6.1": "/h1_trend",
+            "2d44ead43f.6.2": "/m15_ema21",
+            "2d44ead43f.6.3": "/m15_ema21_distance_atr",
+            "2d44ead43f.6.4": "/m15_trend"
+          }
+        },
+        {
+          "base": "/rules",
+          "refs": {
+            "2d44ead43f.7.0": "/chase_max_atr",
+            "2d44ead43f.7.1": "/max_stop_abs",
+            "2d44ead43f.7.2": "/min_rr",
+            "2d44ead43f.7.3": "/price_finalization/execution_clearance_price",
+            "2d44ead43f.7.4": "/price_finalization/execution_min_stop_clearance",
+            "2d44ead43f.7.5": "/price_finalization/generation_floor_is_not_execution_floor",
+            "2d44ead43f.7.6": "/price_finalization/generation_min_risk",
+            "2d44ead43f.7.7": "/price_finalization/stop_price_version",
+            "2d44ead43f.7.8": "/price_finalization/stop_rounding"
+          }
+        },
+        {
+          "base": "/computed_evidence/price_action/M15/sell",
+          "refs": {
+            "2d44ead43f.8.0": "",
+            "2d44ead43f.8.1": "/score",
+            "2d44ead43f.8.2": "/bar_time",
+            "2d44ead43f.8.3": "/checks"
+          }
+        },
+        {
+          "base": "/computed_evidence/price_action/M5/sell",
+          "refs": {
+            "2d44ead43f.9.0": "",
+            "2d44ead43f.9.1": "/score",
+            "2d44ead43f.9.2": "/bar_time",
+            "2d44ead43f.9.3": "/checks"
+          }
+        },
+        {
+          "base": "/opportunities/0/strategy_contract",
+          "refs": {
+            "2d44ead43f.10.0": "",
+            "2d44ead43f.10.1": "/analysis_mode",
+            "2d44ead43f.10.2": "/cooldown_seconds",
+            "2d44ead43f.10.3": "/demo_only",
+            "2d44ead43f.10.4": "/max_hold_minutes",
+            "2d44ead43f.10.5": "/one_entry_per_event",
+            "2d44ead43f.10.6": "/target_max_reference_r"
+          },
+          "opportunity_id": "b6a3dfcebe2e04df618cc713",
+          "direction": "sell"
+        },
+        {
+          "base": "/opportunities/0/reference_price",
+          "refs": {
+            "2d44ead43f.11.0": "",
+            "2d44ead43f.11.1": "/price",
+            "2d44ead43f.11.2": "/snapshot_time",
+            "2d44ead43f.11.3": "/tick_time"
+          },
+          "opportunity_id": "b6a3dfcebe2e04df618cc713",
+          "direction": "sell"
+        },
+        {
+          "base": "/opportunities/0/coarse_reference_price",
+          "refs": {
+            "2d44ead43f.12.0": "",
+            "2d44ead43f.12.1": "/bar_time",
+            "2d44ead43f.12.2": "/price"
+          },
+          "opportunity_id": "b6a3dfcebe2e04df618cc713",
+          "direction": "sell"
+        },
+        {
+          "base": "/opportunities/0/local_plan",
+          "refs": {
+            "2d44ead43f.13.0": "",
+            "2d44ead43f.13.1": "/stop_loss",
+            "2d44ead43f.13.2": "/take_profit"
+          },
+          "opportunity_id": "b6a3dfcebe2e04df618cc713",
+          "direction": "sell"
+        },
+        {
+          "base": "/opportunities/0/local_plan_status",
+          "refs": {
+            "2d44ead43f.14.0": "",
+            "2d44ead43f.14.1": "/valid"
+          },
+          "opportunity_id": "b6a3dfcebe2e04df618cc713",
+          "direction": "sell"
+        },
+        {
+          "base": "/opportunities/0/local_plan_feasibility",
+          "refs": {
+            "2d44ead43f.15.0": "",
+            "2d44ead43f.15.1": "/available",
+            "2d44ead43f.15.2": "/quote_time",
+            "2d44ead43f.15.3": "/reference_entry",
+            "2d44ead43f.15.4": "/stop_loss",
+            "2d44ead43f.15.5": "/take_profit"
+          },
+          "opportunity_id": "b6a3dfcebe2e04df618cc713",
+          "direction": "sell"
+        },
+        {
+          "base": "/opportunities/0/structural_blockers",
+          "refs": {
+            "2d44ead43f.16.0": ""
+          },
+          "opportunity_id": "b6a3dfcebe2e04df618cc713",
+          "direction": "sell"
+        },
+        {
+          "base": "/opportunities/0/strategy_evidence/sell",
+          "refs": {
+            "2d44ead43f.17.0": "",
+            "2d44ead43f.17.1": "/score"
+          },
+          "opportunity_id": "b6a3dfcebe2e04df618cc713",
+          "direction": "sell"
+        },
+        {
+          "base": "/opportunities/0/strategy_evidence/sell/evidence",
+          "refs": {
+            "2d44ead43f.18.0": "",
+            "2d44ead43f.18.1": "/action",
+            "2d44ead43f.18.2": "/analysis_checkpoint",
+            "2d44ead43f.18.3": "/atr",
+            "2d44ead43f.18.4": "/bar_behavior",
+            "2d44ead43f.18.5": "/event_id",
+            "2d44ead43f.18.6": "/h1_permitted",
+            "2d44ead43f.18.7": "/position",
+            "2d44ead43f.18.8": "/profile",
+            "2d44ead43f.18.9": "/profile_prior",
+            "2d44ead43f.18.10": "/recent_extremes",
+            "2d44ead43f.18.11": "/regime",
+            "2d44ead43f.18.12": "/server_offset_hours",
+            "2d44ead43f.18.13": "/soft_scoring",
+            "2d44ead43f.18.14": "/style_menu",
+            "2d44ead43f.18.15": "/trade_trigger_confirmed",
+            "2d44ead43f.18.16": "/uncertainty",
+            "2d44ead43f.18.17": "/volume",
+            "2d44ead43f.18.18": "/analysis_checkpoint/m15_bar_time",
+            "2d44ead43f.18.19": "/analysis_checkpoint/m5_bar_time",
+            "2d44ead43f.18.20": "/analysis_checkpoint/observed_utc",
+            "2d44ead43f.18.21": "/analysis_checkpoint/server_offset_hours",
+            "2d44ead43f.18.22": "/analysis_checkpoint/valid_until_utc",
+            "2d44ead43f.18.23": "/atr/latest_bar_time",
+            "2d44ead43f.18.24": "/atr/value",
+            "2d44ead43f.18.25": "/bar_behavior/m5_opposes_action",
+            "2d44ead43f.18.26": "/position/ema21",
+            "2d44ead43f.18.27": "/position/ema_distance_atr",
+            "2d44ead43f.18.28": "/position/lookback_bars",
+            "2d44ead43f.18.29": "/position/recent_range_location",
+            "2d44ead43f.18.30": "/position/reference_bar_time",
+            "2d44ead43f.18.31": "/position/reference_close",
+            "2d44ead43f.18.32": "/recent_extremes/m15_high",
+            "2d44ead43f.18.33": "/recent_extremes/m15_low",
+            "2d44ead43f.18.34": "/recent_extremes/m5_protection_high",
+            "2d44ead43f.18.35": "/recent_extremes/m5_protection_low",
+            "2d44ead43f.18.36": "/regime/adx",
+            "2d44ead43f.18.37": "/regime/recent_close_change_atr",
+            "2d44ead43f.18.38": "/regime/recent_width_atr",
+            "2d44ead43f.18.39": "/soft_scoring/base_score",
+            "2d44ead43f.18.40": "/soft_scoring/raw_score",
+            "2d44ead43f.18.41": "/soft_scoring/score",
+            "2d44ead43f.18.42": "/volume/latest_m15_tick_volume",
+            "2d44ead43f.18.43": "/volume/recent_mean_tick_volume",
+            "2d44ead43f.18.44": "/volume/relative_tick_volume"
+          },
+          "opportunity_id": "b6a3dfcebe2e04df618cc713",
+          "direction": "sell"
+        }
+      ]
+    }
+  },
+  "raw": {
+    "opportunity_id": "b6a3dfcebe2e04df618cc713",
+    "action": "no",
+    "stop_loss": null,
+    "take_profit": null,
+    "reasoning": "M15空头吞没但M5强势多头回收，止损保护超8美元或需放进影线，且EMA偏离-1.87ATR追价风险高，等待更优位置",
+    "trigger_evidence": "M15@1791967500空头吞没(O4157.78跌至C4148.83)，但M5@1791968700强反弹(C4154.72较低点回升7.66)",
+    "invalidation": "M15跌破4144.47或M5持续多头收复4163以上失效空头",
+    "target_basis": "最近M15低点4144.47为初步目标，但当前报价4154.79距离10.32，保护限制下RR不确定",
+    "fact_conflicts": [],
+    "unknowns": [],
+    "wait_basis": [
+      {
+        "code": "hard_limit",
+        "reason": "M5极值保护需覆盖4157.69以上，距参考价4154.79超过8美元硬限制",
+        "evidence_refs": [
+          "2d44ead43f.18.34",
+          "2d44ead43f.11.1",
+          "2d44ead43f.7.1"
+        ]
+      },
+      {
+        "code": "material_counter_evidence",
+        "reason": "M5@1791968700强势多头吞没两根阴线，收4154.72较低点回升7.66，独立反向结构",
+        "evidence_refs": [
+          "2d44ead43f.4.8",
+          "2d44ead43f.18.25",
+          "2d44ead43f.5.2"
+        ]
+      }
+    ],
+    "quality_assessment": {
+      "version": "entry-quality-v4",
+      "direction": "sell",
+      "dimensions": {
+        "structure": {
+          "level": "adequate",
+          "reason": "M15@1791967500空头吞没确认，跌破前K低点，但位于EMA21下方1.87ATR",
+          "evidence_refs": [
+            "2d44ead43f.8.0",
+            "2d44ead43f.3.8",
+            "2d44ead43f.18.27"
+          ]
+        },
+        "trigger": {
+          "level": "weak",
+          "reason": "M15吞没存在，但M5@1791968700强势反向确认不足",
+          "evidence_refs": [
+            "2d44ead43f.8.3",
+            "2d44ead43f.4.8",
+            "2d44ead43f.18.25"
+          ]
+        },
+        "protection": {
+          "level": "weak",
+          "reason": "M5保护高点4157.69加缓冲，距参考价4154.79风险超8美元限制",
+          "evidence_refs": [
+            "2d44ead43f.18.34",
+            "2d44ead43f.11.1",
+            "2d44ead43f.7.1"
+          ]
+        },
+        "target": {
+          "level": "adequate",
+          "reason": "M15低点4144.47提供目标，距参考价4154.79有10.32空间",
+          "evidence_refs": [
+            "2d44ead43f.18.33",
+            "2d44ead43f.11.1"
+          ]
+        },
+        "counter_evidence": {
+          "level": "weak",
+          "reason": "M5@1791968700多头吞没两根阴线收4154.72，独立重大反向结构",
+          "evidence_refs": [
+            "2d44ead43f.4.8",
+            "2d44ead43f.5.2",
+            "2d44ead43f.18.25"
+          ]
+        }
+      },
+      "issues": [
+        {
+          "dimension": "protection",
+          "kind": "reservation",
+          "cause": "hard_limit",
+          "event_group": null,
+          "reason": "M5保护极值4157.69距参考价4154.79超8美元限制",
+          "evidence_refs": [
+            "2d44ead43f.18.34",
+            "2d44ead43f.11.1",
+            "2d44ead43f.7.1"
+          ]
+        },
+        {
+          "dimension": "trigger",
+          "kind": "reservation",
+          "cause": "opposing_structure",
+          "event_group": "m5_1791968700_bull_recovery",
+          "reason": "M5@1791968700多头吞没反向，实体7.66收复低点",
+          "evidence_refs": [
+            "2d44ead43f.4.8",
+            "2d44ead43f.5.2"
+          ]
+        },
+        {
+          "dimension": "counter_evidence",
+          "kind": "reservation",
+          "cause": "opposing_structure",
+          "event_group": "m5_1791968700_bull_recovery",
+          "reason": "M5@1791968700独立多头结构收4154.72，重大反向",
+          "evidence_refs": [
+            "2d44ead43f.4.8",
+            "2d44ead43f.18.25"
+          ]
+        },
+        {
+          "dimension": "structure",
+          "kind": "observation",
+          "cause": "shallow_retrace",
+          "event_group": null,
+          "reason": "价格距M15 EMA21已-1.87ATR，追价风险",
+          "evidence_refs": [
+            "2d44ead43f.18.27",
+            "2d44ead43f.6.3"
+          ]
+        }
+      ]
+    }
+  },
+  "expected_error": "AI-1质量评估重复扣分/意见: /quality_assessment/issues/2 cause=opposing_structure 与/quality_assessment/issues/1重复；同一原因和事件只能声明一次",
+  "note": "Original visible JSON and exact compact successful POST evidence/catalog, reconstructed from source snapshot; no credentials or private thinking content."
+}

@@ -3,6 +3,7 @@
 VERSION = "entry-quality-v3"
 PREVIOUS_VERSION = "entry-quality-v2"
 CURRENT_VERSION = "entry-quality-v4"
+GRADING_ORDER_VERSION = "ai1-issue-first-v1"
 DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_evidence")
 LEVEL_RULES = {
     "strong": {"points": 20, "severity": None, "minimum_reservations": 0},
@@ -152,6 +153,19 @@ LEDGER_POLICY = (
     "同一事实仍可在多个维度reason/evidence_refs描述，不能重复成两条issues。"
     "例如同一M15阴线只有一条opposing_structure意见，可归counter_evidence，structure只描述事实。"
 )
+GRADING_ORDER_POLICY = (
+    "先核对事实和独立风险，先写issues并确定每个cause/event唯一归属，再写dimensions及等级，"
+    "不要先把多项评weak再复制同一事件凑保留意见。"
+    "trigger评本方向实际收盘触发，counter_evidence评独立反向信息。"
+    "例如本方向M15触发已成立、同根M5存在重大反向回收且没有另一项独立触发缺陷："
+    "M5事件只声明一次opposing_structure reservation（通常归counter_evidence）；"
+    "trigger可描述该事实，但须按自身触发证据评级，不因同一反证再次降为weak。"
+    "若触发确有独立不足，应引用该独立事件另列trigger_weakness，不能把同一反证改名绕过去重。"
+    "这不是将cause固定给某维度；归属由事实决定，同cause的独立事件均须保留。"
+    "硬风险保持hard_limit reservation，EMA超限不是shallow_retrace；"
+    "止损风险须按正确方向计算参考价与保护价加缓冲的距离，再与rules.max_stop_abs比较，不得误报超限。"
+    "不得隐藏重大反证、删除事实、将重大改minor或为了契约通过抬等级；应先按独立证据判断。"
+)
 CURRENT_RESERVATIONS_POLICY = (
     "level唯一声明程度：" + "/".join("%s%s" % (level, rule["points"]) for level, rule in LEVEL_RULES.items()) + "；"
     + LEDGER_POLICY
@@ -166,10 +180,11 @@ CURRENT_RESERVATIONS_POLICY = (
 )
 CURRENT_INSTRUCTIONS = (
     "按quality_rubric评五项，不猜胜率、不复制本地分、不抬分。"
-    "quality_assessment={version,direction,dimensions,issues}，version=" + CURRENT_VERSION + "，direction为buy/sell。"
+    "quality_assessment={version,direction,issues,dimensions}，version=" + CURRENT_VERSION + "，direction为buy/sell。"
     + CURRENT_RESERVATIONS_POLICY
     + "仅有轻微意见不剥夺合法提案；硬伤、必要证据缺失、无触发或重要障碍前空间不足则no并列顶层wait_basis。"
     "M15或M5已有确认不能以另一周期未确认声称缺少触发；所有等级理由、意见及等待引用本次真实evidence_refs。"
+    "按quality_rubric.grading_order_policy先写issues再评五项，不能用同一反证给触发和反证两项重复扣分。"
 )
 
 
@@ -177,18 +192,22 @@ def ledger_schema(refs):
     """One issue list and one uniform dimension shape; no grade-dependent arrays."""
     dimension = _object({"level": {"type": "string", "enum": list(LEVEL_RULES)},
                          "reason": {"type": "string"}, "evidence_refs": refs})
+    dimension["description"] = (
+        "在唯一issues清单之后按本项独立证据评级。weak/missing须本项独立reservation，"
+        "不能复制别项已声明的cause/event来撑扣分；本方向触发成立时同一反证不等于触发缺失。")
     branches = []
     for kind, causes in (("reservation", SCORED_CAUSES), ("observation", OBSERVATION_CAUSES)):
         branches.append(_object({
-            "dimension": {"type": "string", "enum": list(DIMENSIONS)},
-            "kind": {"type": "string", "enum": [kind]},
             "cause": {"type": "string", "enum": sorted(causes)},
             "event_group": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "dimension": {"type": "string", "enum": list(DIMENSIONS)},
+            "kind": {"type": "string", "enum": [kind]},
             "reason": {"type": "string"}, "evidence_refs": refs}))
     card = _object({"version": {"type": "string", "enum": [CURRENT_VERSION]},
                     "direction": {"type": "string", "enum": ["buy", "sell"]},
-                    "dimensions": _object({name: {"$ref": "#/$defs/quality_dimension"} for name in DIMENSIONS}),
-                    "issues": {"type": "array", "items": {"anyOf": branches}}})
+                    "issues": {"type": "array", "items": {"anyOf": branches},
+                               "description": "先声明每个cause/event的唯一归属，不按五个维度复制同一条意见。"},
+                    "dimensions": _object({name: {"$ref": "#/$defs/quality_dimension"} for name in DIMENSIONS})})
     card["description"] = LEDGER_POLICY
     return card, dimension
 
@@ -255,7 +274,8 @@ def decode_ledger(card):
 def ledger_rubric_fields():
     fields = rubric_fields()
     fields.update(version=CURRENT_VERSION, reservations_policy=CURRENT_RESERVATIONS_POLICY,
-                  issue_layout="single_ledger_unique_dimension_owner")
+                  issue_layout="single_ledger_unique_dimension_owner",
+                  grading_order_version=GRADING_ORDER_VERSION, grading_order_policy=GRADING_ORDER_POLICY)
     return fields
 
 

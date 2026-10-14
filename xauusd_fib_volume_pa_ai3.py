@@ -26,6 +26,7 @@ from strategies.evidence import _rounded_number, _bar_payload, _extreme_bar, bar
 from strategies.citations import (VERSION as AI1_CITATION_VERSION, MISSING as _MISSING_EVIDENCE,
                                  build_catalog, catalog_bindings, pointer_value, resolve_references, scope_allowed)
 from strategies.quality import (CURRENT_VERSION as QUALITY_VERSION, VERSION as DIMENSIONAL_QUALITY_VERSION,
+                                GRADING_ORDER_VERSION as QUALITY_GRADING_ORDER_VERSION,
                                 PREVIOUS_VERSION as PREVIOUS_QUALITY_VERSION,
                                 LEVEL_POINTS as QUALITY_LEVEL_POINTS, DIMENSIONS as QUALITY_DIMENSIONS,
                                 CAUSES as QUALITY_CAUSES, MINOR_CAUSES as QUALITY_MINOR_CAUSES,
@@ -1396,16 +1397,16 @@ def ai1_json_template():
             "reasoning": "<本次结论>", "trigger_evidence": "<实际触发或缺失>",
             "invalidation": "<失效条件>", "target_basis": "<目标依据>", "fact_conflicts": [], "unknowns": [],
             "wait_basis": [{"code": "missing_trigger", "reason": "<实际等待条件>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}],
-            "quality_assessment": {"version": QUALITY_VERSION, "direction": "buy", "dimensions": {
+            "quality_assessment": {"version": QUALITY_VERSION, "direction": "buy", "issues": [], "dimensions": {
                 name: {"level": "adequate", "reason": "<本项证据结论>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}
-                for name in QUALITY_DIMENSIONS}, "issues": []}}
+                for name in QUALITY_DIMENSIONS}}}
 
 
 AI1_INSTRUCTIONS += (
     "严格输出一个完整JSON对象，闭合所有括号，不输出Markdown或分析过程。wait_basis必须在顶层，与quality_assessment并列，"
-    "quality_assessment内部只有version/direction/dimensions/issues；五项统一只写level/reason/evidence_refs，意见只写在issues。以下仅示范层级，示例方向/等级/理由/路径不可复用，须按实际证据重填；"
+    "quality_assessment按version/direction/issues/dimensions顺序输出；五项统一只写level/reason/evidence_refs，意见只写在issues。以下仅示范层级，示例方向/等级/理由/路径不可复用，须按实际证据重填；"
     "有交易提案时wait_basis为空数组。按模板先写顶层wait_basis再写quality_assessment，末尾依次闭合最后维度、dimensions、quality_assessment、顶层对象。"
-    "先声明每条意见的唯一dimension和kind，再核对五个等级，意见清单为空也写issues=[]；不输出五套reservations/observations。"
+    "先写issues，先核对cause/event唯一，再声明dimension和kind，最后按quality_rubric.grading_order_policy评五项，意见清单为空也写issues=[]；不输出五套reservations/observations。"
     "输出前核对括号、字段层级、必填数组及意见唯一归属，不复制同一事实的意见条目，不改交易判断或等级来满足格式。格式模板："
     + json.dumps(ai1_json_template(), ensure_ascii=False, separators=(",", ":"))
 )
@@ -1552,7 +1553,8 @@ def normalized_chat_usage(result):
     counters = [(name, number(value)) for name, value in reasoning_fields if number(value) is not None]
     reasoning = counters[0][1] if counters else None
     inconsistent = len({value for _, value in counters}) > 1 or (
-        reasoning is not None and output is not None and reasoning > output)
+        reasoning is not None and output is not None and (
+            reasoning > output or reasoning == output and bool(extract_chat_text(result).strip())))
     reasoning_info = {"reasoning_tokens": reasoning,
                       "reasoning_source": counters[0][0] if counters else None,
                       "reasoning_usage_inconsistent": inconsistent,
@@ -1927,10 +1929,15 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
             record_attempt("truncated", result, response)
             usage = normalized_chat_usage(result) or {}
             stats = response_content_stats(result)
+            non_reasoning = usage.get("non_reasoning_output_tokens")
+            if usage.get("reasoning_usage_inconsistent"):
+                non_reasoning = "未知（上游计量冲突）"
+            elif non_reasoning is None:
+                non_reasoning = "未知"
             raise AIRequestError(role, "输出达到token上限，拒绝不完整决策且不重复付费请求：max_tokens=%s effort=%s requested_effort=%s thinking=%s output=%s 思考token=%s 非思考输出token=%s 正文字符=%s 思考块=%s；思考会计费，上限是否包括思考取决于模型/中转，effort不是硬预算，查看ai_usage，本地护盘继续"
                                  % (data[token_field], sent_effort or "omitted", this_effort,
                                     thinking_mode or "provider_default", usage.get("output_tokens"),
-                                    usage.get("reasoning_tokens"), usage.get("non_reasoning_output_tokens"),
+                                    usage.get("reasoning_tokens"), non_reasoning,
                                     stats["visible_text_chars"], stats["thinking_blocks"]))
         usage = normalized_chat_usage(result) or {}
         reported_output = usage.get("output_tokens")
@@ -3390,7 +3397,8 @@ class ThreeAITrader(base.FibVolumePATrader):
             % ("entry-evidence-v5", AI_DECISION_SNAPSHOT_DIR,
                {s.id: s.entry_reference for s in strategies.strategies if s.enabled})
         )
-        base.logger.info("AI质量评分=%s，等级分值=%s，门槛=%s（非胜率）", QUALITY_VERSION, QUALITY_LEVEL_POINTS, AI_CONFIDENCE)
+        base.logger.info("AI质量评分=%s，意见生成=%s，等级分值=%s，门槛=%s（非胜率）",
+                         QUALITY_VERSION, QUALITY_GRADING_ORDER_VERSION, QUALITY_LEVEL_POINTS, AI_CONFIDENCE)
         base.logger.info("AI-1证据引用=%s 每次POST声明快照绑定目录，ID解码后严格核候选隔离和事实路径，不修补错误旧引用",
                          AI1_CITATION_VERSION)
         base.logger.info("止损价格=%s BUY向下/SELL向上量化，严格保留M5极值缓冲与止损上限", base.STOP_PRICE_VERSION)

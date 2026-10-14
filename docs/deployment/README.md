@@ -13,6 +13,9 @@
 # 三AI黄金策略服务器部署
 
 此部署包的代码提交以 `MANIFEST.json` 为准，证据版本 `entry-evidence-v5`，评分版本 `entry-quality-v4`，行情刷新版本 `request-freshness-v2`，JSON契约版本 `response-contract-v3`。
+
+2026-10-14的`ai1-issue-first-v1`调整AI-1的Schema、模板与rubric，先输出唯一意见清单，再按独立证据评五项，避免同一反向事件同时撑触发和反证两项扣分；仍是v4，重复坏卡继续拒绝。同时修正“报告全部输出为思考，却有可见正文”的计量诊断，正文token显示未知。完整覆盖AI脚本及strategies后自行重启，保留服务器最新.env与状态；本次未改模型、档位、超时或上限。若自行将AI-1上限调至6144，费用按实际用量计，长请求可能增加费用与等待。详见[验证与费用分析](../experiments/2026-10-14-ai1-issue-first-validation.md)。
+
 运行入口是 `xauusd_fib_volume_pa_ai3.py`，它会导入同目录的 `xauusd_fib_volume_pa_trader.py` 和完整 `strategies/` 包。
 
 2026-10-14评分显示修订：覆盖两个黄金主脚本并自行重启后，开仓及DRY-RUN分别显示所选方案的AI-1质量分和本地BUY/SELL粗筛分；纯本地入口只显示本地粗筛分。平仓通知使用相同标签，缺少开仓评分时继续显示未知。自主模式的审核通知明确本地阈值仅供参考。本次仅修显示，保留服务器自己的`.env`、日志与三个持仓状态文件。

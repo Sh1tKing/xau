@@ -254,7 +254,10 @@ class LedgerEntryChainTests(unittest.TestCase):
                 pack = json.loads(request["messages"][0]["content"].split("\n", 1)[1])
                 packs.append(pack)
                 self.assertEqual(pack["quality_rubric"]["version"], ai.QUALITY_VERSION)
+                self.assertEqual(pack["quality_rubric"]["grading_order_version"], quality.GRADING_ORDER_VERSION)
                 schema = ai.response_json_schema("AI-1", pack)
+                fields = request["output_config"]["format"]["schema"]["properties"]["quality_assessment"]["properties"]
+                self.assertLess(list(fields).index("issues"), list(fields).index("dimensions"))
                 self.assertEqual(request["output_config"]["format"]["schema"], schema)
                 if failover and len(packs) == 1:
                     raise ai.requests.ReadTimeout("offline primary timeout")
