@@ -178,6 +178,28 @@ class CloseSettlementTests(unittest.TestCase):
         self.assertIn('本次净盈亏: -$4.70', self.text())
         self.assertNotIn('11.94', self.text())
 
+    def test_server_stop_case_uses_fill_prices_and_settlement_instead_of_cached_quote(self):
+        # Prices, deal IDs and profit are from the 20:29:36 server settlement log.
+        # Deliberately inject a submitted quote and unrelated last floating loss
+        # into the cache; neither may replace the actual broker fill history.
+        ticket = 608273594
+        snapshot = base.PositionSnapshot(ticket, ticket, base.SYMBOL, 'SELL', .01,
+                                         4149.66, 4155.26, 4139.6, -4.49, 20800, 10000., 10020.)
+        rows = [deal(471740646, base.mt5.DEAL_ENTRY_IN, position_id=ticket, price=4149.52),
+                deal(471750677, base.mt5.DEAL_ENTRY_OUT, position_id=ticket,
+                     price=4155.26, profit=-5.74, reason=base.mt5.DEAL_REASON_SL)]
+        self.trader.position_snapshots[ticket] = snapshot
+        with patch.object(base.mt5, 'history_deals_get', return_value=rows) as history:
+            self.trader.sync_position_close_notifications()
+        history.assert_called_once_with(position=ticket)
+        self.assertIn('本次净盈亏: -$5.74', self.text())
+        self.assertIn('开仓价 → 平仓价: 4149.52 → 4155.26', self.text())
+        self.assertIn('平仓原因: 止损触发', self.text())
+        self.assertIn('成交: 471740646,471750677', self.text())
+        self.assertNotIn('4149.66', self.text())
+        self.assertNotIn('-$4.49', self.text())
+        self.assertNotIn('未知', self.text())
+
     def test_unavailable_or_nonfinite_account_fields_are_omitted(self):
         self.account.balance = float('nan')
         self.account.equity = None
