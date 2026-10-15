@@ -4,7 +4,7 @@
 AI-1 proposes a direction from the local feature pack.
 AI-2 may only approve or reject clear defects.
 AI-3 may hold, tighten the stop, or close. It cannot widen a stop.
-Python still enforces reward/risk, H1/M15 alignment, the configured stop cap, and the local guardian.
+Python still enforces versioned direction permission, reward/risk, the stop cap, and the local guardian.
 """
 
 import copy
@@ -128,6 +128,9 @@ def loaded_code_signature():
                      os.path.join(BASE_DIR, "strategies", "profit_guard.py"),
                      os.path.join(BASE_DIR, "strategies", "settlement.py"),
                      os.path.join(BASE_DIR, "strategies", "news_calendar.py"),
+                     os.path.join(BASE_DIR, "strategies", "direction.py"),
+                     os.path.join(BASE_DIR, "strategies", "recent_trades.py"),
+                     os.path.join(BASE_DIR, "strategies", "adaptive.py"),
                      os.path.join(BASE_DIR, "strategies", "calendars", "us_major_events.json"),
                      os.path.join(BASE_DIR, "strategies", "lifecycle.py"),
                      os.path.join(BASE_DIR, "strategies", "framework.py")):
@@ -149,16 +152,16 @@ AI1_INSTRUCTIONS = (
     "你是XAUUSD分析师AI-1，自主提出buy/sell/no；不看账户、不定手数、不下单。"
     "按session和strategy_contract分析；parameters/ai_rules.entry定义本次策略，strategy_evidence是同版本评分事实。"
     "当前方向的blockers是策略硬条件；本地低分或no不剥夺自主提出合法方案的权利。"
-    "方向仅H1，M15管本策略结构/量能/价格行为，M5只管时机；H4不否决，M15暂反向可以是回撤。"
-    "H1同向只是方向许可，还须策略有效、真实收盘证据及目标空间；analysis_mode允许原始K线自主触发证据，不要求固定检测器确认；analysis_checkpoint只是分析及去重范围，不是交易触发。引用computed_evidence和strategy_evidence的事实、bar_time/price，禁止另算或编造输入已提供的指标。"
+    "方向按契约direction_policy：缺省/h1-only-v1沿用H1许可；h1-or-m15-structure-v1按Python方向许可比较H1背景与M15结构，合法逆H1本身不是硬伤。M5负责时机/已确认失败证据，H4不否决。"
+    "H1同向也不能忽略相反有效M15结构，须核所选direction_permission；还须策略有效、真实收盘证据及目标空间。analysis_mode允许原始K线自主触发证据，不要求固定检测器确认；analysis_checkpoint和方向结构事件只是分析范围/许可，不是交易触发。引用computed_evidence和strategy_evidence的事实、bar_time/price，禁止另算或编造输入已提供的指标。"
     "事实冲突写fact_conflicts并no，必要的OHLC/来源/时效/保护/目标证据缺失写unknowns并no；外部新闻日历未知只作信息上下文，不自动迫使no，不猜测。"
     "涉及Fib时按给定容差/recent_probe/confirmation_extension，不因略越38.2/61.8否决。"
     "边缘收盘失守、独立反向结构收盘确认或明确形态失效才重判。"
-    "目标须有数据依据及中间障碍，不为凑RR延远；首个未克服的重要障碍前不足1.5RR或无收盘触发则no并写等待条件。"
+    "目标须有数据依据及中间障碍，不为凑RR延远；解释为何合理穿越障碍或在其前止盈，不把每根影线机械升级为首障碍RR硬门；无合理目标空间或无收盘触发则no并写等待条件。"
     "量能只加减分，普通/弱量不单独否决，不编造放量，使用给定基线/比值。"
     f"M5拒绝/吞没可确认时机；止损须保护命名结构、覆盖最近3根M5极值+缓冲，距参考价≤{SL_CAP}美元，不能放进影线。"
     "M15远影线不自动否定合格M5保护；结构止损放不下则no。"
-    f"H1不许可、止损>{SL_CAP}美元、偏离M15 EMA21>1.5ATR、价格方向错或RR<1.5均no。"
+    f"所选版本方向不许可、止损>{SL_CAP}美元、偏离M15 EMA21>1.5ATR、价格方向错或RR<1.5均no。"
     "输出一个紧凑JSON，字段action、stop_loss、take_profit、reasoning、trigger_evidence、invalidation、target_basis、fact_conflicts、unknowns、quality_assessment、wait_basis。"
     "SL/TP为绝对价格。reasoning用≤140汉字概括setup/失效/目标/最强反证；证据字段各≤60汉字，含必要周期/时间/价位，未知明示。"
 )
@@ -166,7 +169,8 @@ AI2_INSTRUCTIONS = (
     "你是独立审核官AI-2，只APPROVE/REJECT，不提新交易、不重新评分。审核proposal及python_finalization最终价格，不审核已替换的AI1价格。"
     "按market_evidence.strategy_contract.ai_rules.review独立核对同版本策略硬条件和strategy_evidence，不复用其他策略条件。"
     f"仅明确硬伤REJECT：违反本策略硬条件、"
-    f"H1不许可、SL/TP缺失或方向错、止损>{SL_CAP}美元、追价>1.5ATR、RR<1.5、必要数据缺失或订单自相矛盾。"
+    f"所选版本方向不许可、SL/TP缺失或方向错、止损>{SL_CAP}美元、追价>1.5ATR、RR<1.5、必要数据缺失或订单自相矛盾。"
+    "direction_policy缺省/h1-only-v1保留原H1规则；h1-or-m15-structure-v1以原direction_permission和direction_context核结构、失败证明及规范保护，合法逆H1本身不能REJECT。不得换方向、事件、支点或重写固定SLTP。"
     "根据完整market_evidence原始K线和computed_evidence独立核实，不信任AI1解释。"
     "setup明确失效且无新结构确认、回踩/放量被数据反驳须指出bar_time/price/source；影线收回不算收盘破坏。"
     "涉及Fib时用给定容差/recent_probe/confirmation_extension；M5可确认时机不能改方向；合格M5保护不因远处M15影线而否决。"
@@ -176,6 +180,9 @@ AI2_INSTRUCTIONS = (
     "reasoning≤120汉字，缺陷只列独立硬伤及必要时间/价格/来源，不复述行情和评分卡。"
 )
 AI1_INSTRUCTIONS += (
+    "共享direction_context仅是来源事实，单候选direction_permission才是该方向许可；一次请求比较支持与最强反证，不能借另一个候选的计划。"
+    "规范local_pullback保护时理由只论这次已确认回踩/反抽的延续，不声称原起点受完整保护；原起点或更远真实保护可以更保守，不能选更近点来塞入SL8。"
+    "recent_trades只呈现已完整结算的全部方向盈亏及覆盖范围，作为反思事实，不能自动按亏损次数翻方向、提高单侧阈值或追损。"
     "输入存在opportunities时一次自主选择一个opportunity_id，包括no也必须指明评估候选。动作及质量方向绑定该候选，"
     "只引用自身/opportunities/原索引/下证据或共享OHLC/price_action/patterns，不能借用其他候选或本地赢家别名。"
     "本地分低或参考方案失败不剥夺自主提出安全方案的权限；patterns仅几何与位置事实，不是吞没硬门或首轮趋势判断。"
@@ -456,6 +463,9 @@ def build_computed_entry_evidence(df_m15, df_h1, df_m5, local_result, fib, atr, 
     details = local_result.details or {}
     h1_trend = base.trend_from_ema(df_h1, 50)
     candidate_actions = ["buy"] if h1_trend == "bull" else ["sell"] if h1_trend == "bear" else ["buy", "sell"]
+    contracts = [details.get("strategy_contract", {})] + [item.get("strategy_contract", {}) for item in details.get("opportunities", [])]
+    if any(base.direction_policy_active(contract) for contract in contracts):
+        candidate_actions = ["buy", "sell"]
     setup = details.get("setup", "")
     m5_atr = base.calculate_atr(df_m5)
     timing = {}
@@ -592,6 +602,8 @@ def role_instructions(role, contracts):
     extra = ""
     if role == "AI-3" and any(contract.get("analysis_mode") for contract in contracts):
         extra = "\nanalysis_checkpoint有效期及消费只限制新入场；开仓后检查点过期或已消费本身不是交易失效，不据此平仓。自主持仓原时间节点只触发复核，原始打法是否失效必须另用真实闭合证据判断；时间本身不能作close理由。"
+    if role == "AI-3" and any(base.direction_policy_active(contract) for contract in contracts):
+        extra += "\n按这笔仓保存的原direction_permission/结构事件/保护依据和实际成交判断；逆H1是入场时已知事实，不凭当前bear/bull机械平仓。入场许可TTL到期不代表持仓失效，不用新契约重建旧仓；真实新结构变化由你判断，原SLTP及profit-floor-v2与holding-review-v1继续。"
     return generic + extra + "\n本次来源绑定的策略角色规则：" + json.dumps(rules, ensure_ascii=False)
 
 
@@ -606,8 +618,13 @@ def analysis_scope_keys(pack):
         if not item.get("strategy_contract", {}).get("analysis_mode"):
             continue
         checkpoint = item["strategy_evidence"][item["action"]]["evidence"]["analysis_checkpoint"]
-        scopes.add((item["strategy_contract"]["id"], item["strategy_fingerprint"],
-                    checkpoint["m5_bar_time"], checkpoint["m15_bar_time"]))
+        if base.direction_policy_active(item["strategy_contract"]):
+            from strategies.adaptive import checkpoint_order_scope
+            scopes.add(("direction-request-scope-v1", checkpoint_order_scope(
+                item["strategy_evidence"][item["action"]]["evidence"])))
+        else:
+            scopes.add((item["strategy_contract"]["id"], item["strategy_fingerprint"],
+                        checkpoint["m5_bar_time"], checkpoint["m15_bar_time"]))
     return scopes
 
 
@@ -672,7 +689,8 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
         ),
         "quality_rubric": quality_rubric(contract.get("analysis_mode", False)),
         "rules": {
-            "h1_sets_direction": True,
+            "h1_sets_direction": not base.direction_policy_active(contract),
+            "direction_policy": copy.deepcopy(contract.get("direction_policy", {"version": "h1-only-v1"})),
             "m15_opposite_is_pullback": contract.get("regime_filter", "pullback") == "pullback",
             "h4_is_not_a_veto": True,
             "pullback_tight_range_is_no": contract.get("regime_filter", "pullback") == "pullback",
@@ -729,6 +747,22 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
                     item["local_plan"]["stop_loss"], item["local_plan"]["take_profit"], live, atr, pack["m15_ema21"])
         if any(item["strategy_contract"].get("analysis_mode") for item in pack["opportunities"]):
             pack["rules"]["price_finalization"]["reference"] = "selected opportunity successful AI1 request live Ask for BUY / Bid for SELL"
+        direction_candidates = [item for item in pack["opportunities"] if base.direction_policy_active(item["strategy_contract"])]
+        if direction_candidates:
+            from strategies.direction import public_context
+            contexts = []
+            for item in direction_candidates:
+                evidence = item["strategy_evidence"][item["action"]]["evidence"]
+                error = base.direction_quote_error(item["action"], item["strategy_contract"], evidence, pack["live_quote"]["bid"])
+                if error:
+                    raise MarketSnapshotError("请求报价方向复核拒绝: " + error)
+                contexts.append(public_context(evidence["host_verified_direction"]["context"]))
+            if any(context != contexts[0] for context in contexts[1:]):
+                raise MarketSnapshotError("同请求候选方向公共来源不一致")
+            pack["direction_context"] = contexts[0]
+            pack["direction_timeframe"] = "H1 background / closed M15 structure"
+            pack["rules"]["h1_sets_direction"] = False
+            pack["rules"]["direction_policy"] = copy.deepcopy(direction_candidates[0]["strategy_contract"]["direction_policy"])
         # Full shared source frames once, including region reconstruction/ATR warmup.
         source_count = max([32] + [int(item["strategy_contract"].get("parameters", {}).get("pivot_lookback", 0))
                                   + int(item["strategy_contract"].get("parameters", {}).get("atr_period", 14))
@@ -743,6 +777,30 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
 def compact_market_pack(pack):
     """Drop only reconstructible candle math and exact duplicate metadata."""
     result = copy.deepcopy(pack)
+    def hide_direction_attestation(value):
+        if isinstance(value, dict):
+            value.pop("host_verified_direction", None)
+            for child in value.values():
+                hide_direction_attestation(child)
+        elif isinstance(value, list):
+            for child in value:
+                hide_direction_attestation(child)
+    hide_direction_attestation(result)
+    def compact_frozen_direction(value):
+        if isinstance(value, dict):
+            shared = value.get("direction_context")
+            assessments = value.get("strategy_evidence")
+            if isinstance(shared, dict) and isinstance(assessments, dict):
+                for assessment in assessments.values():
+                    evidence = assessment.get("evidence", {}) if isinstance(assessment, dict) else {}
+                    if evidence.get("direction_context") == shared:
+                        evidence.pop("direction_context", None)
+            for child in value.values():
+                compact_frozen_direction(child)
+        elif isinstance(value, list):
+            for child in value:
+                compact_frozen_direction(child)
+    compact_frozen_direction(result)  # One exact shared fact copy, including saved AI3 entry context.
     if "opportunities" in result:
         # Execution keeps the full host snapshot. Requests expose one selected event,
         # not nested alternative event payloads or duplicate full host windows.
@@ -751,6 +809,7 @@ def compact_market_pack(pack):
                 value.pop("host_verified_region", None)
                 value.pop("host_verified_entry_event", None)
                 value.pop("host_verified_analysis_checkpoint", None)
+                value.pop("host_verified_direction", None)
                 for diagnostic in value.get("candidates", []) if isinstance(value.get("candidates"), list) else []:
                     if isinstance(diagnostic, dict):
                         diagnostic.pop("candidate", None)
@@ -762,6 +821,12 @@ def compact_market_pack(pack):
         for candidate in result["opportunities"]:
             if candidate:
                 candidate["strategy_evidence"] = {candidate["action"]: candidate.get("strategy_evidence", {}).get(candidate["action"], {})}
+                evidence = candidate["strategy_evidence"].get(candidate["action"], {}).get("evidence", {})
+                if "direction_context" in result:
+                    evidence.pop("direction_context", None)
+                permission = evidence.get("direction_permission")
+                if isinstance(permission, dict):
+                    permission.pop("proof_digest", None)
             plan = candidate.get("local_plan", {})
             details = plan.get("details", {})
             plan["details"] = {key: value for key, value in details.items()
@@ -966,11 +1031,11 @@ def quality_rubric(analysis_mode=False):
         **quality_rubric_fields(),
         "meaning": "entry_quality_not_win_probability",
         "dimensions": {
-            "structure": ("按真实原始K线、位置及H1方向评价自主打法有效性，分盘菜单是参考；不要求固定Fib/建箱/首次事件。" if analysis_mode else "按strategy_contract评价本时段策略位置及有效性；满足该策略结构条件为adequate。Fib策略用现有容差/探入；浅回撤本身不是结构缺失。"),
+            "structure": ("按真实原始K线、位置及契约版本方向许可评价自主打法有效性；新版本H1是背景，M15结构及所选direction_permission决定许可，合法逆H1本身不作硬伤。分盘菜单是参考，不要求固定Fib/建箱/首次事件。" if analysis_mode else "按strategy_contract评价本时段策略位置及有效性；满足该策略结构条件为adequate。Fib策略用现有容差/探入；浅回撤本身不是结构缺失。"),
             "trigger": ("真实原始已收盘K线所证自主打法触发可为adequate，无需固定检测器；analysis_checkpoint本身不能证明触发。" if analysis_mode else "本地M15或M5已收盘规则或strategy_evidence.closed_trigger命中可为adequate；更明确独立确认可为strong，不强制双周期。颜色、弱量不否定false_break。"),
-            "protection": "止损保护命名结构且覆盖最近3根M5极值和缓冲、距离不超过上限为adequate；不能只因相对ATR较紧就认定无保护。",
-            "target": "目标有给定依据、重要未克服障碍之前有空间且有效报价RR至少1.5为adequate；刚过1.5无需在其他项重复扣分。",
-            "counter_evidence": "没有可核实反向证据为strong；普通量用volume、浅回撤用shallow_retrace放observations；H1旧影线、单根M5反向、M15暂反向或未确认反转仅是minor，可用opposing_structure放observations；仅有这些轻微观察评adequate。独立及时的重大反向结构须放reservations并评weak。",
+            "protection": "止损保护命名结构、新版本的规范anchor及最近3根M5极值和原缓冲、距离不超过上限为adequate；不能用更近保护塞入SL8，不能只因相对ATR较紧就认定无保护。",
+            "target": "目标有给定依据、说明重要反向障碍及合理穿越或障碍前止盈、有效报价RR至少1.5为adequate；每根影线不机械升级首障碍硬门，刚过1.5无需在其他项重复扣分。",
+            "counter_evidence": "没有可核实反向证据为strong；普通量用volume、浅回撤用shallow_retrace放observations；H1旧影线、单根M5反向、未确认M15反转仅是minor，可用opposing_structure放observations。区分这些与机器已确认的相反结构及方向blockers；已知逆H1背景不自动重大扣分。仅有轻微观察评adequate；独立及时的重大反向结构须放reservations并评weak，同cause/event只声明一次。",
         },
         "proposal_policy": "硬伤或必要证据缺失则no；已成立的候选仅有minor意见时给出提案，最终分数及Python/AI2决定是否放行。不要将不确定未来获利当成必要字段缺失。",
         "quote_policy": ("自主候选reference_price是本次成功POST live_quote的BUY Ask/SELL Bid；coarse_reference_price与local_plan_feasibility保留原本地M15方案诊断。AI2/Python再核新报价。" if analysis_mode else "reference_price与live_quote来自不同时间，差异本身不是事实冲突；用live_quote核实当前可行性，AI2/Python还会复核执行。"),
@@ -999,9 +1064,17 @@ def ai1_verified_risk_notes(payload, pack):
     if "opportunities" in pack and opportunity_selection(payload, pack)[1]:
         return []
     notes = []
-    permitted = "buy" if pack.get("h1_trend") == "bull" else "sell" if pack.get("h1_trend") == "bear" else None
-    if permitted and direction != permitted:
-        notes.append("H1方向不许可%s" % direction)
+    selection, _ = opportunity_selection(payload, pack)
+    candidate = selection[1] if selection else pack
+    contract = candidate.get("strategy_contract", {})
+    if base.direction_policy_active(contract):
+        permission = candidate.get("strategy_evidence", {}).get(direction, {}).get("evidence", {}).get("direction_permission", {})
+        if permission.get("allowed") is not True:
+            notes.append("当前版本方向不许可%s: %s" % (direction, permission.get("reason", "缺少公开方向事实")))
+    else:
+        permitted = "buy" if pack.get("h1_trend") == "bull" else "sell" if pack.get("h1_trend") == "bear" else None
+        if permitted and direction != permitted:
+            notes.append("H1方向不许可%s" % direction)
     try:
         quote = pack.get("live_quote", {})
         bid, ask, atr, ema = (float(quote["bid"]), float(quote["ask"]), float(pack["atr"]), float(pack["m15_ema21"]))
@@ -2148,10 +2221,11 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
             return None, "Python拒绝: 宽震荡不在下沿"
         if action == "sell" and float(regime_location) < 1.0 - base.WIDE_EDGE:
             return None, "Python拒绝: 宽震荡不在上沿"
-    if not base.trends_support(action, h1_trend, m15_trend):
-        return None, "Python拒绝: %s 与H1不同向(H1=%s, M15=%s)" % (
-            action.upper(), h1_trend, m15_trend
-        )
+    region_evidence = (strategy_evidence or {}).get(action, {}).get("evidence", {})
+    direction_error = base.direction_entry_error(action, h1_trend, m15_trend, strategy_contract, region_evidence)
+    if direction_error:
+        return None, "Python拒绝: " + direction_error
+    direction_active = base.direction_policy_active(strategy_contract)
 
     try:
         stop_loss = float(payload.get("stop_loss") or 0)
@@ -2165,7 +2239,6 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
                           or abs(entry-stop_loss) > base.MAX_SL_ABS):
         return None, "Python拒绝: 自主AI止损止盈无效或止损超过8美元，不能补造方案"
     requested_take_profit = take_profit
-    region_evidence = (strategy_evidence or {}).get(action, {}).get("evidence", {})
     is_region = (strategy_contract or {}).get("stop_reference") == "region"
     if is_region:
         try:
@@ -2197,7 +2270,16 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
         stop_loss, take_profit = 0.0, 0.0
 
     entry_price_source = "confirmed_closed_m5_close" if (strategy_contract or {}).get("entry_reference") == "closed_m5" else "previous_closed_m15_close"
-    if (strategy_contract or {}).get("stop_reference") == "m5_extreme":
+    if direction_active:
+        fib = None
+        try:
+            required_sl = base.required_direction_stop(action, entry, atr, df_m5, strategy_contract, region_evidence)
+        except (base.StrategyError, TypeError, ValueError) as exc:
+            return None, "Python拒绝方向保护: " + str(exc)
+        if stop_loss <= 0 or (action == "buy" and stop_loss > required_sl) or (action == "sell" and stop_loss < required_sl):
+            stop_loss = required_sl
+        stop_loss, take_profit = clamp_proposal(action, entry, stop_loss, requested_take_profit, atr, target_r)
+    elif (strategy_contract or {}).get("stop_reference") == "m5_extreme":
         fib = None
         extreme = base.recent_m5_extreme(df_m5, action)
         if not base.m5_extreme_on_stop_side(action, entry, extreme):
@@ -2231,7 +2313,7 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
 
     if not prices_are_valid(action, entry, stop_loss, take_profit):
         return None, "Python拒绝: 止损止盈方向非法或超过 %.2f 美元上限" % base.MAX_SL_ABS
-    guarded_sl, guarded_tp, guard_note = (stop_loss, take_profit, "") if is_region else base.reject_inside_m5_wick(
+    guarded_sl, guarded_tp, guard_note = (stop_loss, take_profit, "") if is_region or direction_active else base.reject_inside_m5_wick(
         action, entry, stop_loss, take_profit, atr, fib, df_m5, target_r=target_r
     )
     if guarded_sl <= 0 and guard_note:
@@ -2249,8 +2331,9 @@ def finalize_ai_proposal(payload, entry, atr, h1_trend, m15_trend, fib, min_conf
         blocked, m5_text = base.m5_blocks_entry(df_m5, action)
         if blocked:
             return None, "Python拒绝: " + m5_text
-    approved, review_text = base.review_entry(
-        action, entry, stop_loss, take_profit, h1_trend, m15_trend, base.MIN_REWARD_RISK, base.ALIGN_HARD_FILTER
+    approved, review_text = base.review_strategy_entry(
+        action, entry, stop_loss, take_profit, h1_trend, m15_trend, base.MIN_REWARD_RISK, base.ALIGN_HARD_FILTER,
+        strategy_contract, region_evidence
     )
     full_reason = ("AI-1: %s。%s" % (reasoning, review_text)) if reasoning else review_text
     if not approved:
@@ -2496,6 +2579,8 @@ class ThreeAITrader(base.FibVolumePATrader):
             "strategy_contract": copy.deepcopy(details.get("strategy_contract")),
             "strategy_fingerprint": details.get("strategy_fingerprint"),
             "strategy_evidence": copy.deepcopy(details.get("strategy_evidence", details.get("strategy_assessments"))),
+            "direction_context": copy.deepcopy(details.get("direction_context")),
+            "direction_permission": copy.deepcopy(details.get("direction_permission")),
             "entry_reasoning": result.reasoning,
             "local_action_before_ai": details.get("local_action_before_ai"),
             "local_confidence": details.get("local_confidence"),
@@ -2567,6 +2652,7 @@ class ThreeAITrader(base.FibVolumePATrader):
             raise MarketSnapshotError("研究策略本轮无合法首次事件，不请求AI: " + local_result.reasoning)
         pack, fib, atr, price = build_feature_pack(
             df_m15, df_h1, df_m5, local_result, quote=self.get_live_quote(), decision_id=decision_id)
+        pack["recent_trades"] = self.recent_trade_context()
         pack["snapshot_id"] = request_trace_id("%s-ai1" % decision_id)
         return df_m15, df_h1, df_m5, local_result, pack, fib, atr, price
 
@@ -2946,6 +3032,19 @@ class ThreeAITrader(base.FibVolumePATrader):
                 def before_ai1_post():
                     nonlocal scope_claimed
                     self.ensure_entry_news_ready(news_started)
+                    if any(base.direction_policy_active(item["strategy_contract"]) for item in pack.get("opportunities", [])):
+                        self.ensure_strategy_current(pack)
+                        self.ensure_review_bars_current(pack["bar_closure"])
+                        current_quote = self.get_live_quote()
+                        for item in pack["opportunities"]:
+                            account_error = self.direction_account_error(
+                                item["strategy_evidence"][item["action"]]["evidence"], base.mt5.account_info())
+                            if account_error:
+                                raise MarketSnapshotError("AI-1发送前" + account_error)
+                            error = base.direction_quote_error(item["action"], item["strategy_contract"],
+                                item["strategy_evidence"][item["action"]]["evidence"], current_quote["bid"])
+                            if error:
+                                raise MarketSnapshotError("AI-1发送前方向复核拒绝: " + error)
                     first_claim = not scope_claimed
                     previous_scopes = getattr(self, "_analysis_request_scopes", set()).copy()
                     if not scope_claimed:
@@ -3102,6 +3201,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "strategy_fingerprint": pack.get("strategy_fingerprint"),
                     "strategy_contract": copy.deepcopy(pack.get("strategy_contract")),
                     "strategy_evidence": copy.deepcopy(pack.get("strategy_evidence")),
+                    "direction_context": copy.deepcopy(pack.get("direction_context")),
+                    "direction_permission": copy.deepcopy(pack.get("strategy_evidence", {}).get(proposal.action, {}).get("evidence", {}).get("direction_permission")),
                     "entry_guard_atr": atr,
                     "entry_guard_ema21": pack.get("m15_ema21"),
                     "reference_price_source": pack["reference_price"].get("source"),
@@ -3125,6 +3226,9 @@ class ThreeAITrader(base.FibVolumePATrader):
                     "checkpoint": copy.deepcopy(pack["strategy_evidence"][proposal.action]["evidence"].get("host_verified_analysis_checkpoint")),
                     "snapshot_id": pack.get("snapshot_id"), "fingerprint": pack.get("strategy_fingerprint"),
                     "reference_price": copy.deepcopy(pack["reference_price"])}
+                if base.direction_policy_active(pack["strategy_contract"]):
+                    proposal.details["ai1_source_binding"]["direction"] = copy.deepcopy(
+                        pack["strategy_evidence"][proposal.action]["evidence"]["host_verified_direction"])
             final_entry_price = float(proposal.details.get("entry_price") or entry_price)
             proposal.details["execution_guard"] = {
                 "atr": atr, "ema21": pack.get("m15_ema21"), "bar_closure": pack["bar_closure"],
@@ -3133,7 +3237,13 @@ class ThreeAITrader(base.FibVolumePATrader):
             proposal.details["entry_news_started_at"] = news_started
             def refresh_ai2_request():
                 snapshot = self.prepare_review_request(proposal, pack, parsed, reason, decision_id, trigger, news_started)
-                snapshot["before_post"] = lambda: self.ensure_entry_news_ready(news_started)
+                def before_ai2_post():
+                    self.ensure_entry_news_ready(news_started)
+                    if base.direction_policy_active(proposal.details.get("strategy_contract")):
+                        error = self.validate_strategy_entry(proposal)
+                        if error:
+                            raise MarketSnapshotError("AI-2发送前方向复核拒绝: " + error)
+                snapshot["before_post"] = before_ai2_post
                 return snapshot
             review_raw = call_chat(
                 "AI-2",

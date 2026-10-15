@@ -188,6 +188,7 @@ class Backtest:
         self.market_days = set()
         self.offset = float(meta["server_offset"])
         self.point = float(meta["point"])
+        self.direction_tick_size = float(meta.get("trade_tick_size") or self.point)
         self.lot_value = float(meta["contract_size"]) * base.LOT_SIZE
         self.threshold = threshold
         self.windows = {name: Window(df, FRAMES[name][1]) for name, df in data.items()}
@@ -253,6 +254,8 @@ class Backtest:
                 df_m15, df_h1, df_m5, self.threshold, now=beijing(ts, self.offset),
                 strategy_snapshot=self.strategy_snapshot, server_utc_offset=self.offset,
                 entry_gate=self.entry_gate,
+                direction_bid=float(df_m5["close"].iloc[-1]), direction_tick_size=self.direction_tick_size,
+                direction_account_namespace=base.recent_trades.namespace("historical-replay", "offline", base.SYMBOL, base.MAGIC),
             )
         except Exception as exc:
             self.stats["评估异常"] += 1
@@ -786,6 +789,7 @@ def main():
             meta = {
                 "server_offset": offset,
                 "point": float(info.point),
+                "trade_tick_size": float(getattr(info, "trade_tick_size", 0) or info.point),
                 "contract_size": float(info.trade_contract_size),
                 "spread_now": int(info.spread),
             }

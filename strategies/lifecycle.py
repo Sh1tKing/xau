@@ -129,6 +129,8 @@ def _metadata(value):
         return False
     if "cooldown_seconds" in value and not _integer(value["cooldown_seconds"], 0, 604800):
         return False
+    if "analysis_order_scope" in value and not _event_id(value["analysis_order_scope"]):
+        return False
     if "execution_token" in value:
         token = value["execution_token"]
         if (type(token) is not str or len(token) != 23 or not token.startswith("EV")
@@ -235,6 +237,16 @@ class EventLedger:
                 return f"lifecycle cooldown active until {self._state['cooldown_until']}"
             return ""
 
+    def analysis_scope_error(self, scope: str, now: float) -> str:
+        with self._lock:
+            if self.error:
+                return self.error
+            if not _event_id(scope) or not _time(now):
+                return "invalid analysis order scope"
+            if any(event["metadata"].get("analysis_order_scope") == scope for event in self._state["events"].values()):
+                return "analysis checkpoint order budget already consumed across directions"
+            return ""
+
     def _persist(self, state):
         temporary = None
         try:
@@ -272,6 +284,9 @@ class EventLedger:
             except (RecursionError, TypeError, ValueError):
                 return False
             token = frozen_metadata.get("execution_token")
+            scope = frozen_metadata.get("analysis_order_scope")
+            if scope is not None and self.analysis_scope_error(scope, now):
+                return False
             if token and any(e["metadata"].get("execution_token") == token for e in self._state["events"].values()):
                 return False
             state = copy.deepcopy(self._state)

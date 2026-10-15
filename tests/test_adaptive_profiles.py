@@ -11,19 +11,28 @@ import pandas as pd
 
 from strategies.adaptive import checkpoint_id, validate_analysis_checkpoint
 from strategies.framework import Context, DEFAULT_REGISTRY, Registry, StrategyError
+from strategies.direction import DEFAULT_POLICY, evaluate_context as evaluate_direction_context
 
 
 def context(profile="asia_adaptive", action="buy", offset=3, clock=None):
     clock = clock or datetime(2026, 10, 10, 11, 35, tzinfo=timezone.utc)
     frames = {}
-    for tf, step, count in (("M5", 300, 18), ("M15", 900, 30), ("H1", 3600, 30)):
+    for tf, step, count in (("M5", 300, 80), ("M15", 900, 80), ("H1", 3600, 80)):
         end = int((clock.timestamp()+offset*3600)//step)*step
         frames[tf] = pd.DataFrame([dict(time=end-(count-i)*step, open=100., high=101.,
                                       low=99., close=100., tick_volume=100) for i in range(count)])
     session = {"asia_adaptive": "asia", "london_adaptive": "london", "us_adaptive": "overlap"}[profile]
-    return Context(action, frames["M15"], frames["H1"], frames["M5"], None, 2.,
+    result = Context(action, frames["M15"], frames["H1"], frames["M5"], None, 2.,
                    "bull" if action == "buy" else "bear", "neutral", 10., session,
                    None, clock, offset)
+    return with_direction_sources(result)
+
+
+def with_direction_sources(c):
+    """Pure fixture authority comes from the real engine and closed OHLC, not a flag."""
+    direction = evaluate_direction_context(c.df_m15, c.df_m5, c.h1_trend, DEFAULT_POLICY,
+        now=c.now, server_utc_offset=c.server_utc_offset, tick_size=.01, bid=100.)
+    return replace(c, direction_context=direction)
 
 
 class AdaptiveProfileTests(unittest.TestCase):
@@ -32,7 +41,7 @@ class AdaptiveProfileTests(unittest.TestCase):
         self.assertFalse(self.snapshot.error)
 
     def assess(self, c, profile="asia_adaptive"):
-        return self.snapshot.get(profile).assess(c)
+        return self.snapshot.get(profile).assess(with_direction_sources(c))
 
     def validate(self, evidence, c, **kwargs):
         return validate_analysis_checkpoint(evidence, c.now, c.server_utc_offset,
@@ -69,7 +78,7 @@ class AdaptiveProfileTests(unittest.TestCase):
                         {"demo_only": False}, {"one_entry_per_event": False}):
             with self.subTest(changes=changes), self.assertRaises(StrategyError):
                 Registry.validate(replace(strategy, **changes))
-        Registry.validate(replace(strategy, analysis_mode=False, demo_only=False))
+        Registry.validate(replace(strategy, analysis_mode=False, demo_only=False, direction_policy=None))
 
     def test_definition_parameter_edits_keep_contract_role_rules_and_soft_math_coherent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -108,12 +117,15 @@ class AdaptiveProfileTests(unittest.TestCase):
                     self.assertEqual(self.validate(result.evidence, c, profile=profile, action=action), "")
                     json.dumps(result.evidence, allow_nan=False)
 
-    def test_h1_opposing_or_unknown_is_hard_blocker(self):
+    def test_h1_opposing_with_no_tactical_event_or_unknown_is_hard_blocker(self):
         for profile in ("asia_adaptive", "london_adaptive", "us_adaptive"):
             for action in ("buy", "sell"):
                 for trend in ("bear" if action == "buy" else "bull", "neutral"):
-                    result = self.assess(replace(context(profile, action), h1_trend=trend), profile)
-                    self.assertTrue(any("H1" in blocker for blocker in result.blockers))
+                    c = with_direction_sources(replace(context(profile, action), h1_trend=trend))
+                    result = self.assess(c, profile)
+                    self.assertFalse(c.direction_context["permissions"][action]["allowed"])
+                    self.assertEqual(c.direction_context["m15_leg"]["state"], "unknown" if trend == "neutral" else "none")
+                    self.assertTrue(result.blockers)
 
     def test_opposing_m5_and_extreme_location_are_soft_context(self):
         c = context()

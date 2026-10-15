@@ -76,7 +76,10 @@ class AdaptiveAITests(unittest.TestCase):
                                     ask=100.3 if side == 'buy' else 99.9, time=int(self.now+10800))
         for scope in (patch.object(base.time, 'time', side_effect=lambda: self.now),
                       patch.object(self.trader, 'get_context', side_effect=lambda: tuple(self.data)),
-                      patch.object(base.mt5, 'account_info', return_value=SimpleNamespace(trade_mode=base.mt5.ACCOUNT_TRADE_MODE_DEMO)),
+                      patch.object(base.mt5, 'symbol_info', return_value=SimpleNamespace(
+                          trade_tick_size=.01, point=.01, digits=2, trade_stops_level=0, trade_freeze_level=0)),
+                      patch.object(base.mt5, 'account_info', return_value=SimpleNamespace(
+                          login=111, server='offline-demo', trade_mode=base.mt5.ACCOUNT_TRADE_MODE_DEMO)),
                       patch.object(base.mt5, 'symbol_info_tick', side_effect=lambda _: self.tick),
                       patch.object(base.mt5, 'positions_get', side_effect=lambda **_: list(self.positions)),
                       patch.object(base.mt5, 'order_send', side_effect=self.broker_send),
@@ -208,7 +211,7 @@ class AdaptiveAITests(unittest.TestCase):
                 other = AdaptiveAITests(); other.setUp()
                 try:
                     other.configure()
-                    state = [SimpleNamespace(trade_mode=base.mt5.ACCOUNT_TRADE_MODE_DEMO)]
+                    state = [SimpleNamespace(login=111, server='offline-demo', trade_mode=base.mt5.ACCOUNT_TRADE_MODE_DEMO)]
                     with patch.object(base.mt5, 'account_info', side_effect=lambda: state[0]):
                         post = other.run_entry(before_review=lambda: state.__setitem__(0, account))
                     self.assertEqual(post.call_count, 1, other.snapshots)

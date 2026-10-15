@@ -130,15 +130,13 @@ class NewsEntryTests(unittest.TestCase):
         self.assertLessEqual(abs(self.f.sent[0]["price"]-self.f.sent[0]["sl"]), 8)
 
     def test_last_broker_gate_catches_window_after_ai2_and_preserves_unconsumed_event(self):
-        original = self.trader.ensure_review_bars_current
-        count = 0
-        def bars(expected):
-            nonlocal count
-            original(expected)
-            count += 1
-            if count == 2:  # The second check is inside live place_order.
-                self.advance(2)
-        with patch.object(self.trader, "ensure_review_bars_current", side_effect=bars):
+        original = base.FibVolumePATrader.place_order
+        def final_broker_gate(trader, result):
+            # Inject the boundary at the broker layer, independent of how many
+            # earlier source checks the versioned direction policy performs.
+            self.advance(2)
+            return original(trader, result)
+        with patch.object(base.FibVolumePATrader, "place_order", new=final_broker_gate):
             http = self.entry()
         self.assertEqual(http.call_count, 2)
         self.assert_no_order_or_reservation()

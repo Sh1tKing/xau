@@ -161,3 +161,6 @@ FIB_PA_AI3_BACKUP_THINKING=
 本次打包时未发现 `xau_fib_pa_logs/ai3_position_state.json`，因此未包含持仓理由状态。如果正式迁移时已有该文件，应在旧脚本完全停止后，将最新文件复制到新机器同名目录；缺少入场历史时AI-3会将相关上下文标记为未知。
 
 本地已核对脚本复制一致和依赖元数据；服务器安装、MT5连接、AI连通性与交易执行需要在目标机器确认。本次打包没有启动或重启任何交易进程。
+
+
+2026-10-15双向许可更新：复制三个黄金脚本及完整strategies（含direction.py/recent_trades.py/adaptive.py及三盘定义），按MANIFEST核对后自行重启。实际.env不用改；保留全部原状态与新闻缓存。新仓才冻结方向路线，原仓不重建；来源/账户身份未知暂停新入场。近期真实结算软缓存recent_settled_trades.json由运行程序创建，坏缓存不影响原持仓保护。离线验收请运行docs/experiments/verify_gold_profit_guard.py，避免普通历史测试读取当期日历或写默认状态。详见[双向验证](../experiments/2026-10-15-bidirectional-validation.md)。

@@ -14,6 +14,7 @@ from types import ModuleType
 import copy
 from typing import Any, Callable
 from strategies.lifecycle import holding_policy
+from strategies.direction import normalize_policy, LEGACY_VERSION as LEGACY_DIRECTION_VERSION
 
 VERSION = "strategy-framework-v2"
 SESSIONS = ("asia", "london", "overlap", "late_us")
@@ -38,6 +39,7 @@ class Context:
     api: Any  # Explicit host math helpers, no trader/MT5 object.
     now: Any = None  # Aware decision clock; plugins must not read the wall clock themselves.
     server_utc_offset: float | None = None
+    direction_context: dict | None = None  # Reconstructed by the host, never plugin/AI authority.
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,7 @@ class Strategy:
     one_entry_per_event: bool = False
     demo_only: bool = False
     analysis_mode: bool = False  # Broad AI analysis checkpoint, not a confirmed entry pattern.
+    direction_policy: dict | None = None  # Missing declarations preserve the historical H1-only route.
 
     def manifest(self):
         return copy.deepcopy({"id": self.id, "name": self.name, "version": self.version,
@@ -80,7 +83,8 @@ class Strategy:
                 "stop_reference": self.stop_reference, "max_hold_minutes": self.max_hold_minutes,
                 "cooldown_seconds": self.cooldown_seconds, "one_entry_per_event": self.one_entry_per_event,
                 "demo_only": self.demo_only, "analysis_mode": self.analysis_mode,
-                "holding_policy": holding_policy({"analysis_mode": self.analysis_mode})})
+                "holding_policy": holding_policy({"analysis_mode": self.analysis_mode}),
+                "direction_policy": normalize_policy(self.direction_policy)})
 
     def assess(self, context):
         contract = self.manifest()
@@ -183,6 +187,12 @@ class Registry:
             raise StrategyError(f"{s.id} 生命周期声明非法")
         if s.analysis_mode and (not s.demo_only or not s.one_entry_per_event):
             raise StrategyError(f"{s.id} 分析模式必须仅模拟账户且单检查点一次订单")
+        try:
+            direction = normalize_policy(s.direction_policy)
+        except ValueError as exc:
+            raise StrategyError(f"{s.id} 方向许可声明无效: {exc}") from exc
+        if direction["version"] != LEGACY_DIRECTION_VERSION and not (s.analysis_mode and s.demo_only):
+            raise StrategyError(f"{s.id} 新方向许可仅用于模拟自主分析")
         if (s.regime_filter not in ("none", "pullback") or (s.momentum is not None and not callable(s.momentum))
                 or s.describe is not None and not callable(s.describe)):
             raise StrategyError(f"{s.id} regime_filter/momentum错误")

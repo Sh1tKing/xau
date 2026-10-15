@@ -96,6 +96,14 @@ def checkpoint_id(profile, action, m5_bar_time, m15_bar_time, server_offset_hour
         json.dumps(identity, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()[:32]
 
 
+def checkpoint_order_scope(evidence):
+    """One order budget across directions/routes/anchors at the same actual closed sources."""
+    cp = evidence["analysis_checkpoint"]
+    identity = [cp["profile"], cp["m5_bar_time"], cp["m15_bar_time"], float(cp["server_offset_hours"]) + 0.0]
+    return "analysis-order-scope-v1/" + hashlib.sha256(
+        json.dumps(identity, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()[:32]
+
+
 def validate_analysis_checkpoint(evidence, observed_utc, server_offset_hours,
                                  df_m5=None, df_m15=None, profile=None, action=None):
     """Return empty string or specific error; never infer a pattern or missing clock.
@@ -206,8 +214,8 @@ def _soft_score(action, m5, m15, location, delta, atr, config):
         "meaning": "soft contextual facts, not mandatory patterns or confirmed triggers"}
 
 
-def evaluate_profile(c, profile, soft_scoring):
-    """Broad soft coarse score, with only H1/source validity hard blockers."""
+def evaluate_profile(c, profile, soft_scoring, direction_policy=None):
+    """Soft coarse facts; the host's explicit direction permission is binding."""
     facts = {"profile": profile, "action": c.action, "trade_trigger_confirmed": False,
              "profile_prior": PROFILE_PRIORS[profile], "style_menu": list(STYLE_MENUS[profile]),
              "uncertainty": ["宏观事件/新闻日历未知：没有外部实际信息", "tick_volume仅为经纪商成交量代理",
@@ -216,7 +224,17 @@ def evaluate_profile(c, profile, soft_scoring):
     blockers = []
     permitted = c.action in ("buy", "sell") and c.h1_trend == ("bull" if c.action == "buy" else "bear")
     facts["h1_permitted"] = permitted
-    if not permitted:
+    direction = c.direction_context
+    if direction is not None or direction_policy is not None:
+        facts["h1_same_direction"] = facts.pop("h1_permitted")
+    if direction_policy is not None and direction is None:
+        blockers.append("方向许可缺少宿主重建的闭合来源")
+    if direction is not None:
+        permission = direction.get("permissions", {}).get(c.action, {})
+        permitted = (direction.get("h1_background") == c.h1_trend and permission.get("allowed") is True)
+        if not permitted:
+            blockers.append("方向许可拒绝: " + str(permission.get("reason", "方向事实不可用")))
+    elif not permitted:
         blockers.append("自主分析仍要求H1同向")
     score = 0
     try:
@@ -280,7 +298,7 @@ def evaluate_profile(c, profile, soft_scoring):
         blockers.append("analysis_source_invalid: " + (str(exc) or "unknown"))
         # Never publish partial invalid prices/checkpoint as reusable evidence.
         facts = {key: value for key, value in facts.items() if key in (
-            "profile", "action", "trade_trigger_confirmed", "profile_prior", "style_menu", "uncertainty", "h1_permitted")}
+            "profile", "action", "trade_trigger_confirmed", "profile_prior", "style_menu", "uncertainty", "h1_permitted", "h1_same_direction")}
         score = 0
     return Assessment(score, {"fib": "自主分析粗筛，不强制Fib回撤或固定形态",
                               "volume": "量能代理仅作参考", "price_action": "真实收盘数据供AI自主判断",

@@ -1,0 +1,502 @@
+{
+  "policy": {
+    "version": "h1-or-m15-structure-v1",
+    "break_lookback_m15": 2,
+    "leg_ttl_m15": 6,
+    "break_margin_atr": 0.1,
+    "break_margin_ticks": 2,
+    "failure_closes_m5": 2,
+    "anchor_pivot_left_m5": 1,
+    "anchor_pivot_right_m5": 1
+  },
+  "engine_digest": "46ed7ac95039e48beb1bfb2445a018b15c1b2858682e11c81ee47f0680567460",
+  "source_sha256": {
+    "server_deploy\\xau_fib_pa_logs\\ai_decisions\\2026-10-13.jsonl": "257777782f20b2e82033a1f8a31cb4ae5f8f4b3a1087ba464b3788ef7d0af4ef",
+    "server_deploy\\xau_fib_pa_logs\\ai_decisions\\2026-10-14.jsonl": "55f9413ab4f0a7fa19325c3aa664362fcafa2f659e7fe6a137dc856554dbbb70",
+    "server_deploy\\xau_fib_pa_logs\\ai_decisions\\2026-10-15.jsonl": "06f6cae3312cb486359e296a12a45c4e62d76225b41323339990ea4afb8eb275"
+  },
+  "tick_size_assumption": 0.01,
+  "days": {
+    "2026-10-13": {
+      "snapshots": 192,
+      "h1_backgrounds": {
+        "bear": 92,
+        "bull": 100
+      },
+      "allowed_routes": {
+        "sell/h1_trend": 29,
+        "buy/m15_tactical": 18,
+        "buy/h1_trend": 61,
+        "sell/m15_tactical": 29,
+        "buy/h1_recovery": 3
+      },
+      "feasible_routes": {
+        "sell/h1_trend": 17,
+        "buy/m15_tactical": 16,
+        "buy/h1_trend": 38,
+        "sell/m15_tactical": 15,
+        "buy/h1_recovery": 3
+      },
+      "unknown_snapshots": 44
+    },
+    "2026-10-14": {
+      "snapshots": 135,
+      "h1_backgrounds": {
+        "bear": 135
+      },
+      "allowed_routes": {
+        "sell/h1_trend": 75,
+        "buy/m15_tactical": 15,
+        "sell/h1_recovery": 2
+      },
+      "feasible_routes": {
+        "sell/h1_trend": 44,
+        "buy/m15_tactical": 9,
+        "sell/h1_recovery": 1
+      },
+      "unknown_snapshots": 40
+    },
+    "2026-10-15": {
+      "snapshots": 93,
+      "h1_backgrounds": {
+        "bear": 77,
+        "bull": 16
+      },
+      "allowed_routes": {
+        "sell/h1_trend": 13,
+        "buy/m15_tactical": 27,
+        "buy/h1_trend": 4
+      },
+      "feasible_routes": {
+        "buy/m15_tactical": 9,
+        "sell/h1_trend": 2
+      },
+      "unknown_snapshots": 48
+    }
+  },
+  "all_oct15_trades": [
+    {
+      "ticket": "609976661",
+      "opened_at": "2026-10-15T01:46:57.263",
+      "actual_direction": "SELL",
+      "actual_profit": "0.45",
+      "decision_id": "1792010700-9",
+      "execution_match_seconds": 0.737,
+      "new_mechanism": [
+        {
+          "timestamp": "2026-10-15T01:45:01",
+          "decision_id": "1792010700-9",
+          "source_file": "2026-10-15.jsonl",
+          "side": "buy",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "m15_tactical",
+          "direction_allowed": true,
+          "direction_reason": "valid opposite-H1 M15 structure",
+          "structure_event_id": "m15-structure-v1/e6c0ded9eeae30383dd85c1ef6fdfbfc",
+          "protection_kind": "origin",
+          "protection_price": 4077.92,
+          "entry": 4086.73,
+          "minimum_generated_stop": 4076.92,
+          "risk": 9.81,
+          "ema_distance_atr": 0.86624,
+          "protection_and_quote_feasible": false,
+          "blockers": "canonical protection exceeds SL8",
+          "public_context_chars": 2217
+        },
+        {
+          "timestamp": "2026-10-15T01:45:01",
+          "decision_id": "1792010700-9",
+          "source_file": "2026-10-15.jsonl",
+          "side": "sell",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "h1_trend",
+          "direction_allowed": false,
+          "direction_reason": "opposes valid M15 structure",
+          "structure_event_id": "m15-structure-v1/e6c0ded9eeae30383dd85c1ef6fdfbfc",
+          "protection_kind": "recent3_m5",
+          "protection_price": 4090.78,
+          "entry": 4086.4,
+          "minimum_generated_stop": 4091.84,
+          "risk": 5.44,
+          "ema_distance_atr": 0.902664,
+          "protection_and_quote_feasible": false,
+          "blockers": "opposes valid M15 structure",
+          "public_context_chars": 2217
+        }
+      ]
+    },
+    {
+      "ticket": "610023754",
+      "opened_at": "2026-10-15T02:06:47.329",
+      "actual_direction": "SELL",
+      "actual_profit": "-3.02",
+      "decision_id": "1792011900-13",
+      "execution_match_seconds": 0.671,
+      "new_mechanism": [
+        {
+          "timestamp": "2026-10-15T02:05:02",
+          "decision_id": "1792011900-13",
+          "source_file": "2026-10-15.jsonl",
+          "side": "buy",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "m15_tactical",
+          "direction_allowed": true,
+          "direction_reason": "valid opposite-H1 M15 structure",
+          "structure_event_id": "m15-structure-v1/e6c0ded9eeae30383dd85c1ef6fdfbfc",
+          "protection_kind": "origin",
+          "protection_price": 4077.92,
+          "entry": 4083.81,
+          "minimum_generated_stop": 4076.92,
+          "risk": 6.89,
+          "ema_distance_atr": 1.10616,
+          "protection_and_quote_feasible": true,
+          "blockers": "",
+          "public_context_chars": 2217
+        },
+        {
+          "timestamp": "2026-10-15T02:05:02",
+          "decision_id": "1792011900-13",
+          "source_file": "2026-10-15.jsonl",
+          "side": "sell",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "h1_trend",
+          "direction_allowed": false,
+          "direction_reason": "opposes valid M15 structure",
+          "structure_event_id": "m15-structure-v1/e6c0ded9eeae30383dd85c1ef6fdfbfc",
+          "protection_kind": "recent3_m5",
+          "protection_price": 4084.89,
+          "entry": 4083.48,
+          "minimum_generated_stop": 4088.82,
+          "risk": 5.34,
+          "ema_distance_atr": 1.143281,
+          "protection_and_quote_feasible": false,
+          "blockers": "opposes valid M15 structure",
+          "public_context_chars": 2217
+        }
+      ]
+    },
+    {
+      "ticket": "610064191",
+      "opened_at": "2026-10-15T02:26:55.557",
+      "actual_direction": "SELL",
+      "actual_profit": "-4.43",
+      "decision_id": "1792013100-17",
+      "execution_match_seconds": 0.443,
+      "new_mechanism": [
+        {
+          "timestamp": "2026-10-15T02:25:02",
+          "decision_id": "1792013100-17",
+          "source_file": "2026-10-15.jsonl",
+          "side": "buy",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "m15_tactical",
+          "direction_allowed": true,
+          "direction_reason": "valid opposite-H1 M15 structure",
+          "structure_event_id": "m15-structure-v1/e6c0ded9eeae30383dd85c1ef6fdfbfc",
+          "protection_kind": "local_pullback",
+          "protection_price": 4080.34,
+          "entry": 4091.32,
+          "minimum_generated_stop": 4079.34,
+          "risk": 11.98,
+          "ema_distance_atr": 0.237609,
+          "protection_and_quote_feasible": false,
+          "blockers": "canonical protection exceeds SL8",
+          "public_context_chars": 2217
+        },
+        {
+          "timestamp": "2026-10-15T02:25:02",
+          "decision_id": "1792013100-17",
+          "source_file": "2026-10-15.jsonl",
+          "side": "sell",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "h1_trend",
+          "direction_allowed": false,
+          "direction_reason": "opposes valid M15 structure",
+          "structure_event_id": "m15-structure-v1/e6c0ded9eeae30383dd85c1ef6fdfbfc",
+          "protection_kind": "recent3_m5",
+          "protection_price": 4093.08,
+          "entry": 4090.99,
+          "minimum_generated_stop": 4096.23,
+          "risk": 5.24,
+          "ema_distance_atr": 0.27541,
+          "protection_and_quote_feasible": false,
+          "blockers": "opposes valid M15 structure",
+          "public_context_chars": 2217
+        }
+      ]
+    },
+    {
+      "ticket": "610101678",
+      "opened_at": "2026-10-15T02:41:28.635",
+      "actual_direction": "SELL",
+      "actual_profit": "-1.50",
+      "decision_id": "1792014000-19",
+      "execution_match_seconds": 0.365,
+      "new_mechanism": [
+        {
+          "timestamp": "2026-10-15T02:40:02",
+          "decision_id": "1792014000-19",
+          "source_file": "2026-10-15.jsonl",
+          "side": "buy",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "m15_tactical",
+          "direction_allowed": true,
+          "direction_reason": "valid opposite-H1 M15 structure",
+          "structure_event_id": "m15-structure-v1/1b72b5c800c4497135ec6cee8ca9a6dc",
+          "protection_kind": "local_pullback",
+          "protection_price": 4089.6,
+          "entry": 4093.05,
+          "minimum_generated_stop": 4088.26,
+          "risk": 4.79,
+          "ema_distance_atr": 0.059009,
+          "protection_and_quote_feasible": true,
+          "blockers": "",
+          "public_context_chars": 2217
+        },
+        {
+          "timestamp": "2026-10-15T02:40:02",
+          "decision_id": "1792014000-19",
+          "source_file": "2026-10-15.jsonl",
+          "side": "sell",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "h1_trend",
+          "direction_allowed": false,
+          "direction_reason": "opposes valid M15 structure",
+          "structure_event_id": "m15-structure-v1/1b72b5c800c4497135ec6cee8ca9a6dc",
+          "protection_kind": "recent3_m5",
+          "protection_price": 4096.07,
+          "entry": 4092.72,
+          "minimum_generated_stop": 4097.51,
+          "risk": 4.79,
+          "ema_distance_atr": 0.100414,
+          "protection_and_quote_feasible": false,
+          "blockers": "opposes valid M15 structure",
+          "public_context_chars": 2217
+        }
+      ]
+    },
+    {
+      "ticket": "610126597",
+      "opened_at": "2026-10-15T02:56:27.882",
+      "actual_direction": "SELL",
+      "actual_profit": "-2.29",
+      "decision_id": "1792014900-22",
+      "execution_match_seconds": 0.118,
+      "new_mechanism": [
+        {
+          "timestamp": "2026-10-15T02:55:02",
+          "decision_id": "1792014900-22",
+          "source_file": "2026-10-15.jsonl",
+          "side": "buy",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "m15_tactical",
+          "direction_allowed": true,
+          "direction_reason": "valid opposite-H1 M15 structure",
+          "structure_event_id": "m15-structure-v1/1b72b5c800c4497135ec6cee8ca9a6dc",
+          "protection_kind": "local_pullback",
+          "protection_price": 4089.6,
+          "entry": 4095.75,
+          "minimum_generated_stop": 4088.6,
+          "risk": 7.15,
+          "ema_distance_atr": 0.298286,
+          "protection_and_quote_feasible": true,
+          "blockers": "",
+          "public_context_chars": 2217
+        },
+        {
+          "timestamp": "2026-10-15T02:55:02",
+          "decision_id": "1792014900-22",
+          "source_file": "2026-10-15.jsonl",
+          "side": "sell",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "h1_trend",
+          "direction_allowed": false,
+          "direction_reason": "opposes valid M15 structure",
+          "structure_event_id": "m15-structure-v1/1b72b5c800c4497135ec6cee8ca9a6dc",
+          "protection_kind": "recent3_m5",
+          "protection_price": 4095.61,
+          "entry": 4095.42,
+          "minimum_generated_stop": 4099.94,
+          "risk": 4.52,
+          "ema_distance_atr": 0.254461,
+          "protection_and_quote_feasible": false,
+          "blockers": "opposes valid M15 structure",
+          "public_context_chars": 2217
+        }
+      ]
+    },
+    {
+      "ticket": "610213417",
+      "opened_at": "2026-10-15T03:36:46.503",
+      "actual_direction": "SELL",
+      "actual_profit": "-0.11",
+      "decision_id": "1792017300-30",
+      "execution_match_seconds": 0.497,
+      "new_mechanism": [
+        {
+          "timestamp": "2026-10-15T03:35:02",
+          "decision_id": "1792017300-30",
+          "source_file": "2026-10-15.jsonl",
+          "side": "buy",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "m15_tactical",
+          "direction_allowed": true,
+          "direction_reason": "valid opposite-H1 M15 structure",
+          "structure_event_id": "m15-structure-v1/73d1a5ef5d73252014fba89cdb5dc17a",
+          "protection_kind": "local_pullback",
+          "protection_price": 4092.76,
+          "entry": 4102.47,
+          "minimum_generated_stop": 4091.76,
+          "risk": 10.71,
+          "ema_distance_atr": 1.108227,
+          "protection_and_quote_feasible": false,
+          "blockers": "canonical protection exceeds SL8",
+          "public_context_chars": 2216
+        },
+        {
+          "timestamp": "2026-10-15T03:35:02",
+          "decision_id": "1792017300-30",
+          "source_file": "2026-10-15.jsonl",
+          "side": "sell",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "h1_trend",
+          "direction_allowed": false,
+          "direction_reason": "opposes valid M15 structure",
+          "structure_event_id": "m15-structure-v1/73d1a5ef5d73252014fba89cdb5dc17a",
+          "protection_kind": "recent3_m5",
+          "protection_price": 4106.7,
+          "entry": 4102.14,
+          "minimum_generated_stop": 4107.7,
+          "risk": 5.56,
+          "ema_distance_atr": 1.059697,
+          "protection_and_quote_feasible": false,
+          "blockers": "opposes valid M15 structure",
+          "public_context_chars": 2216
+        }
+      ]
+    },
+    {
+      "ticket": "610269677",
+      "opened_at": "2026-10-15T04:11:40.598",
+      "actual_direction": "SELL",
+      "actual_profit": "0.43",
+      "decision_id": "1792019400-37",
+      "execution_match_seconds": 0.402,
+      "new_mechanism": [
+        {
+          "timestamp": "2026-10-15T04:10:02",
+          "decision_id": "1792019400-37",
+          "source_file": "2026-10-15.jsonl",
+          "side": "buy",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "m15_tactical",
+          "direction_allowed": true,
+          "direction_reason": "valid opposite-H1 M15 structure",
+          "structure_event_id": "m15-structure-v1/73d1a5ef5d73252014fba89cdb5dc17a",
+          "protection_kind": "local_pullback",
+          "protection_price": 4098.79,
+          "entry": 4101.11,
+          "minimum_generated_stop": 4097.2,
+          "risk": 3.91,
+          "ema_distance_atr": 0.786502,
+          "protection_and_quote_feasible": true,
+          "blockers": "",
+          "public_context_chars": 2216
+        },
+        {
+          "timestamp": "2026-10-15T04:10:02",
+          "decision_id": "1792019400-37",
+          "source_file": "2026-10-15.jsonl",
+          "side": "sell",
+          "h1_background": "bear",
+          "m15_state": "up",
+          "route": "h1_trend",
+          "direction_allowed": false,
+          "direction_reason": "opposes valid M15 structure",
+          "structure_event_id": "m15-structure-v1/73d1a5ef5d73252014fba89cdb5dc17a",
+          "protection_kind": "recent3_m5",
+          "protection_price": 4103.42,
+          "entry": 4100.78,
+          "minimum_generated_stop": 4104.69,
+          "risk": 3.91,
+          "ema_distance_atr": 0.735733,
+          "protection_and_quote_feasible": false,
+          "blockers": "opposes valid M15 structure",
+          "public_context_chars": 2216
+        }
+      ]
+    },
+    {
+      "ticket": "610446306",
+      "opened_at": "2026-10-15T07:32:32.469",
+      "actual_direction": "SELL",
+      "actual_profit": "-2.02",
+      "decision_id": "1792031400-57",
+      "execution_match_seconds": 0.531,
+      "new_mechanism": [
+        {
+          "timestamp": "2026-10-15T07:32:06",
+          "decision_id": "1792031400-57",
+          "source_file": "2026-10-15.jsonl",
+          "side": "buy",
+          "h1_background": "bear",
+          "m15_state": "unknown",
+          "route": "h1_trend",
+          "direction_allowed": false,
+          "direction_reason": "gapped relevant closed source",
+          "structure_event_id": null,
+          "protection_kind": "recent3_m5",
+          "protection_price": 4101.76,
+          "entry": 4102.67,
+          "minimum_generated_stop": 4099.35,
+          "risk": 3.32,
+          "ema_distance_atr": 0.272536,
+          "protection_and_quote_feasible": false,
+          "blockers": "gapped relevant closed source",
+          "public_context_chars": 1872
+        },
+        {
+          "timestamp": "2026-10-15T07:32:06",
+          "decision_id": "1792031400-57",
+          "source_file": "2026-10-15.jsonl",
+          "side": "sell",
+          "h1_background": "bear",
+          "m15_state": "unknown",
+          "route": "h1_trend",
+          "direction_allowed": false,
+          "direction_reason": "gapped relevant closed source",
+          "structure_event_id": null,
+          "protection_kind": "recent3_m5",
+          "protection_price": 4105.18,
+          "entry": 4102.34,
+          "minimum_generated_stop": 4106.01,
+          "risk": 3.67,
+          "ema_distance_atr": 0.212862,
+          "protection_and_quote_feasible": false,
+          "blockers": "gapped relevant closed source",
+          "public_context_chars": 1872
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "saved request snapshots only; not all market checkpoints",
+    "historical prompt OHLC can be rounded; .01 grid is an explicit assumption",
+    "feasible means direction/canonical protection/SL8/EMA/clearance only",
+    "does not recreate AI1 trigger/target/quality, AI2, fees, latency, or new profit",
+    "existing eight trade outcomes are facts, not counterfactual BUY/SELL profits"
+  ]
+}

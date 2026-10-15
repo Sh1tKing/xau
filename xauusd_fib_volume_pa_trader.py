@@ -18,7 +18,11 @@ from strategies.framework import Context, DEFAULT_REGISTRY, StrategyError, VERSI
 from strategies.lifecycle import (EventLedger, execution_token, recovery_event, holding_policy,
                                   holding_status, HOLD_REVIEW_VERSION)
 from strategies.events import validate_entry_event
-from strategies.adaptive import validate_analysis_checkpoint
+from strategies.adaptive import validate_analysis_checkpoint, checkpoint_order_scope
+from strategies.direction import (normalize_policy as normalize_direction_policy, evaluate_context as evaluate_direction_context,
+                                  public_context as public_direction_context, LEGACY_VERSION as LEGACY_DIRECTION_VERSION,
+                                  ENGINE_DIGEST as DIRECTION_ENGINE_DIGEST)
+from strategies import recent_trades
 from strategies.regions import region_facts
 from strategies.profit_guard import (ProfitFloor, GuardStore, validate_identity as validate_guard_identity,
                                     policy as profit_policy, VERSION as PROFIT_GUARD_VERSION)
@@ -38,6 +42,130 @@ import pandas as pd
 STRATEGIES = DEFAULT_REGISTRY
 ENTRY_CLOCK_VERSION = "closed-entry-clock-v1"
 ADAPTIVE_SESSION_VERSION = "adaptive-session-v1"
+_DIRECTION_PROOF_KEY = os.urandom(32)  # In-flight proposals cannot be imported from another process/build.
+
+
+def direction_policy_active(contract):
+    return normalize_direction_policy((contract or {}).get("direction_policy"))["version"] != LEGACY_DIRECTION_VERSION
+
+
+def direction_tick_size():
+    info = mt5.symbol_info(SYMBOL)
+    for name in ("trade_tick_size", "point"):
+        value = getattr(info, name, None)
+        if isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+            return float(value)
+    return None
+
+
+def _direction_attestation(proof):
+    raw = json.dumps({k: v for k, v in proof.items() if k != "attestation"},
+                     sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hmac.new(_DIRECTION_PROOF_KEY, raw, hashlib.sha256).hexdigest()
+
+
+def direction_h1_digest(frame):
+    rows = [{key: (int(row[key]) if key == "time" else float(row[key]))
+             for key in ("time", "open", "high", "low", "close")} for row in frame.to_dict("records")]
+    return hashlib.sha256(json.dumps(rows, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def freeze_direction_proof(action, contract, context, checkpoint_id, h1_bar_time, h1_source_digest, account_namespace):
+    proof = {"action": action, "policy": normalize_direction_policy(contract.get("direction_policy")),
+             "context": copy.deepcopy(context), "permission": copy.deepcopy(context["permissions"][action]),
+             "checkpoint_id": checkpoint_id, "h1_bar_time": h1_bar_time,
+             "h1_source_digest": h1_source_digest, "account_namespace": account_namespace, "profile": contract["id"]}
+    proof["attestation"] = _direction_attestation(proof)
+    return proof
+
+
+def verified_direction_permission(action, contract, evidence):
+    """Only the host's reconstructed, signed proof can open the new route."""
+    try:
+        if not direction_policy_active(contract):
+            raise StrategyError("旧契约没有短线方向证明")
+        proof = evidence.get("host_verified_direction", {})
+        context, permission = proof["context"], proof["permission"]
+        if (set(proof) != {"action", "policy", "context", "permission", "checkpoint_id", "h1_bar_time", "h1_source_digest", "account_namespace", "profile", "attestation"}
+                or not isinstance(proof["account_namespace"], str) or len(proof["account_namespace"]) != 64
+                or any(c not in "0123456789abcdef" for c in proof["account_namespace"])
+                or not isinstance(proof.get("attestation"), str)
+                or not hmac.compare_digest(proof["attestation"], _direction_attestation(proof))
+                or proof["action"] != action or proof["profile"] != contract.get("id")
+                or proof["policy"] != normalize_direction_policy(contract.get("direction_policy"))
+                or context.get("version") != proof["policy"]["version"]
+                or context.get("engine_digest") != DIRECTION_ENGINE_DIGEST
+                or context.get("m15_leg", {}).get("state") == "unknown"
+                or context.get("permissions", {}).get(action) != permission
+                or evidence.get("direction_permission") != permission
+                or evidence.get("direction_context") != public_direction_context(context)
+                or proof["checkpoint_id"] != evidence.get("event_id")
+                or permission.get("allowed") is not True or not permission.get("proof_digest")):
+            raise StrategyError("方向证明来源、契约或许可不一致")
+        return copy.deepcopy(permission)
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise StrategyError("方向许可缺少有效宿主证明: " + str(exc)) from exc
+
+
+def direction_entry_error(action, h1_trend, m15_trend, contract=None, evidence=None):
+    try:
+        if direction_policy_active(contract):
+            verified_direction_permission(action, contract, evidence or {})
+            if (evidence or {})["host_verified_direction"]["context"]["h1_background"] != h1_trend:
+                return "方向证明H1背景与真实来源不一致"
+            return ""
+    except (StrategyError, ValueError) as exc:
+        return str(exc)
+    return "" if trends_support(action, h1_trend, m15_trend) else (
+        f"{action.upper()} 与H1不同向(H1={h1_trend}, M15={m15_trend})")
+
+
+def direction_quote_error(action, contract, evidence, bid):
+    try:
+        if not direction_policy_active(contract):
+            return ""
+        permission = verified_direction_permission(action, contract, evidence)
+        if not isinstance(bid, Real) or isinstance(bid, bool) or not math.isfinite(bid) or bid <= 0:
+            return "方向许可当前Bid无效"
+        route = permission["route"]
+        leg = evidence["host_verified_direction"]["context"]["m15_leg"]
+        if route == "m15_tactical":
+            if (action == "buy" and bid < leg["failure_level"]) or (action == "sell" and bid > leg["failure_level"]):
+                return "当前Bid已穿越原短线结构边界"
+        elif route == "h1_recovery":
+            if (action == "buy" and bid <= leg["failure_level"]) or (action == "sell" and bid >= leg["failure_level"]):
+                return "当前Bid不再支持原H1恢复许可"
+        anchor = permission.get("anchor")
+        if anchor and ((action == "buy" and bid < anchor["price"]) or (action == "sell" and bid > anchor["price"])):
+            return "当前Bid已穿越原规范保护点，禁止换锚继续执行"
+        return ""
+    except (StrategyError, ValueError, KeyError, TypeError) as exc:
+        return "方向报价复核失败: " + str(exc)
+
+
+def required_direction_stop(action, entry, atr, df_m5, contract, evidence):
+    permission = verified_direction_permission(action, contract, evidence)
+    extreme = recent_m5_extreme(df_m5, action)
+    if not m5_extreme_on_stop_side(action, entry, extreme):
+        raise StrategyError("方向方案缺少参考价外侧的近三M5保护极值")
+    anchor = permission.get("anchor")
+    protection = extreme if not anchor else (min(extreme, anchor["price"]) if action == "buy" else max(extreme, anchor["price"]))
+    minimum, maximum = entry_risk_limits(atr)
+    boundary = min(protection-stop_buffer(atr), entry-minimum) if action == "buy" else max(protection+stop_buffer(atr), entry+minimum)
+    stop = round_protective_stop(action, boundary)
+    risk = directional_stop_distance(action, entry, stop)
+    if not math.isfinite(risk) or not 0 < risk <= maximum + .001:
+        raise StrategyError("规范结构保护及三M5缓冲超过8美元，禁止向内裁止损")
+    return stop
+
+
+def review_strategy_entry(action, entry, sl, tp, h1, m15, min_rr, enforce_align, contract=None, evidence=None):
+    if direction_policy_active(contract):
+        error = direction_entry_error(action, h1, m15, contract, evidence)
+        if error:
+            return False, error
+        return review_entry(action, entry, sl, tp, h1, m15, min_rr, False)
+    return review_entry(action, entry, sl, tp, h1, m15, min_rr, enforce_align)
 
 
 def strategy_api():
@@ -229,6 +357,9 @@ def research_execution_error(result, tick):
     if details.get("strategy_contract", {}).get("stop_reference") == "region":
         evidence = details.get("strategy_evidence", details.get("strategy_assessments", {})).get(action, {}).get("evidence", {})
         return region_plan_error(action, float(details.get("reference_price", details["entry_price"])), sl, tp, atr, evidence)
+    if direction_policy_active(details.get("strategy_contract", {})):
+        evidence = details.get("strategy_evidence", details.get("strategy_assessments", {})).get(action, {}).get("evidence", {})
+        return direction_quote_error(action, details["strategy_contract"], evidence, bid)
     return ""
 
 
@@ -556,6 +687,9 @@ class PositionSnapshot:
     open_time: int
     first_seen_at: float
     last_seen_at: float
+    server_utc_offset: Optional[float] = None
+    entry_context: dict = field(default_factory=dict)
+    settlement_namespace: str = ""
 
 
 def send_feishu_notification(title, lines):
@@ -1673,6 +1807,10 @@ def build_fib_volume_pa_decision(
     strategy_snapshot=None,
     server_utc_offset=None,
     entry_gate=None,
+    direction_bid=None,
+    direction_tick_size=None,
+    analysis_order_gate=None,
+    direction_account_namespace=None,
 ) -> StrategyResult:
     snapshot = strategy_snapshot if strategy_snapshot is not None else STRATEGIES.snapshot()
     session = trading_session(now)
@@ -1716,14 +1854,21 @@ def build_fib_volume_pa_decision(
         for side in ("buy", "sell"):
             best = None
             for strategy in active:
+                contract = strategy.manifest()
+                direction_context = None
+                if direction_policy_active(contract):
+                    direction_context = evaluate_direction_context(df_m15, df_m5, h1_trend, contract["direction_policy"],
+                        now=decision_clock, server_utc_offset=server_utc_offset,
+                        tick_size=direction_tick_size, bid=direction_bid)
                 context = Context(side, df_m15, df_h1, df_m5, fib, atr, h1_trend, m15_trend, adx, session, strategy_api(),
-                                  decision_clock, server_utc_offset)
+                                  decision_clock, server_utc_offset, direction_context)
                 result = strategy.assess(context)
                 blockers = list(result.blockers)
                 evidence = copy.deepcopy(result.evidence)
                 evidence.pop("host_verified_region", None)
                 evidence.pop("host_verified_entry_event", None)
                 evidence.pop("host_verified_analysis_checkpoint", None)
+                evidence.pop("host_verified_direction", None)
                 if strategy.analysis_mode:
                     error = validate_analysis_checkpoint(evidence, decision_clock, server_utc_offset,
                                                          df_m5, df_m15, strategy.id, side)
@@ -1735,6 +1880,12 @@ def build_fib_volume_pa_decision(
                             "profile": strategy.id, "action": side, "event_id": evidence["event_id"],
                             "server_offset_hours": server_utc_offset,
                             "h1_bar_time": int(df_h1["time"].iloc[-1]), "h1_trend": h1_trend}
+                        if direction_context is not None:
+                            evidence["direction_context"] = public_direction_context(direction_context)
+                            evidence["direction_permission"] = copy.deepcopy(direction_context["permissions"][side])
+                            evidence["host_verified_direction"] = freeze_direction_proof(
+                                side, contract, direction_context, evidence["event_id"], int(df_h1["time"].iloc[-1]),
+                                direction_h1_digest(df_h1), direction_account_namespace)
 
                 if evidence.get("closed_trigger", {}).get("confirmed") and strategy.one_entry_per_event:
                     error = validate_entry_event(evidence, decision_clock, server_utc_offset, df_m5, df_m15,
@@ -1769,6 +1920,10 @@ def build_fib_volume_pa_decision(
                         event_error = entry_gate(event_id, decision_clock.timestamp())
                         if event_error:
                             blockers.append(event_error)
+                    if direction_context is not None and analysis_order_gate is not None and "analysis_checkpoint" in evidence:
+                        scope_error = analysis_order_gate(checkpoint_order_scope(evidence), decision_clock.timestamp())
+                        if scope_error:
+                            blockers.append(scope_error)
                 score, details, structure = result.score, dict(result.details), result.structure
                 # Keep generic fields available for custom strategies, without fabricating facts.
                 for key in ("fib", "volume", "price_action", "trend"):
@@ -1814,8 +1969,12 @@ def build_fib_volume_pa_decision(
             )
             if regime_block:
                 blocks.append(regime_block)
-        if ALIGN_HARD_FILTER and not trends_support(action, h1_trend, m15_trend):
-            blocks.append(f"{action.upper()} 与H1不同向(H1={h1_trend}, M15={m15_trend})")
+        evidence = details["strategy_assessments"][action]["evidence"]
+        new_direction = direction_policy_active(details["strategy_contract"])
+        if new_direction or ALIGN_HARD_FILTER:
+            error = direction_entry_error(action, h1_trend, m15_trend, details["strategy_contract"], evidence)
+            if error:
+                blocks.append(error)
         blocked, m5_text = m5_blocks_entry(df_m5, action)
         if blocked and not details["strategy_contract"].get("analysis_mode"):
             blocks.append(m5_text)
@@ -1837,7 +1996,14 @@ def build_fib_volume_pa_decision(
                 blocks.append("研究策略缺少参考价外侧的最近三根M5保护极值")
         protect = extreme if m5_extreme_on_stop_side(action, entry_price, extreme) else None
         stop_loss, take_profit = 0.0, 0.0
-        if details["strategy_contract"].get("stop_reference") == "region":
+        if new_direction:
+            try:
+                stop_loss = required_direction_stop(action, entry_price, atr, df_m5, details["strategy_contract"], evidence)
+                sign = 1 if action == "buy" else -1
+                take_profit = round_protective_stop(action, entry_price + sign*target_r*abs(entry_price-stop_loss))
+            except StrategyError as exc:
+                blocks.append(str(exc))
+        elif details["strategy_contract"].get("stop_reference") == "region":
             evidence = details["strategy_assessments"][action]["evidence"]
             try:
                 stop_loss = required_region_stop(action, entry_price, atr, df_m5, evidence,
@@ -1901,8 +2067,9 @@ def build_fib_volume_pa_decision(
             stop_loss, take_profit = 0.0, 0.0
         approved, review_text = (False, "")
         if prices_ok and not blocks:
-            approved, review_text = review_entry(
-                action, entry_price, stop_loss, take_profit, h1_trend, m15_trend, MIN_REWARD_RISK, ALIGN_HARD_FILTER
+            approved, review_text = review_strategy_entry(
+                action, entry_price, stop_loss, take_profit, h1_trend, m15_trend, MIN_REWARD_RISK, ALIGN_HARD_FILTER,
+                details["strategy_contract"], evidence
             )
             if not approved:
                 blocks.append(review_text)
@@ -1985,6 +2152,10 @@ class FibVolumePATrader:
         self.guard_store = GuardStore(guard_path)
         self._close_state_path = os.path.join(os.path.dirname(str(self.guard_store.path)), "close_notification_state.json")
         self._close_notification_lock = threading.RLock()
+        self._recent_trade_lock = threading.RLock()
+        self._recent_trade_path = os.path.join(os.path.dirname(self._close_state_path), "recent_settled_trades.json")
+        self._recent_trade_state = None
+        self._recent_trade_error = ""
         self.pending_close_notifications = {}
         self._close_state_loaded = False
         if self.guard_store.error:
@@ -2004,6 +2175,108 @@ class FibVolumePATrader:
         self._entry_clock_defer_markers = None
         self._entry_clock_defer_reasons = set()
         self.news_calendar = NewsCalendar.from_environment(BASE_DIR, LOG_DIR, logger)
+
+    def _recent_namespace(self):
+        account = mt5.account_info()
+        return recent_trades.namespace(getattr(account, "login", None), getattr(account, "server", None), SYMBOL, MAGIC)
+
+    def _prepare_recent_trades(self, namespace, now):
+        if not hasattr(self, "_recent_trade_lock"):
+            self._recent_trade_lock = threading.RLock()
+            path = getattr(self, "_close_state_path", "")
+            self._recent_trade_path = os.path.join(os.path.dirname(path), "recent_settled_trades.json") if path else ""
+            self._recent_trade_state, self._recent_trade_error = None, "cache_unavailable"
+        if self._recent_trade_state is not None or self._recent_trade_error:
+            return
+        try:
+            with open(self._recent_trade_path, encoding="utf-8") as handle:
+                state = json.load(handle)
+            context = recent_trades.recent_context(state, namespace, now)
+            if not context["available"]:
+                self._recent_trade_error = context["coverage"]["status"]
+            else:
+                self._recent_trade_state = state
+        except FileNotFoundError:
+            self._recent_trade_state = recent_trades.new_state(now)
+        except (OSError, ValueError, TypeError):
+            self._recent_trade_error = "cache_read_failed"
+
+    def recent_trade_context(self):
+        try:
+            namespace, now = self._recent_namespace(), time.time()
+        except (ValueError, TypeError, AttributeError):
+            return recent_trades.unavailable_context("namespace_unavailable")
+        if not hasattr(self, "_recent_trade_lock"):
+            self._prepare_recent_trades(namespace, now)
+        with self._recent_trade_lock:
+            self._prepare_recent_trades(namespace, now)
+            if self._recent_trade_error:
+                return recent_trades.unavailable_context(self._recent_trade_error)
+            return recent_trades.recent_context(self._recent_trade_state, namespace, now)
+
+    def record_recent_settlement(self, snapshot, settlement):
+        temporary = None
+        try:
+            namespace, observed = self._recent_namespace(), time.time()
+            if snapshot.symbol != SYMBOL or not snapshot.settlement_namespace or namespace != snapshot.settlement_namespace:
+                return  # A pending settlement must never move into another account/server partition.
+            if not hasattr(self, "_recent_trade_lock"):
+                self._prepare_recent_trades(namespace, observed)
+            with self._recent_trade_lock:
+                self._prepare_recent_trades(namespace, observed)
+                if self._recent_trade_error:
+                    return
+                offset = snapshot.server_utc_offset
+                close_utc = None
+                if isinstance(offset, Real) and not isinstance(offset, bool) and math.isfinite(offset) and abs(offset) <= 14:
+                    candidate = settlement.time - offset*3600
+                    # A bad clock conversion is excluded, never replaced with the observation clock.
+                    current_offset = tick_clock_offset(mt5.symbol_info_tick(SYMBOL), observed)
+                    if current_offset == offset and 0 < candidate <= observed:
+                        close_utc = candidate
+                if self._recent_namespace() != namespace:
+                    return
+                state = recent_trades.record_settlement(self._recent_trade_state, namespace, settlement,
+                    direction=snapshot.direction.lower(), observed_utc=observed, close_utc=close_utc,
+                    entry_context=snapshot.entry_context or None)
+                parent = os.path.dirname(os.path.abspath(self._recent_trade_path))
+                os.makedirs(parent, exist_ok=True)
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=parent, delete=False) as handle:
+                    temporary = handle.name
+                    json.dump(state, handle, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, self._recent_trade_path)
+                self._recent_trade_state = state
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            if hasattr(self, "_recent_trade_error"):
+                self._recent_trade_error = "cache_write_failed"
+            logger.warning("最近结算上下文不可用，软上下文降级，不改变结算或交易门: %s", exc)
+        finally:
+            if temporary and os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+
+    def position_entry_facts(self, ticket):
+        ledger = self.strategy_ledger.snapshot() if getattr(self, "strategy_ledger", None) else {}
+        saved = ledger.get("positions", {}).get(str(ticket), {})
+        metadata = ledger.get("events", {}).get(saved.get("event_id"), {}).get("metadata", {})
+        original = getattr(self, "entry_contexts", {}).get(str(ticket), {})
+        contract = metadata.get("contract") or original.get("strategy_contract") or {}
+        evidence = metadata.get("evidence") or {}
+        if not evidence:
+            side = str(original.get("direction", "")).lower()
+            evidence = (original.get("strategy_evidence") or {}).get(side, {}).get("evidence", {})
+        permission = evidence.get("direction_permission", {})
+        values = {"strategy_id": contract.get("id"), "direction_policy_version": contract.get("direction_policy", {}).get("version"),
+                  "route": permission.get("route"), "h1_background": evidence.get("direction_context", {}).get("h1_background"),
+                  "structure_event_id": permission.get("structure_event_id"),
+                  "protection_kind": (permission.get("anchor") or {}).get("kind"),
+                  "invalidation_reason": original.get("invalidation") or permission.get("reason")}
+        public = {k: v[:512] for k, v in values.items() if isinstance(v, str) and v.strip()}
+        return metadata.get("server_utc_offset", evidence.get("server_offset_hours")), public
 
     def entry_news_error(self, since=None):
         calendar = getattr(self, "news_calendar", None)
@@ -2033,14 +2306,24 @@ class FibVolumePATrader:
     def evaluate_context(self, df_m15, df_h1, df_m5):
         observed = time.time()
         tick = mt5.symbol_info_tick(SYMBOL)
+        try:
+            account_namespace = self._recent_namespace()
+        except (ValueError, TypeError, AttributeError):
+            account_namespace = None
         return build_fib_volume_pa_decision(
             df_m15, df_h1, df_m5, CONFIDENCE_THRESHOLD,
             now=datetime.fromtimestamp(observed, BEIJING_TZ), server_utc_offset=tick_clock_offset(tick, observed),
-            entry_gate=self.strategy_ledger.entry_error)
+            entry_gate=self.strategy_ledger.entry_error, direction_bid=getattr(tick, "bid", None),
+            direction_tick_size=direction_tick_size(), analysis_order_gate=self.strategy_ledger.analysis_scope_error,
+            direction_account_namespace=account_namespace)
 
     def validate_strategy_entry(self, result):
         details = result.details or {}
         contract = details.get("strategy_contract", {})
+        try:
+            direction_policy_active(contract)
+        except (ValueError, AttributeError, TypeError) as exc:
+            return "方向契约不合法: " + str(exc)
         if contract.get("demo_only"):
             account = mt5.account_info()
             if account is None or getattr(account, "trade_mode", None) != mt5.ACCOUNT_TRADE_MODE_DEMO:
@@ -2054,15 +2337,21 @@ class FibVolumePATrader:
                     return "自主粗筛仅允许来源绑定的AI提案，关闭AI不得自动下单"
                 binding = details.get("ai1_source_binding", {})
                 original = evidence.get("host_verified_analysis_checkpoint", {})
+                new_direction = direction_policy_active(contract)
                 if (not original or original.get("analysis_checkpoint") != evidence.get("analysis_checkpoint")
                         or original.get("profile") != contract.get("id") or original.get("action") != result.action
                         or original.get("event_id") != event_id
                         or original.get("server_offset_hours") != evidence.get("server_offset_hours")
-                        or original.get("h1_trend") != ("bull" if result.action == "buy" else "bear")
+                        or (not new_direction and original.get("h1_trend") != ("bull" if result.action == "buy" else "bear"))
+                        or (new_direction and binding.get("direction") != evidence.get("host_verified_direction"))
                         or binding.get("checkpoint") != original or not binding.get("snapshot_id")
                         or binding.get("fingerprint") != details.get("strategy_fingerprint")
                         or binding.get("reference_price") != details.get("reference_price_metadata")):
                     return "自主分析检查点缺少原始来源及AI请求绑定"
+                if new_direction:
+                    error = self.validate_direction_sources(result)
+                    if error:
+                        return error
                 observed = time.time()
                 tick = mt5.symbol_info_tick(SYMBOL)
                 offset = tick_clock_offset(tick, observed)
@@ -2083,6 +2372,10 @@ class FibVolumePATrader:
                     return "自主分析来源复核失败: " + str(exc)
                 if assessments.get(result.action, {}).get("blockers"):
                     return "策略硬条件已拒绝，不能提交订单"
+                if new_direction:
+                    error = self.strategy_ledger.analysis_scope_error(checkpoint_order_scope(evidence), observed)
+                    if error:
+                        return error
                 return self.strategy_ledger.entry_error(event_id, observed)
             if not evidence.get("closed_trigger", {}).get("confirmed") or not event_id:
                 return "策略缺少真实首次收盘事件，拒绝下单"
@@ -2111,6 +2404,65 @@ class FibVolumePATrader:
                 return "策略硬条件已拒绝，不能提交订单"
             return self.strategy_ledger.entry_error(event_id, time.time())
         return ""
+
+    def direction_account_error(self, evidence, account):
+        if account is None or getattr(account, "trade_mode", None) != mt5.ACCOUNT_TRADE_MODE_DEMO:
+            return "方向许可仅允许模拟账户，账户状态未知或已改变"
+        try:
+            namespace = recent_trades.namespace(getattr(account, "login", None), getattr(account, "server", None), SYMBOL, MAGIC)
+            return "" if namespace == evidence["host_verified_direction"]["account_namespace"] else "原方向证明的账户/服务器身份已改变"
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return "方向许可缺少可靠账户/服务器身份"
+
+    def validate_direction_sources(self, result, tick=None, frames=None):
+        """Recompute the original proof; this never consumes a checkpoint or moves an anchor."""
+        details = result.details or {}
+        contract = details.get("strategy_contract", {})
+        try:
+            if not direction_policy_active(contract):
+                return ""
+            evidence = details.get("strategy_evidence", details.get("strategy_assessments", {}))[result.action]["evidence"]
+            permission = verified_direction_permission(result.action, contract, evidence)
+            frozen = evidence["host_verified_direction"]
+            original = evidence.get("host_verified_analysis_checkpoint", {})
+            if (frozen["h1_bar_time"] != original.get("h1_bar_time")
+                    or frozen["checkpoint_id"] != original.get("event_id")
+                    or details.get("ai1_source_binding", {}).get("direction") != frozen):
+                return "方向证明与AI-1成功请求来源不一致"
+            account_error = self.direction_account_error(evidence, mt5.account_info())
+            if account_error:
+                return account_error
+            observed = time.time()
+            tick = tick if tick is not None else mt5.symbol_info_tick(SYMBOL)
+            offset = tick_clock_offset(tick, observed)
+            now = datetime.fromtimestamp(observed, timezone.utc)
+            m15, h1, m5 = frames if frames is not None else self.get_context()
+            account_error = self.direction_account_error(evidence, mt5.account_info())
+            if account_error:
+                return "重取行情期间" + account_error
+            error = validate_analysis_checkpoint(evidence, now, offset, m5, m15, contract.get("id"), result.action)
+            if error:
+                return "方向证明检查点已失效: " + error
+            h1_background = trend_from_ema(h1, 50)
+            if (int(h1["time"].iloc[-1]) != frozen["h1_bar_time"] or h1_background != frozen["context"]["h1_background"]
+                    or direction_h1_digest(h1) != frozen["h1_source_digest"]):
+                return "方向证明H1原始闭合来源已改变"
+            context = evaluate_direction_context(m15, m5, h1_background, contract["direction_policy"], now=now,
+                        server_utc_offset=offset, tick_size=direction_tick_size(), bid=getattr(tick, "bid", None))
+            if (context["source_digest"] != frozen["context"]["source_digest"]
+                    or context["permissions"][result.action] != permission):
+                return "原方向事件、来源、规范保护点或当前许可已改变，停止旧方案"
+            error = direction_quote_error(result.action, contract, evidence, getattr(tick, "bid", None))
+            if error:
+                return error
+            reference = float(details["reference_price"])
+            required = required_direction_stop(result.action, reference, float(details["entry_guard_atr"]), m5, contract, evidence)
+            if ((result.action == "buy" and result.stop_loss > required + 1e-9)
+                    or (result.action == "sell" and result.stop_loss < required - 1e-9)):
+                return "固定止损未覆盖原规范保护点及近三M5缓冲"
+            return ""
+        except (StrategyError, ValueError, TypeError, KeyError, IndexError, RuntimeError) as exc:
+            return "方向证明复核失败: " + str(exc)
 
     def record_strategy_close(self, ticket):
         saved = self.strategy_ledger.snapshot().get("positions", {})
@@ -2246,6 +2598,13 @@ class FibVolumePATrader:
         pos_type = getattr(position, "type", None)
         now_ts = time.time()
         existing = self.position_snapshots.get(ticket)
+        offset, entry_context = self.position_entry_facts(ticket)
+        namespace = getattr(existing, "settlement_namespace", "")
+        if not namespace and getattr(position, "symbol", None) == SYMBOL and int(getattr(position, "magic", 0) or 0) == MAGIC:
+            try:
+                namespace = self._recent_namespace()
+            except (ValueError, TypeError, AttributeError):
+                namespace = ""
         return PositionSnapshot(
             ticket=ticket,
             identifier=int(getattr(position, "identifier", 0) or 0),
@@ -2259,6 +2618,9 @@ class FibVolumePATrader:
             open_time=int(getattr(position, "time", 0) or 0),
             first_seen_at=existing.first_seen_at if existing else now_ts,
             last_seen_at=now_ts,
+            server_utc_offset=offset if offset is not None else getattr(existing, "server_utc_offset", None),
+            entry_context=entry_context or getattr(existing, "entry_context", {}),
+            settlement_namespace=namespace,
         )
 
     def deal_reason_text(self, reason) -> str:
@@ -2369,6 +2731,7 @@ class FibVolumePATrader:
         if not isinstance(deal, PositionSettlement) or deal.position_id != int(snapshot.identifier or ticket):
             logger.warning("拒绝未经汇总结算的平仓结果 ticket=%s", ticket)
             return False
+        self.record_recent_settlement(snapshot, deal)
         server_reason = self.deal_reason_text(deal.reason)
         reason = close_reason or server_reason
         score = self.pending_close_notifications.get(ticket, {}).get("entry_score") or self.entry_confidence.get(ticket)
@@ -3154,6 +3517,7 @@ class FibVolumePATrader:
             if offset is None or offset != original_evidence.get("server_offset_hours") or not self.strategy_ledger.reserve(event_id, observed, {
                     "execution_token": token, "symbol": SYMBOL, "magic": MAGIC, "action": action,
                     "event_id": event_id, "evidence": copy.deepcopy(original_evidence),
+                    **({"analysis_order_scope": checkpoint_order_scope(original_evidence)} if direction_policy_active(contract) else {}),
                     "server_utc_offset": offset, "contract": contract,
                     "guardian_policy": copy.deepcopy(guardian_rules),
                     "guardian_initial_sl": result.stop_loss, "guardian_initial_tp": result.take_profit,
@@ -3166,6 +3530,34 @@ class FibVolumePATrader:
         if news_error:
             logger.info("%s 最终发送前停止: %s；已发生的事件预留不回滚", NEWS_PAUSE_VERSION, news_error)
             return False
+        if direction_policy_active(contract):
+            # Re-read after disk reservation/news work; an invalidated order keeps its consumed budget.
+            tick = mt5.symbol_info_tick(SYMBOL)
+            direction_error = self.validate_direction_sources(result, tick=tick)
+            execution_error = self.validate_execution_prices(result, tick)
+            if direction_error or execution_error:
+                logger.info("最终发送前方向/固定价格复核停止: %s", direction_error or execution_error)
+                return False
+            account = mt5.account_info()
+            positions = mt5.positions_get(symbol=SYMBOL)
+            if (account is None or getattr(account, "trade_mode", None) != mt5.ACCOUNT_TRADE_MODE_DEMO
+                    or positions is None or len(positions) >= MAX_POSITIONS):
+                logger.info("最终发送前账户或单仓状态已改变，保留已消费检查点")
+                return False
+            account_error = self.direction_account_error(original_evidence, account)
+            if account_error:
+                logger.info("最终发送前%s，保留已消费检查点", account_error)
+                return False
+            price = float(tick.ask if action == "buy" else tick.bid)
+            request_body["price"] = price
+            live_rr = reward_risk_ratio(action, price, result.stop_loss, result.take_profit)
+            try:
+                STRATEGIES.require_current(fingerprint)
+            except StrategyError as exc:
+                logger.info("事件预留后策略已改变，停止发送且不回滚消费: %s", exc)
+                return False
+            if self.entry_news_error(result.details.get("entry_news_started_at")):
+                return False
         order_result = mt5.order_send(request_body)
         if order_result is None:
             logger.error("❌ 订单发送失败: 返回 None")

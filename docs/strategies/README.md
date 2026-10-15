@@ -27,6 +27,7 @@
 - `m5_boost`：是否沿用框架的M5拒绝确认加分；关闭后M5止损覆盖、时机和实时风控仍执行。
 - `momentum`：可选RSI/MACD加减分函数，返回 `(整数加分, 说明)`。
 - `regime_filter`：`pullback` 沿用窄区间观望和宽区间边缘约束；`none` 由策略自己在 `blockers` 中声明条件。
+- `direction_policy`：缺省为`h1-only-v1`；三盘显式采用`h1-or-m15-structure-v1`，只允许DEMO自主模式。H1保留背景，闭合M15结构可许可相反方向；宿主重建来源及规范保护，插件/AI不能提供一个布尔值放行。当前v1参数采用已登记值，不识别未知规则或静默回落。辅助方向引擎更新必须重启。
 - `analysis_mode`：默认false。新三盘为true，本地只生成分析范围及软分，不把固定形态、首次事件、Fib位置或本地参考计划成功当成AI请求前置条件；关闭AI时这些定义不直接自动下单。
 
 `session_retest` 按 `Europe/London` / `America/New_York` 的当地日期及夏令时判断：08:00–08:30六根闭合M5建箱，08:30–11:00首次突破后的首次回踩，完整规则见接入设计。其他策略的宿主时段标签为北京时间：`asia` 07–15、`london` 15–20、`overlap` 20–01、`late_us` 01–07，未按夏令时调整。
@@ -55,7 +56,7 @@
 
 新模式AI方案以成功请求时买Ask/卖Bid为参考，目标参考上限3R；最近三根M5极值、M15 ATR保护生成规则及实时SL8/RR1.5/2倍缓冲余量继续检查。最大持仓90分钟、平仓后冷却60秒，每检查点最多一次订单尝试（回执不确定也不释放）。没有止损空间依然拒绝，不能靠激进提示词突破公共风控。普通本地/旧定义的M15参考价格不变。
 
-参考来源由契约声明：`entry_reference=closed_m15/closed_m5`，`stop_reference=structure/m5_extreme/region`；研究定义单独使用确认M5参考，旧三个策略仍使用M15。区域保护还要覆盖有来源的失效锚，目标先考虑真实的反向区域边缘。`max_hold_minutes/cooldown_seconds/one_entry_per_event/demo_only` 声明生命周期，Python保存原数值与入场时钟，已有仓不随定义修改重计时。2026-10-14起，原契约`analysis_mode=True`的自主仓采用`holding_policy=ai_review`，max_hold_minutes是复核节点，时间本身不再强平；已有自主仓适用同一明确兼容规则，不改其余冻结契约。固定事件仓仍为hard_exit。AI-3请求提供positions.holding_review有效规则，沿用M1派发；请求失败仍保留SLTP与锁盈。公共边界仍是H1方向、M5保护极值、止损8美元、RR至少1.5、EMA21追价1.5ATR、0.01手和最多1仓。AI-3结合原策略护盘证据作策略判断，服务器止损和本地锁盈持续保护，插件不能靠文本放宽这些限制。
+参考来源由契约声明：`entry_reference=closed_m15/closed_m5`，`stop_reference=structure/m5_extreme/region`；研究定义单独使用确认M5参考，旧三个策略仍使用M15。区域保护还要覆盖有来源的失效锚，目标先考虑真实的反向区域边缘。`max_hold_minutes/cooldown_seconds/one_entry_per_event/demo_only` 声明生命周期，Python保存原数值与入场时钟，已有仓不随定义修改重计时。2026-10-14起，原契约`analysis_mode=True`的自主仓采用`holding_policy=ai_review`，max_hold_minutes是复核节点，时间本身不再强平；已有自主仓适用同一明确兼容规则，不改其余冻结契约。固定事件仓仍为hard_exit。AI-3请求提供positions.holding_review有效规则，沿用M1派发；请求失败仍保留SLTP与锁盈。公共边界仍是已声明版本的方向许可（旧契约H1-only）、M5保护极值、止损8美元、RR至少1.5、EMA21追价1.5ATR、0.01手和最多1仓。AI-3结合原策略护盘证据作策略判断，服务器止损和本地锁盈持续保护，插件不能靠文本放宽这些限制。
 
 区域定义用 `parameters.region_event_kind=retest/rejection` 声明已支持的事件算法，宿主从原始行情复算其区域、触发、失效锚、窗口及完整目标障碍；不会根据策略ID猜算法。改名或新增同接口定义不需要给宿主加ID分支。新增其他区域来源或算法仍须扩展辅助模块、测试并自行重启，不能只写一段提示词。
 
@@ -89,3 +90,5 @@ py -3.12 xauusd_fib_pa_backtest.py --offline --strategies session_retest,region_
 `--strategies`只允许与`--offline`合用；无该参数沿用默认启用项。延迟必须是非负整分钟秒数，成交使用目标分钟的真实缓存Bid/Ask，保持原SL/TP及来源；缺分钟、新收盘K线、事件过期或实时报价不合法就拒绝。点差倍数同时影响入场、护盘和退出。每次输出带独立时间与标识的CSV/TXT/JSON，JSON记录启用项、原指纹、延迟、点差、零成交日和拒绝漏斗。`--split-date`默认2026-09-15，这份缓存已用于研究，前后分段不能当独立样本外结果。
 
 事件文件默认位于日志目录，可用 `FIB_PA_STRATEGY_STATE_FILE` 指定路径。删除会丢失已用窗口和期限，迁移同一账户须保留。写入失败停止新入场；旧期限仍可读取供护盘。只运行一个进程实例。
+
+2026-10-15起新三盘的普通请求及持久订单范围均按实际闭合检查点跨方向/路线/锚点/定义指纹去重。AI2与最终下单重验成功AI1原账户/服务器及来源，缺身份不入场。原方向许可与保护持仓落盘，AI3不会仅因逆H1或入场许可到期而平仓。独立recent_settled_trades.json是软上下文，损坏不放宽关键ledger，也不阻断原持仓保护；只含完整结算，不用最后浮盈代替。详见[验证](../experiments/2026-10-15-bidirectional-validation.md)。

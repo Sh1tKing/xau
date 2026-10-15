@@ -1,6 +1,6 @@
 # AGENTS.md — XAUUSD 开发说明
 
-当前主系统默认启用asia_adaptive、london_adaptive、us_adaptive三盘自主AI粗筛；仅模拟账户。本地不要求先命中固定形态，H1方向许可、M15风险指标、最近三根M5极值保护和实时价格风控保留。账户按 100 美元评估，0.01 手，最多 1 个仓。
+当前主系统默认启用asia_adaptive、london_adaptive、us_adaptive三盘自主AI粗筛；仅模拟账户。本地不要求先命中固定形态；新三盘使用显式双向短线方向许可，H1真实背景、M15风险指标、最近三根M5极值保护和实时价格风控保留。账户按 100 美元评估，0.01 手，最多 1 个仓。
 
 ## 每次开工
 
@@ -26,7 +26,7 @@
 
 ## 当前架构
 
-2026-10-15双向短线许可设计（用户仅授权开始设计，尚未实现/启用）：方案`h1-or-m15-structure-v1`把H1背景与闭合M15结构分开，H1偏空可在有效上涨结构下评估BUY，H1偏多可在有效下跌结构下评估SELL，买卖完全镜像。反向结构未失败时，不仅凭H1和小M5影线反复试原方向；原起点或结构形成窗口内已确认支点必须真实保护，SL8不能向内裁。计划统一本地候选/计算证据/AI1提案/AI2及最终执行方向门，单请求、严格引用/v4质量、新闻休息、原锁盈和存量仓保持。参数是待验证假设，六笔挑出的亏损SELL不构成反向盈利证据，须包括全部八单及相反走势。当前运行代码仍保留原H1硬方向限制，不得把设计视为已经放开逆H1或改动实际.env的授权。设计及实施计划见docs/superpowers/specs/2026-10-15-bidirectional-tactical-permission.md和docs/superpowers/plans/2026-10-15-bidirectional-tactical-permission.md。
+2026-10-15双向短线许可实现（用户后续明确授权“开始修改代码”）：三盘定义版本2显式声明`h1-or-m15-structure-v1`，`strategies/direction.py`统一闭合M15旧两根边界/历史ATR14容差/最后六根事件、确认后两M5失败恢复、规范原起点或形成窗口内最新已确认支点；BUY/SELL镜像，等值边界用Decimal严格比较。H1背景不改写，合法逆H1不能再被旧末端门误拒；缺省策略仍h1-only-v1，不全局关闭ALIGN。必要来源缺口/预热/时钟/tick或账户身份未知则暂停新入场，不能当none或拼接确认。规范保护合并三M5+原缓冲/生成下限，超SL8拒绝，不挑能塞入8美元的锚。宿主HMAC证明绑定加载引擎、政策、完整M15/M5及H1来源、检查点/动作/原账户服务器namespace；每POST新事实，AI2固定原方案，最终预留后再验指纹/账户/报价/新闻，不换方向或支点。普通请求scope及持久订单scope不因方向/路线/锚/指纹变化重置；ledger顶层版本保持。AI1单请求/v4严格引用及质量门、新闻休息、profit-floor-v2/holding-review-v1和存量仓保持；原路线/保护保存给AI3，逆H1或许可TTL不是自动平仓理由。`recent_trades.py`只收完整broker结算含费用，独立原子缓存按账户服务器/symbol/magic隔离64笔，AI取最近6小时6笔全部方向盈亏；原始时间与观察分开，入场偏移与当前鲜活tick偏移不一致或未知则UTC未知并排除窗口，不按连续亏损自动反手。实际.env不改，不启动交易；完整三个黄金脚本+strategies及MANIFEST由用户复制重启。初版参数登记后固定，不用六笔SELL收益调参；历史420快照及全八单诊断只说明许可/保护变化，不代表AI收益。设计、计划及验证见docs/superpowers/specs/2026-10-15-bidirectional-tactical-permission.md、docs/superpowers/plans/2026-10-15-bidirectional-tactical-permission.md及docs/experiments/2026-10-15-bidirectional-validation.md。
 
 黄金主系统新仓护盘（2026-10-15用户授权提前减亏，替代下方历史v1默认）：新仓默认`profit-floor-v2`，`strategies/profit_guard.py`在确认及最新报价扣费用后均有正浮盈时先按原M5回撤空间收紧SL减小可能亏损，空间够时保本/锁正利润，日志和AI3事实区分阶段及预计净额。不能缩小M5 ATR水位、用未确认尖峰抬SL或把负净额说成锁盈。已有`profit-floor-v1`及无标记legacy仓不迁移，GuardStore容器仍v1，内层逐仓保存确切规则版本；实际.env中的`profit_floor_v1`是新引擎兼容入口，新订单冻结v2，显式回放v1仍是旧规则。最终broker执行复核当前身份/报价/费用/已保存确认目标、网格与原回撤空间，失败不确认、SL只收紧、原SLTP/风险/AI策略判断不变；实际.env、日志状态、crypto及local_guard_demo不改，完整三个黄金脚本+strategies由用户复制重启。设计见docs/superpowers/specs/2026-10-15-early-loss-reduction.md。
 
@@ -50,7 +50,7 @@
 当前默认三盘模式（2026-10-10用户明确要求放松模拟策略后启用）：
 
 - 三盘定义和各自entry/review/guardian提示词在`strategies/definitions/{asia,london,us}_adaptive.py`；共同事实与真实分析检查点在`strategies/adaptive.py`。亚盘07–15、欧盘15–20、美盘20–次日07为北京时间策略分段，未移动夏令时。亚盘可趋势交易，不假定永远区间；分盘菜单只是AI参考，不是固定路线。
-- `analysis_mode=True`时本地只是软分与真实行情上下文，本地no/低分、无Fib/首次回踩/开盘窗口、单根M5反向都不剥夺AI-1自主分析。数据/指纹/时间错、H1反向和消费/冷却仍拒绝。关闭AI时粗筛不会直接交易。
+- `analysis_mode=True`时本地只是软分与真实行情上下文，本地no/低分、无Fib/首次回踩/开盘窗口、单根M5反向都不剥夺AI-1自主分析。数据/指纹/时间错、当前版本方向不许可和消费/冷却仍拒绝；2026-10-15起新三盘采用上方双向许可，旧无声明仍H1-only。关闭AI时粗筛不会直接交易。
 - `analysis_checkpoint`绑定最新已收盘M5/M15和UTC偏移，明确不是已确认交易触发；每检查点最多一次订单尝试，预提交消费和恢复token保留。新M15、空闲的新M5和启动可分析，普通派发同检查点去重；不增加付费重审。
 - AI方案参考成功请求买Ask/卖Bid，旧模式参考价格不变。新模式参考目标上限3R、90分钟持仓复核、平仓冷却60秒；自主仓时间本身不强平，AI-2核固定SL/TP与当前报价，AI-3用原持仓理由及有效holding_review。H1、SL8、RR1.5、三根M5极值+缓冲、EMA1.5ATR、实时触发侧2倍stop_buffer均保留。
 - 新默认模式依据用户授权用于模拟验证，不要求历史盈利作为启用门；旧区域/三固定策略的亏损回放结论保留，不能改写成盈利证明。完整离线AI链路测试证明代码通路，实际频率/成本/收益须看新的服务器日志。设计见`docs/superpowers/specs/2026-10-10-adaptive-session-demo.md`。

@@ -37,3 +37,5 @@ py -3.12 xauusd_fib_volume_pa_ai3.py --self-test
 ```
 
 离线通过说明规则和程序路径按设计工作，不代表中转服务时延、真实成交或策略收益已验证。
+
+2026-10-15三盘采用[双向短线许可](docs/superpowers/specs/2026-10-15-bidirectional-tactical-permission.md)：H1真实背景与闭合M15结构分开，有证明时可评估逆H1的BUY或SELL；失效前不只凭慢H1反复试原方向。仍须保护真实规范支点及近三M5，SL8/RR1.5/追价等硬门保留。每轮一次AI1请求；持仓继续原AI3与锁盈规则。完整更新三个黄金脚本和strategies后自行重启，实际.env无需改写。离线测试与历史候选诊断不代表新增交易收益，见[验证记录](docs/experiments/2026-10-15-bidirectional-validation.md)。
