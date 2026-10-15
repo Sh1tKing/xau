@@ -526,13 +526,13 @@ ENTRY_BAR_TIMEFRAME = mt5.TIMEFRAME_M15
 
 
 def frozen_guardian_policy():
-    mode = os.getenv("FIB_PA_GUARDIAN_POLICY", "profit_floor_v2").strip()
+    mode = os.getenv("FIB_PA_GUARDIAN_POLICY", "profit_floor_v3").strip()
     if mode == "legacy":
         return None
-    # v1 remains an engine configuration alias. Frozen position rules, however,
+    # v1/v2 remain engine configuration aliases. Frozen position rules, however,
     # retain their own exact version and are never rebuilt from this default.
-    if mode not in ("profit_floor_v1", "profit_floor_v2"):
-        raise ValueError("FIB_PA_GUARDIAN_POLICY must be profit_floor_v2, profit_floor_v1 or legacy")
+    if mode not in ("profit_floor_v1", "profit_floor_v2", "profit_floor_v3"):
+        raise ValueError("FIB_PA_GUARDIAN_POLICY must be profit_floor_v3, profit_floor_v2, profit_floor_v1 or legacy")
     names = {"min_net_lock": ("MIN_NET", .20), "fee_reserve": ("FEE_RESERVE", .10),
              "room_atr": ("ROOM_ATR", 1.), "room_spread": ("ROOM_SPREAD", 3.),
              "room_abs": ("ROOM_ABS", .50), "advance_abs": ("ADVANCE_ABS", .20),
@@ -2161,7 +2161,7 @@ class FibVolumePATrader:
         if self.guard_store.error:
             logger.warning("锁盈状态读取失败，保留服务器保护并阻止新策略入场: %s", self.guard_store.error)
         logger.info("护盘版本=%s 新订单模式=%s 轮询=%ss；已开仓按原冻结规则，确认保护线只收紧不回退",
-                    PROFIT_GUARD_VERSION, os.getenv("FIB_PA_GUARDIAN_POLICY", "profit_floor_v2"), POLL_SECONDS)
+                    PROFIT_GUARD_VERSION, os.getenv("FIB_PA_GUARDIAN_POLICY", "profit_floor_v3"), POLL_SECONDS)
         logger.info("护盘报价版本=%s 固定服务器UTC偏移；最大报价年龄=%ss 时钟领先容差=%ss",
                     GUARDIAN_QUOTE_CLOCK_VERSION, GUARDIAN_MAX_QUOTE_AGE, GUARDIAN_MAX_CLOCK_LEAD)
         state_path = os.getenv("FIB_PA_STRATEGY_STATE_FILE", "").strip() or os.path.join(LOG_DIR, "strategy_event_state.json")
@@ -2829,13 +2829,14 @@ class FibVolumePATrader:
             return stop_loss > entry_price and take_profit > 0 and take_profit < entry_price
         return False
 
-    def modify_position_sl(self, position, new_sl: float, reason: str) -> bool:
+    def modify_position_sl(self, position, new_sl: float, reason: str, *,
+                           new_take_profit=None, expected_identity=None, tp_validator=None) -> bool:
         ticket = int(getattr(position, "ticket", 0))
         try:
-            proposed_sl = float(new_sl)
+            proposed_sl = None if new_sl is None and new_take_profit is not None else float(new_sl)
         except (TypeError, ValueError, OverflowError):
             return False
-        if ticket <= 0 or not math.isfinite(proposed_sl) or proposed_sl <= 0:
+        if ticket <= 0 or proposed_sl is not None and (not math.isfinite(proposed_sl) or proposed_sl <= 0):
             return False
 
         # The caller's object may predate another guardian/AI-3 modification.
@@ -2853,11 +2854,18 @@ class FibVolumePATrader:
                 or expected_identifier and int(getattr(live, "identifier", 0) or 0) != expected_identifier):
             logger.warning("护盘修改拒绝：最新持仓身份不符 ticket=%s", ticket)
             return False
+        if expected_identity is not None and guardian_identity(live) != expected_identity:
+            logger.warning("护盘修改拒绝：原请求完整持仓身份已变化 ticket=%s", ticket)
+            return False
         if live.type not in (mt5.POSITION_TYPE_BUY, mt5.POSITION_TYPE_SELL):
             return False
         direction = "BUY" if live.type == mt5.POSITION_TYPE_BUY else "SELL"
         current_sl = float(live.sl or 0.0)
         current_tp = float(live.tp or 0.0)
+        preserve_server_sl = proposed_sl is None
+        proposed_sl = current_sl if proposed_sl is None else proposed_sl
+        if proposed_sl <= 0 or new_take_profit is not None and not callable(tp_validator):
+            return False
         info = mt5.symbol_info(SYMBOL)
         tick = mt5.symbol_info_tick(SYMBOL)
         try:
@@ -2877,8 +2885,10 @@ class FibVolumePATrader:
             return False
         rounding = ROUND_FLOOR if direction == "BUY" else ROUND_CEILING
         grid = Decimal(str(tick_size))
-        new_sl = round(float((Decimal(str(proposed_sl)) / grid).to_integral_value(rounding=rounding) * grid), digits)
-        if not sl_change_is_tighter(direction, current_sl, new_sl):
+        new_sl = (current_sl if preserve_server_sl else
+                  round(float((Decimal(str(proposed_sl)) / grid).to_integral_value(rounding=rounding) * grid), digits))
+        sl_changed = sl_change_is_tighter(direction, current_sl, new_sl)
+        if not sl_changed and not (new_take_profit is not None and new_sl == current_sl):
             logger.info("护盘拒绝放宽或重复止损 ticket=%s: 最新SL=%s 建议SL=%s (%s)",
                         ticket, current_sl, new_sl, reason)
             return False
@@ -2894,16 +2904,27 @@ class FibVolumePATrader:
             if not self.guardian_quote_ready(state, live, tick, "modify_sl"):
                 return False
             guard.acknowledge(direction, current_sl)
-            if not (new_sl == guard.protected_sl and current_sl != guard.protected_sl) and not sl_change_is_tighter(
+            if sl_changed and not (new_sl == guard.protected_sl and current_sl != guard.protected_sl) and not sl_change_is_tighter(
                     direction, guard.protected_sl, new_sl):
                 logger.info("锁盈底线不回退 ticket=%s protected=%s target=%s", ticket, guard.protected_sl, new_sl)
                 return False
             restoring = reason == "restore profit protection" and new_sl == guard.protected_sl
-            if not restoring and stop_gap + tick_size * 1e-8 < guard.room(guard.atr_floor, ask - bid, required_gap):
+            cash = self.profit_cash_facts(live, state) if guard.rules["version"] == PROFIT_GUARD_VERSION else None
+            record = self.guard_store.records.get(str(ticket),{})
+            saved = record.get("profit_floor",{})
+            confirmed_saved = (record.get("identity") == state.identity and saved.get("rules") == guard.rules
+                and saved.get("confirmed_price") == guard.confirmed_price and saved.get("desired_sl",0) > 0
+                and sign*(new_sl-saved["desired_sl"]) <= 1e-8)
+            stepped = (sl_changed and confirmed_saved and cash is not None and guard.is_saved_stepped_stop(new_sl,
+                direction=direction, entry=state.entry_price, risk=state.risk, price=close_price,
+                spread=ask-bid, broker_gap=required_gap, cash_per_price=cash[0], costs=cash[1], tick_size=tick_size))
+            required_room = (guard.floor_room(state.risk, ask-bid, required_gap) if stepped
+                             else guard.room(guard.atr_floor, ask-bid, required_gap))
+            if sl_changed and not restoring and stop_gap + tick_size * 1e-8 < required_room:
                 logger.info("锁盈修改暂缓：回撤空间不足 ticket=%s target=%s room=%s (%s)",
-                            ticket, new_sl, guard.room(guard.atr_floor, ask - bid, required_gap), reason)
+                            ticket, new_sl, required_room, reason)
                 return False
-            if reason in ("local profit floor", "local loss reduction"):
+            if sl_changed and reason in ("local profit floor", "local loss reduction"):
                 cash = self.profit_cash_facts(live, state)
                 projected = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY if sign > 0 else mt5.ORDER_TYPE_SELL,
                                                  SYMBOL, float(live.volume), state.entry_price, new_sl)
@@ -2911,6 +2932,10 @@ class FibVolumePATrader:
                     logger.info("保护修改暂缓：利润模型无效 ticket=%s", ticket)
                     return False
                 if reason == "local profit floor":
+                    if (guard.rules["version"] == PROFIT_GUARD_VERSION
+                            and not confirmed_saved):
+                        logger.info("锁盈修改暂缓：没有持久确认目标 ticket=%s", ticket)
+                        return False
                     if projected - cash[1] + 1e-8 < guard.rules["min_net_lock"]:
                         logger.info("锁盈修改暂缓：量化后预计净利润不足 ticket=%s", ticket)
                         return False
@@ -2924,10 +2949,20 @@ class FibVolumePATrader:
                             or sign * (new_sl - guard.desired_sl) > tick_size * 1e-8):
                         logger.info("减亏修改暂缓：无冻结确认目标、当前净浮盈不足或量化目标过近 ticket=%s", ticket)
                         return False
+        target_tp = current_tp
+        if new_take_profit is not None:
+            try:
+                target_tp = tp_validator(live, tick, info, new_sl, new_take_profit)
+                if not math.isfinite(target_tp) or target_tp <= 0:
+                    raise ValueError("invalid target price")
+            except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+                logger.info("AI-3 SLTP复核拒绝 ticket=%s: %s", ticket, exc)
+                return False
         frozen_sl = current_sl > 0 and sign * (close_price - current_sl) <= freeze * point
         frozen_tp = current_tp > 0 and sign * (current_tp - close_price) <= freeze * point
         invalid_tp = current_tp > 0 and sign * (current_tp - close_price) < stops * point
-        if stop_gap + tick_size * 1e-8 < required_gap or frozen_sl or frozen_tp or invalid_tp:
+        invalid_target = new_take_profit is not None and sign*(target_tp-close_price) + 1e-8 < required_gap
+        if stop_gap + tick_size * 1e-8 < required_gap or frozen_sl or frozen_tp or invalid_tp or invalid_target:
             logger.info("护盘修改暂缓 ticket=%s direction=%s current_sl=%s target_sl=%s tp=%s "
                         "bid=%s ask=%s point=%s tick_size=%s stops_level=%s freeze_level=%s (%s)",
                         ticket, direction, current_sl, new_sl, current_tp, bid, ask,
@@ -2939,15 +2974,18 @@ class FibVolumePATrader:
             "symbol": SYMBOL,
             "position": ticket,
             "sl": new_sl,
-            "tp": current_tp,
+            "tp": target_tp,
         }
         if not ENABLE_TRADING:
-            logger.info(f"🧪 DRY-RUN 修改SL ticket={ticket}: {current_sl} -> {new_sl} ({reason})")
+            logger.info(f"🧪 DRY-RUN 修改SLTP ticket={ticket}: SL {current_sl} -> {new_sl}, TP {current_tp} -> {target_tp} ({reason})")
             return True
 
         result = mt5.order_send(request_body)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-            logger.info(f"🛡️ 护盘SL更新 ticket={ticket}: {current_sl} -> {new_sl} ({reason})")
+            if sl_changed:
+                logger.info(f"🛡️ 护盘SL更新 ticket={ticket}: {current_sl} -> {new_sl} ({reason})")
+            if target_tp != current_tp:
+                logger.info("AI-3 TP更新 ticket=%s: %s -> %s；保留原始SLTP与风险", ticket, current_tp, target_tp)
             if guard:
                 guard.acknowledge(direction, new_sl)
                 self.persist_guardian_state(state)
@@ -2955,10 +2993,11 @@ class FibVolumePATrader:
                 estimated = facts["protected_estimated_net"]
                 label = {"profit_lock": "锁盈确认", "breakeven": "保本确认",
                          "loss_reduction": "减亏确认"}.get(facts["protected_phase"], "保护确认")
-                logger.info("%s ticket=%s policy=%s protected_sl=%s estimated_net=%s peak_net=%s fee_status=%s",
-                            label, ticket, guard.rules["version"], guard.protected_sl,
-                            round(estimated, 2) if estimated is not None else None, round(guard.peak_net, 2),
-                            "opening_history_plus_exit_reserve" if guard.fees_known else "estimated_reserve")
+                if sl_changed:
+                    logger.info("%s ticket=%s policy=%s protected_sl=%s estimated_net=%s peak_net=%s fee_status=%s",
+                                label, ticket, guard.rules["version"], guard.protected_sl,
+                                round(estimated, 2) if estimated is not None else None, round(guard.peak_net, 2),
+                                "opening_history_plus_exit_reserve" if guard.fees_known else "estimated_reserve")
             return True
         retcode = result.retcode if result else "None"
         comment = result.comment if result else "无返回"
@@ -3147,16 +3186,30 @@ class FibVolumePATrader:
                 return
             target = guard.observe(direction=state.direction, entry=state.entry_price, risk=state.risk,
                                    price=price, atr=atr, spread=float(tick.ask - tick.bid), broker_gap=gap,
-                                   cash_per_price=cash[0], costs=cash[1], now=now)
+                                   cash_per_price=cash[0], costs=cash[1], now=now, tick_size=grid)
         except (AttributeError, TypeError, ValueError, OverflowError):
             return
         # Persist intent/high water separately; only successful broker updates acknowledge a lock.
         durable = self.persist_guardian_state(state)
+        # If an older higher intent no longer fits, a confirmed cash tier may
+        # still protect a smaller amount. Never force that higher intent close.
+        step = guard.stepped_floor(direction=state.direction, entry=state.entry_price,
+            risk=state.risk, price=price, spread=float(tick.ask-tick.bid), broker_gap=gap,
+            cash_per_price=cash[0], costs=cash[1], tick_size=grid)
+        if (target and step and sign*(price-target) + 1e-8 < guard.room(atr,float(tick.ask-tick.bid),gap)
+                and not guard.is_saved_stepped_stop(target, direction=state.direction, entry=state.entry_price,
+                    risk=state.risk, price=price, spread=float(tick.ask-tick.bid), broker_gap=gap,
+                    cash_per_price=cash[0], costs=cash[1], tick_size=grid)):
+            target = step["stop"]
         if target and durable and sl_change_is_tighter(state.direction, guard.protected_sl, target):
-            if sign * (target - guard.protected_sl) >= max(grid, guard.rules["advance_abs"]):
+            is_step = guard.is_saved_stepped_stop(target, direction=state.direction, entry=state.entry_price,
+                risk=state.risk, price=price, spread=float(tick.ask-tick.bid), broker_gap=gap,
+                cash_per_price=cash[0], costs=cash[1], tick_size=grid)
+            minimum_change = grid if is_step else max(grid, guard.rules["advance_abs"])
+            if sign * (target - guard.protected_sl) + 1e-8 >= minimum_change:
                 projected = guard.net_at_stop(state.direction, state.entry_price, target)
-                reason = ("local loss reduction" if guard.rules["version"] == PROFIT_GUARD_VERSION
-                          and projected is not None and projected < guard.rules["min_net_lock"]
+                reason = ("local loss reduction" if guard.rules["version"] != "profit-floor-v1"
+                          and projected is not None and projected + 1e-8 < guard.rules["min_net_lock"]
                           else "local profit floor")
                 self.modify_position_sl(position, target, reason)
 

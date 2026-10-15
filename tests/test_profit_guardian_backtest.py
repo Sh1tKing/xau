@@ -100,6 +100,21 @@ class ProfitReplayTests(unittest.TestCase):
         test.update_guardian(1)
         self.assertEqual(test.position["sl"],99.)
 
+    def test_v3_cash_floor_uses_closed_quote_and_only_the_next_bar_can_fill_it(self):
+        for side in ("buy","sell"):
+            with self.subTest(side=side):
+                test=self.control(side,guardian_policy="profit_floor_v3")
+                test.guardian_context=lambda stamp:(None,8.32)
+                test.c[0]=103.1 if side=="buy" else 96.9-test.spreads[0]
+                test.h[0],test.l[0]=111.,89.  # Unordered spikes are not confirmations.
+                test.update_guardian(0)
+                self.assertAlmostEqual(test.position["sl"],100.3 if side=="buy" else 99.7)
+                self.assertFalse(test.trades)
+                test.o[1]=103. if side=="buy" else 97.
+                test.l[1],test.h[1]=(100.,104.) if side=="buy" else (96.,100.)
+                self.assertTrue(test.check_exit(1))
+                self.assertAlmostEqual(test.trades[-1]["pnl"],.2)
+
 
 if __name__ == "__main__":
     unittest.main()

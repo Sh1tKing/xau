@@ -1,5 +1,9 @@
 # 当前默认策略：亚欧美三盘自主AI粗筛（模拟账户）
 
+2026-10-15新仓护盘更新为`profit-floor-v3`：持续确认净浮盈2/4/6/10/15时，增加0.20/0.50/1/2/4账户币种的保护底线，留原风险四分之一、三倍点差、1.00价格单位及broker要求的回撤空间；普通跟随仍保留完整M5 ATR。AI-3依据原理由和闭合M5/M15/H1复核SL及TP，可原子调整或只改TP；SL不回退，延长TP须实际SL已扣费保本。旧v1/v2/legacy仓不迁移。详见[设计](../superpowers/specs/2026-10-15-stepped-profit-and-ai3-target-review.md)。
+
+请一次覆盖三个黄金脚本及完整`strategies/`，务必包含新`strategies/guardian_review.py`。保留服务器实际`.env`及`strategy_event_state.json`、`ai3_position_state.json`、`guardian_profit_state.json`、`close_notification_state.json`、`recent_settled_trades.json`与日历缓存，再自行重启单实例。`.env`现有`profit_floor_v1/v2`无需改写，新订单采用v3；没有重启的进程仍是旧代码。实际来源提交、逐文件SHA与验证结果以`MANIFEST.json`为准。
+
 黄金新闻休息默认启用：美国非农、CPI/PPI、GDP/PCE及FOMC决议、发布会、纪要前后各15分钟暂停新开仓，已持仓继续AI-3和本地锁盈。完整复制两个主脚本、`strategies/news_calendar.py`、`strategies/calendars/us_major_events.json`及其余strategies文件并自行重启。实际.env保留即可采用默认规则，无需改模型/超时。窗口相接会合并，结束后重新获取行情，不排队执行旧单。
 
 日历后台刷新，BLS、BEA、美联储为正式日程来源，BLS失败可用Forex Factory公开周历；启动备用及缓存最长核对有效期7天。当前开发机BLS返回403、公开周历超时、BEA/Fed可访问，这不是服务器网络测试。不能把加载备用称为所有来源实时联通；超过有效期且仍取不到必要来源会明确记录“新闻日历不可用”并暂停新入场，护盘继续。观察`news-pause-v1`日志与`xau_fib_pa_logs/news_calendar.json`；`python -m strategies.news_calendar`仅检查，`--refresh`主动取公开日历并写缓存，均不连接MT5/AI；命令读取当前进程环境变量及默认配置。不要删除服务器已核对的日历缓存来迁移。详见[设计](../superpowers/specs/2026-10-14-news-entry-pause.md)。

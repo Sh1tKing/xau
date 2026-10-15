@@ -40,7 +40,7 @@ class BidirectionalStrategyContractTests(unittest.TestCase):
             strategy = definition(profile).STRATEGY
             with self.subTest(profile=profile):
                 Registry.validate(strategy)
-                self.assertEqual(strategy.version, "2")
+                self.assertEqual(strategy.version, "3")
                 self.assertEqual(strategy.direction_policy, expected)
                 self.assertEqual(strategy.manifest()["direction_policy"], expected)
                 self.assertTrue(strategy.demo_only)
@@ -163,8 +163,10 @@ class BidirectionalStrategyContractTests(unittest.TestCase):
                 self.assertIn("不以当前策略重建旧仓", guardian)
                 self.assertIn("入场许可/检查点过期不等于持仓理由失效", guardian)
                 self.assertIn("90分钟为持仓复核节点", guardian)
-                self.assertIn("profit-floor-v2", guardian)
-                self.assertIn("原噪声空间", guardian)
+                self.assertIn("profit-floor-v3", guardian)
+                self.assertIn("普通跟随保留完整M5空间", guardian)
+                self.assertIn("现金阶梯", guardian)
+                self.assertIn("tp_review", guardian)
                 self.assertIn("已有旧仓沿用原冻结规则", guardian)
 
     def test_registry_rejects_broken_policy_then_reloads_explicit_valid_source(self):

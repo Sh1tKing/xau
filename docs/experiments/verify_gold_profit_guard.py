@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--root", default=str(Path(__file__).resolve().parents[2]))
     parser.add_argument("--pattern", default="test_*.py")
     parser.add_argument("--self-tests-only", action="store_true")
+    parser.add_argument("--verbosity", type=int, choices=(0,1,2), default=1)
     args = parser.parse_args()
     logging.disable(logging.CRITICAL)
     root = Path(args.root).resolve()
@@ -93,7 +94,7 @@ def main():
                             suite.addTests(unittest.defaultTestLoader.loadTestsFromName(path.stem))
                     else:
                         suite = unittest.defaultTestLoader.discover(str(root/"tests"),pattern=args.pattern)
-                    result = unittest.TextTestRunner(verbosity=1).run(suite)
+                    result = unittest.TextTestRunner(verbosity=args.verbosity).run(suite)
             finally:
                 for scope in reversed(patches):scope.stop()
                 patches_store.stop()

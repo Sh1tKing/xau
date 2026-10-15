@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import test_profit_guardian as fixtures
-from strategies.profit_guard import ProfitFloor, GuardStore, policy
+from strategies.profit_guard import ProfitFloor, GuardStore
+policy = fixtures.policy
 
 base, ai = fixtures.base, fixtures.ai
 
@@ -202,10 +203,10 @@ class LossReductionExecutionTests(unittest.TestCase):
         self.assertEqual(loaded.records["123"]["profit_floor"]["rules"],legacy_rules)
         self.assertEqual(loaded.records["124"]["profit_floor"]["rules"]["version"],"profit-floor-v2")
 
-    def test_new_entry_compatibility_alias_freezes_v2_but_saved_v1_is_unchanged(self):
-        for mode in ("profit_floor_v1","profit_floor_v2"):
+    def test_new_entry_compatibility_alias_freezes_v3_but_saved_v1_is_unchanged(self):
+        for mode in ("profit_floor_v1","profit_floor_v2","profit_floor_v3"):
             with patch.dict(os.environ,{"FIB_PA_GUARDIAN_POLICY":mode}):
-                self.assertEqual(base.frozen_guardian_policy()["version"],"profit-floor-v2")
+                self.assertEqual(base.frozen_guardian_policy()["version"],"profit-floor-v3")
         with patch.dict(os.environ,{"FIB_PA_GUARDIAN_POLICY":"legacy"}):
             self.assertIsNone(base.frozen_guardian_policy())
 

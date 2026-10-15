@@ -14,7 +14,13 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 logging.disable(logging.CRITICAL)
 import xauusd_fib_volume_pa_ai3 as ai
-from strategies.profit_guard import ProfitFloor, GuardStore, policy, VERSION
+from strategies.profit_guard import ProfitFloor, GuardStore, policy as current_policy, VERSION
+
+
+def policy(**overrides):
+    """These are historical v2 regressions; the new v3 has dedicated cases."""
+    overrides.setdefault("version", "profit-floor-v2")
+    return current_policy(**overrides)
 
 base = ai.base
 

@@ -1,13 +1,15 @@
 """Frozen, monotonic profit protection. No terminal, AI or environment access."""
 import copy
 from dataclasses import dataclass, field, asdict
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 import json
 import math
 import os
 from pathlib import Path
 import tempfile
 
-VERSION = "profit-floor-v2"
+VERSION = "profit-floor-v3"
+LOSS_REDUCTION_VERSION = "profit-floor-v2"
 LEGACY_VERSION = "profit-floor-v1"
 # The container schema is unchanged; policies inside it keep their entry version.
 STORE_VERSION = LEGACY_VERSION
@@ -24,6 +26,13 @@ def policy(**overrides):
                   advance_abs=0.20, advance_atr=0.10, confirm_seconds=1.0,
                   stages=[[0.0, 0.30], [1.0, 0.40], [2.0, 0.50]])
     result.update(overrides)
+    if result["version"] == VERSION:
+        for key, value in dict(cash_floors=[[2., .20], [4., .50], [6., 1.], [10., 2.], [15., 4.]],
+                               floor_room_r=.25, floor_room_abs=1.,
+                               tp_review=dict(version="guardian-target-review-v1", max_r=6.,
+                                   max_age_seconds=90., max_move_r=.25,
+                                   min_change_abs=.20, min_change_atr=.10)).items():
+            result.setdefault(key, value)
     validate_policy(result)
     return result
 
@@ -31,10 +40,12 @@ def policy(**overrides):
 def validate_policy(value):
     keys = {"version", "min_net_lock", "fee_reserve", "room_atr", "room_spread",
             "room_abs", "advance_abs", "advance_atr", "confirm_seconds", "stages"}
+    if isinstance(value, dict) and value.get("version") == VERSION:
+        keys |= {"cash_floors", "floor_room_r", "floor_room_abs", "tp_review"}
     if (not isinstance(value, dict) or set(value) != keys
-            or value.get("version") not in (LEGACY_VERSION, VERSION)):
+            or value.get("version") not in (LEGACY_VERSION, LOSS_REDUCTION_VERSION, VERSION)):
         raise ValueError("unknown profit guardian policy")
-    for key in keys - {"version", "stages"}:
+    for key in keys - {"version", "stages", "cash_floors", "tp_review"}:
         if not finite(value[key], positive=key != "fee_reserve"):
             raise ValueError("invalid profit guardian parameter: " + key)
     stages = value["stages"]
@@ -49,6 +60,25 @@ def validate_policy(value):
         previous_r, previous_fraction = pair
     if stages[0][0] != 0:
         raise ValueError("profit protection cannot require an initial R threshold")
+    if value["version"] == VERSION:
+        previous_trigger, previous_floor = 0., 0.
+        floors = value["cash_floors"]
+        if not isinstance(floors, list) or not floors:
+            raise ValueError("invalid cash floor steps")
+        for pair in floors:
+            if (not isinstance(pair, list) or len(pair) != 2
+                    or not all(finite(x, positive=True) for x in pair)
+                    or pair[0] <= previous_trigger or pair[1] <= previous_floor
+                    or pair[1] < value["min_net_lock"] or pair[1] >= pair[0]):
+                raise ValueError("cash floor steps must increase and leave pullback room")
+            previous_trigger, previous_floor = pair
+        review = value["tp_review"]
+        if (not isinstance(review, dict) or set(review) != {"version", "max_r", "max_age_seconds",
+                "max_move_r", "min_change_abs", "min_change_atr"}
+                or review["version"] != "guardian-target-review-v1"
+                or not all(finite(review[k], positive=True) for k in review if k != "version")
+                or review["max_r"] > 6 or review["max_age_seconds"] > 90 or review["max_move_r"] > .25):
+            raise ValueError("invalid frozen guardian target review policy")
 
 
 def tighter(direction, old, new):
@@ -110,6 +140,57 @@ class ProfitFloor:
         return max(self.rules["room_atr"] * max(self.atr_floor, atr),
                    self.rules["room_spread"] * spread, self.rules["room_abs"], broker_gap)
 
+    def floor_room(self, risk, spread, broker_gap):
+        """The explicit v3 cash-floor exception, never a replacement M5 ATR."""
+        if self.rules["version"] != VERSION:
+            return None
+        return max(self.rules["floor_room_r"] * risk, self.rules["floor_room_abs"],
+                   self.rules["room_spread"] * spread, broker_gap)
+
+    @staticmethod
+    def cash_floor_stop(direction, entry, amount, cash_per_price, costs, tick_size):
+        sign = 1 if direction == "BUY" else -1
+        raw = Decimal(str(entry)) + sign * ((Decimal(str(amount)) + Decimal(str(costs)))
+                                           / Decimal(str(cash_per_price)))
+        if tick_size is not None:
+            if not finite(tick_size, positive=True):
+                raise ValueError("invalid cash floor price grid")
+            grid = Decimal(str(tick_size))
+            raw = (raw / grid).to_integral_value(
+                rounding=ROUND_CEILING if sign > 0 else ROUND_FLOOR) * grid
+        return float(raw)
+
+    def stepped_floor(self, *, direction, entry, risk, price, spread, broker_gap,
+                      cash_per_price, costs, tick_size=None):
+        """Only a sustained confirmed tier may authorize this narrower stop."""
+        if self.rules["version"] != VERSION:
+            return None
+        if (direction not in ("BUY", "SELL") or not all(finite(x, positive=True)
+                for x in (entry, risk, price, cash_per_price))
+                or not all(finite(x) for x in (spread, broker_gap, costs))):
+            raise ValueError("invalid cash floor facts")
+        sign = 1 if direction == "BUY" else -1
+        confirmed_net = sign * (self.confirmed_price - entry) * cash_per_price - costs
+        step = None
+        for threshold, amount in self.rules["cash_floors"]:
+            if confirmed_net + 1e-10 >= threshold:
+                step = (threshold, amount)
+        if step is None:
+            return None
+        threshold, amount = step
+        stop = self.cash_floor_stop(direction,entry,amount,cash_per_price,costs,tick_size)
+        room = self.floor_room(risk, spread, broker_gap)
+        if min(sign*(price-stop), sign*(self.confirmed_price-stop)) + 1e-10 < room:
+            return None  # No clamping to manufacture a feasible floor after a pullback.
+        return dict(stop=stop, trigger_net=threshold, floor_net=amount, minimum_room=room)
+
+    def is_saved_stepped_stop(self, stop, **facts):
+        step = self.stepped_floor(**facts)
+        sign = 1 if facts["direction"] == "BUY" else -1
+        return (step is not None and self.desired_sl > 0 and finite(stop, positive=True)
+                and abs(step["stop"]-stop) < 1e-8
+                and sign*(stop-self.desired_sl) <= 1e-8)
+
     def net_at_stop(self, direction, entry, stop):
         if (direction not in ("BUY", "SELL") or not finite(entry, positive=True)
                 or not finite(stop, positive=True) or self.cash_per_price <= 0):
@@ -139,7 +220,7 @@ class ProfitFloor:
     def early_reduction_target(self, *, direction, entry, price, atr, spread,
                                broker_gap, cash_per_price, costs):
         """Bound early reduction by confirmed AND current quotes, up to net breakeven."""
-        if self.rules["version"] != VERSION:
+        if self.rules["version"] not in (LOSS_REDUCTION_VERSION, VERSION):
             return None
         if (direction not in ("BUY", "SELL") or not all(finite(x, positive=True)
                 for x in (entry, price, atr, cash_per_price))
@@ -154,7 +235,7 @@ class ProfitFloor:
         return entry + sign * ((min(available, 0.) + costs) / cash_per_price)
 
     def observe(self, *, direction, entry, risk, price, atr, spread, broker_gap,
-                cash_per_price, costs, now, closed_bar_proxy=False):
+                cash_per_price, costs, now, closed_bar_proxy=False, tick_size=None):
         """Propose only from sustained new favorable quotes, never from falling ATR.
 
         Prices are executable close-side quotes. Costs exclude spread (already in
@@ -167,8 +248,24 @@ class ProfitFloor:
         sign = 1 if direction == "BUY" else -1
         self.atr_floor = max(self.atr_floor, atr)
         self.cash_per_price, self.cost_cash = cash_per_price, costs
+        # A previously sustained tier can become executable after spread or
+        # broker distance normalizes. It never borrows an unconfirmed price.
+        ready = self.stepped_floor(direction=direction,entry=entry,risk=risk,price=price,
+            spread=spread,broker_gap=broker_gap,cash_per_price=cash_per_price,costs=costs,tick_size=tick_size)
+        if (ready and tighter(direction,self.protected_sl,ready["stop"])
+                and tighter(direction,self.desired_sl,ready["stop"])):
+            self.desired_sl = ready["stop"]
         step = max(self.rules["advance_abs"], self.rules["advance_atr"] * self.atr_floor)
-        if sign * (price - self.confirmed_price) + 1e-10 < step:
+        confirmed_net = sign * (self.confirmed_price-entry) * cash_per_price-costs
+        live_net = sign * (price-entry) * cash_per_price-costs
+        crossing_floor = False
+        if self.rules["version"] == VERSION:
+            for threshold, amount in self.rules["cash_floors"]:
+                stop = self.cash_floor_stop(direction,entry,amount,cash_per_price,costs,tick_size)
+                executable_net = sign*(stop-entry)*cash_per_price-costs
+                required_net = max(threshold,executable_net+self.floor_room(risk,spread,broker_gap)*cash_per_price)
+                crossing_floor |= confirmed_net + 1e-10 < required_net <= live_net + 1e-10
+        if sign * (price - self.confirmed_price) + 1e-10 < step and not crossing_floor:
             self.pending_price = self.pending_since = self.pending_last_at = 0.0
             return self.desired_sl or None
         if not closed_bar_proxy and (not self.pending_since or now < self.pending_since
@@ -196,19 +293,24 @@ class ProfitFloor:
                 fraction = retained
         available = sign * (price - entry) * cash_per_price - costs
         available -= self.room(atr, spread, broker_gap) * cash_per_price
-        if self.rules["version"] == VERSION:
+        if self.rules["version"] in (LOSS_REDUCTION_VERSION, VERSION):
             # Even positive locks cannot borrow room from an unconfirmed spike.
             available = min(available, net - self.room(atr, spread, broker_gap) * cash_per_price)
         lock_cash = min(net * fraction, available)
+        candidate = None
         if lock_cash + 1e-10 < self.rules["min_net_lock"]:
             candidate = self.early_reduction_target(
                 direction=direction, entry=entry, price=price, atr=atr, spread=spread,
                 broker_gap=broker_gap, cash_per_price=cash_per_price, costs=costs)
-            if candidate is None or not tighter(direction, self.protected_sl, candidate):
-                return self.desired_sl or None
         else:
             candidate = entry + sign * ((lock_cash + costs) / cash_per_price)
-        if tighter(direction, self.desired_sl, candidate):
+        step = self.stepped_floor(direction=direction, entry=entry, risk=risk, price=price,
+            spread=spread, broker_gap=broker_gap, cash_per_price=cash_per_price,
+            costs=costs, tick_size=tick_size)
+        if step and (candidate is None or tighter(direction, candidate, step["stop"])):
+            candidate = step["stop"]
+        if (candidate is not None and tighter(direction, self.protected_sl, candidate)
+                and tighter(direction, self.desired_sl, candidate)):
             self.desired_sl = candidate
         return self.desired_sl or None
 
