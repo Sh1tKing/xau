@@ -64,12 +64,12 @@ class TargetReviewExecutionTests(unittest.TestCase):
 
     def test_tp_only_preserves_latest_actual_sl_and_original_risk_contract(self):
         payload,proof=self.snapshot()
-        self.position.sl=101.  # A local/manual improvement while the model was thinking.
+        self.position.sl=102.  # A local/manual improvement while the model was thinking.
         self.assertTrue(self.apply(payload,proof))
         self.assertEqual(len(self.requests),1)
-        self.assertEqual((self.requests[0]["sl"],self.requests[0]["tp"]),(101.,110.))
+        self.assertEqual((self.requests[0]["sl"],self.requests[0]["tp"]),(102.,110.))
         self.assertEqual((self.state.initial_sl,self.state.initial_tp,self.state.risk),(96.,112.,4.))
-        self.assertEqual(self.state.profit_floor.protected_sl,101.)
+        self.assertEqual(self.state.profit_floor.protected_sl,102.)
 
     def test_valid_combined_sl_tp_is_one_broker_request(self):
         self.position.tp=124.

@@ -27,7 +27,7 @@ def policy(**overrides):
                   stages=[[0.0, 0.30], [1.0, 0.40], [2.0, 0.50]])
     result.update(overrides)
     if result["version"] == VERSION:
-        for key, value in dict(cash_floors=[[2., .20], [4., .50], [6., 1.], [10., 2.], [15., 4.]],
+        for key, value in dict(cash_floors=[[2., .20], [4., 1.], [6., 2.], [10., 4.], [15., 6.]],
                                floor_room_r=.25, floor_room_abs=1.,
                                tp_review=dict(version="guardian-target-review-v1", max_r=6.,
                                    max_age_seconds=90., max_move_r=.25,

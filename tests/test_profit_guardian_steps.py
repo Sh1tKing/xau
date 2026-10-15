@@ -30,8 +30,8 @@ class SteppedProfitMathTests(unittest.TestCase):
                     guard = self.guard(direction)
                     target = self.promote(guard, net, direction, atr=room)
                     self.assertEqual(guard.rules["version"], "profit-floor-v3")
-                    self.assertAlmostEqual(guard.net_at_stop(direction, 100., target), .50)
-                    self.assertAlmostEqual(abs(guard.confirmed_price-target), net-.50)
+                    self.assertAlmostEqual(guard.net_at_stop(direction, 100., target), 1.)
+                    self.assertAlmostEqual(abs(guard.confirmed_price-target), net-1.)
                     self.assertEqual(guard.atr_floor, room)
 
     def test_three_dollar_profit_keeps_most_of_its_pullback_room(self):
@@ -42,11 +42,16 @@ class SteppedProfitMathTests(unittest.TestCase):
             self.assertAlmostEqual(abs(guard.confirmed_price-target),2.80)
 
     def test_floor_moves_by_cash_steps_and_does_not_chase_between_them(self):
-        guard = self.guard()
-        for i, (net, floor) in enumerate(((2.,.2),(2.8,.2),(3.9,.2),(4.,.5),(5.9,.5),(6.,1.))):
-            target = self.promote(guard,net,now=100.+i*2)
-            self.assertAlmostEqual(guard.net_at_stop("BUY",100.,target),floor)
-            guard.acknowledge("BUY",target)
+        for direction in ("BUY", "SELL"):
+            guard = self.guard(direction)
+            sign = 1 if direction == "BUY" else -1
+            for i, (net, floor) in enumerate(((2.,.2),(2.8,.2),(3.9,.2),(4.,1.),
+                    (5.9,1.),(6.,2.),(9.9,2.),(10.,4.),(14.9,4.),(15.,6.))):
+                with self.subTest(direction=direction, net=net):
+                    target = self.promote(guard,net,direction,now=100.+i*2,atr=20.)
+                    self.assertAlmostEqual(guard.net_at_stop(direction,100.,target),floor)
+                    self.assertAlmostEqual(abs(100.+sign*(net+.10)-target),net-floor)
+                    guard.acknowledge(direction,target)
 
     def test_saved_v2_still_reduces_loss_without_new_cash_exception(self):
         guard = self.guard(version="profit-floor-v2")
@@ -84,19 +89,24 @@ class SteppedProfitMathTests(unittest.TestCase):
             sign=1 if direction=="BUY" else -1
             guard=self.guard(direction)
             price=100.+sign*2.275
-            target=self.promote(guard,4.,direction,price=price,cash_per_price=2.,costs=.55,tick_size=.25)
-            self.assertGreaterEqual(guard.net_at_stop(direction,100.,target),.5-1e-8)
+            target=self.promote(guard,4.,direction,price=price,risk=4.,cash_per_price=2.,costs=.55,tick_size=.25)
+            self.assertGreaterEqual(guard.net_at_stop(direction,100.,target),1.-1e-8)
+            self.assertGreaterEqual(abs(price-target),guard.floor_room(4.,.33,.21))
             self.assertAlmostEqual(target% .25,0.)
 
     def test_restart_keeps_frozen_steps_and_discards_unfinished_confirmation(self):
-        guard=self.guard()
-        target=self.promote(guard,3.)
+        old_steps=[[2.,.20],[4.,.50],[6.,1.],[10.,2.],[15.,4.]]
+        guard=self.guard(cash_floors=old_steps)
+        target=self.promote(guard,4.6)
+        self.assertAlmostEqual(guard.net_at_stop("BUY",100.,target),.5)
         guard.acknowledge("BUY",target)
         restored=ProfitFloor(**json.loads(json.dumps(guard.export())))
         self.assertEqual(restored.rules,guard.rules)
+        self.assertEqual(restored.rules["cash_floors"],old_steps)
+        self.assertNotEqual(restored.rules["cash_floors"],policy()["cash_floors"])
         self.assertEqual(restored.protected_sl,target)
         self.assertEqual(restored.pending_since,0.)
-        self.assertEqual(self.promote(restored,2.8,now=105.),target)
+        self.assertEqual(self.promote(restored,4.8,now=105.),target)
 
     def test_first_feasible_grid_price_still_gets_sustained_confirmation(self):
         guard=self.guard()
@@ -147,7 +157,7 @@ class SteppedProfitExecutionTests(unittest.TestCase):
         self.assertAlmostEqual(self.tick.bid-self.position.sl,2.8)
         self.assertEqual(self.position.tp,4167.90)
         self.lock(4158.42)
-        self.assertAlmostEqual(self.position.sl,4154.02)
+        self.assertAlmostEqual(self.position.sl,4154.52)
         self.assertEqual(self.state.initial_sl,4148.27)
 
     def test_same_tier_or_atr_drop_does_not_submit_extra_updates(self):
