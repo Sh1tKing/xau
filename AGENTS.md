@@ -26,6 +26,8 @@
 
 ## 当前架构
 
+2026-10-15双向短线许可设计（用户仅授权开始设计，尚未实现/启用）：方案`h1-or-m15-structure-v1`把H1背景与闭合M15结构分开，H1偏空可在有效上涨结构下评估BUY，H1偏多可在有效下跌结构下评估SELL，买卖完全镜像。反向结构未失败时，不仅凭H1和小M5影线反复试原方向；原起点或结构形成窗口内已确认支点必须真实保护，SL8不能向内裁。计划统一本地候选/计算证据/AI1提案/AI2及最终执行方向门，单请求、严格引用/v4质量、新闻休息、原锁盈和存量仓保持。参数是待验证假设，六笔挑出的亏损SELL不构成反向盈利证据，须包括全部八单及相反走势。当前运行代码仍保留原H1硬方向限制，不得把设计视为已经放开逆H1或改动实际.env的授权。设计及实施计划见docs/superpowers/specs/2026-10-15-bidirectional-tactical-permission.md和docs/superpowers/plans/2026-10-15-bidirectional-tactical-permission.md。
+
 黄金主系统新仓护盘（2026-10-15用户授权提前减亏，替代下方历史v1默认）：新仓默认`profit-floor-v2`，`strategies/profit_guard.py`在确认及最新报价扣费用后均有正浮盈时先按原M5回撤空间收紧SL减小可能亏损，空间够时保本/锁正利润，日志和AI3事实区分阶段及预计净额。不能缩小M5 ATR水位、用未确认尖峰抬SL或把负净额说成锁盈。已有`profit-floor-v1`及无标记legacy仓不迁移，GuardStore容器仍v1，内层逐仓保存确切规则版本；实际.env中的`profit_floor_v1`是新引擎兼容入口，新订单冻结v2，显式回放v1仍是旧规则。最终broker执行复核当前身份/报价/费用/已保存确认目标、网格与原回撤空间，失败不确认、SL只收紧、原SLTP/风险/AI策略判断不变；实际.env、日志状态、crypto及local_guard_demo不改，完整三个黄金脚本+strategies由用户复制重启。设计见docs/superpowers/specs/2026-10-15-early-loss-reduction.md。
 
 黄金新闻入场休息（2026-10-14用户批准）：`strategies/news_calendar.py`统一`news-pause-v1`。非农/CPI/PPI/GDP/PCE/FOMC决议、发布会、纪要使用有来源的发布时间，UTC计算前后各15分钟，America/New_York处理DST，相接窗口合并；不是整段美盘禁入。BLS ICS、BEA全国JSON和Fed月历后台刷新，BLS失败可用公开Forex Factory周历；`strategies/calendars/us_major_events.json`是2026-10-14官方核对的有期限启动备用，不是永久日程。成功每6小时刷新，失败15分钟重试，已核对数据最多7天；缺少/过期/不覆盖只暂停新入场并明确日志，现仓AI3/锁盈/原SLTP/平仓监听继续。实际本机BLS403、周历超时，BEA/Fed可访问；不能宣传所有服务器已能实时取得日历。启动/M15/M5、每POST及下单预留前/最终发送前都检查；跨窗口旧提案丢弃、结束后取新行情；未POST的普通scope不消费，最终时刻若事件已持久预留则不回滚。默认启用，实际.env无需追加即采用；显式false仅供关闭或隔离历史测试，未知值拒绝入场。必须同步两主脚本、完整strategies及日程文件后用户重启。纯历史回放不获取当期日历，crypto和local_guard_demo保持原系统。不得因新闻时间强平、放宽SL、加仓重入或靠AI臆造日历。见docs/superpowers/specs/2026-10-14-news-entry-pause.md。
