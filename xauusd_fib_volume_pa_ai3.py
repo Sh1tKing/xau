@@ -25,6 +25,10 @@ import requests
 from strategies.evidence import _rounded_number, _bar_payload, _extreme_bar, bars_for_prompt, bar_times_for_prompt
 from strategies.guardian_review import (VERSION as GUARDIAN_TARGET_REVIEW_VERSION,
                                         FRAMES as GUARDIAN_TARGET_FRAMES, validate_target)
+from strategies.guardian_risk import (VERSION as GUARDIAN_RISK_REVIEW_VERSION,
+                                      FRAMES as GUARDIAN_RISK_FRAMES,
+                                      build_review as guardian_risk_facts, validate_stop,
+                                      atr14 as guardian_atr14)
 from strategies.citations import (VERSION as AI1_CITATION_VERSION, MISSING as _MISSING_EVIDENCE,
                                  build_catalog, catalog_bindings, pointer_value, resolve_references, scope_allowed)
 from strategies.quality import (CURRENT_VERSION as QUALITY_VERSION, VERSION as DIMENSIONAL_QUALITY_VERSION,
@@ -131,6 +135,7 @@ def loaded_code_signature():
                      os.path.join(BASE_DIR, "strategies", "quality.py"),
                      os.path.join(BASE_DIR, "strategies", "profit_guard.py"),
                      os.path.join(BASE_DIR, "strategies", "guardian_review.py"),
+                     os.path.join(BASE_DIR, "strategies", "guardian_risk.py"),
                      os.path.join(BASE_DIR, "strategies", "settlement.py"),
                      os.path.join(BASE_DIR, "strategies", "news_calendar.py"),
                      os.path.join(BASE_DIR, "strategies", "direction.py"),
@@ -231,7 +236,13 @@ AI3_INSTRUCTIONS = (
     "禁止放宽止损，禁止加仓，禁止新开仓。tighten_sl 必须比当前止损更有利，并给出绝对价格。"
     "核实入场理由失效时必须使用该理由指定周期的已收盘K线：M15边界用m15_bars，H1边界用h1_bars，"
     "不能从M1/M5收盘推断M15/H1已收盘破坏。对应周期或时间覆盖不足时失效证据为未知，不能凭此close。"
-    "窄震荡里的上下影线和轻微回撤选择 hold，交给已冻结的本地保护规则。"
+    "窄震荡里的上下影线和轻微回撤不直接平仓；先核实原理由和SL是否仍合理。"
+    "positions.risk_review是Python计算的闭合K线辅助事实，不是自动交易指令。m1_warning只预警，不能单独据此close。"
+    "m5_weakening/review_sl成立时，结合entry_context原入场理由评估继续hold还是tighten_sl，不要求原M15/H1理由完全失效。"
+    "继续持仓不等于维持原风险；浮亏时也可以收紧SL减亏，不必先达到正浮盈或2美元阶梯。单次浮亏本身不是收紧理由。"
+    "有利拒绝/正常回撤仍可hold；M5走弱并有合法candidate_sl时，hold理由须说明为何继续保留当前SL，不能只说尚未盈利或未到初始止损。"
+    "candidate_sl只是保留完整M5空间和闭合M1极值的参考，你可基于原理由选更宽的合法收紧价或hold，不必照抄。负candidate_estimated_net只表示预计减亏。"
+    "risk_review.available=false表示数据未知，不代表未走弱；不凭未知事实改SL。价格above/below/equal须遵循代码的实际比较，不颠倒大小。"
     "positions.profit_guard存在时，按原冻结rules.version护盘：v3增加扣费持续浮盈的现金阶梯底线；v2先减亏、再保本和分级锁盈，v1只锁正利润。"
     "protected_sl是已确认保护，desired_sl仅是未必执行的目标。protected_phase/desired_phase区分阶段；"
     "protected_estimated_net/desired_estimated_net是扣费用后的预计金额，负数只减亏、零附近为保本，不能说成已锁正利润或实际成交盈亏。"
@@ -249,10 +260,11 @@ AI3_INSTRUCTIONS = (
     "本地继续利润保护和原SLTP，原交易结构是否失效由你按已收盘证据判断。旧仓没有profit_guard时仍沿用旧护盘。"
     "不必等价格碰到初始止损才处理，但不能仅因当前浮亏或持仓时间提前退出。只有指定失效边界被已收盘K线越过，"
     "或至少两根相邻已收盘M1朝不利方向推进、最近M5结构同步恶化且没有有利拒绝时，才可close；否则优先hold。"
-    "单根影线刺穿但收盘收回不算结构失效。浮盈单可以把止损收紧到入场价以上（BUY）或以下（SELL）来锁定利润。"
+    "单根影线刺穿但收盘收回不算结构失效。浮盈可锁利，浮亏也可依据闭合结构主动减险；两者仍须原M5回撤空间和最新报价可执行。"
     "输入的r_now和profit只是当前快照，hold_minutes只是持仓时长，均不能证明持续浮亏；没有历史序列不得声称一直亏损。用已给M1/M5收盘序列说明推进或拒绝的具体证据。"
     "未提供原始入场结构时，不得断言原始入场结构已失效；可以依据明确的近期M1/M5结构恶化提前减亏。仅持仓时间长、单次浮亏或一根反向K线不足以close。"
-    "先对照entry_context核实原入场理由，不重新评分。"
+    "先对照entry_context核实原入场理由，不重新评分。liquidity_sweep_evidence分别给出pivot/sweep/confirmation；"
+    "bar_time是最新确认K线时间，不一定是扫点时间；prior_extreme是false_break参考，不可冒充扫点支点。旧证据缺少角色时勿猜时间归属。"
     "max_adverse为null或覆盖范围有限时，不得写成从未回撤；只用可见区间的MFE/MAE，并明确coverage。"
     "原始K线省略的candle_parts可由OHLC还原。输出完整JSON：action、ticket（原持仓票号）、snapshot_id、new_stop_loss、new_take_profit、take_profit_evidence、reasoning；不用的价格为null、TP引用为[]。"
     "reasoning≤100汉字，保留判断所需周期/时间/价位，不复述全部行情。"
@@ -2004,10 +2016,24 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 **response_content_stats(result),
                 "cost": None,  # Rates and timeout billing belong to the provider, not guesses.
             })
+            if role == "AI-3" and snapshot.get("market_pack") is not None:
+                # Store only the visible decision, never private thinking or headers.
+                visible, visible_error = (parse_json_object(extract_chat_text(result))
+                                          if outcome == "success" else (None, None))
+                append_decision_snapshot(context.get("decision_id"), "ai3_response", {
+                    "call_id": call_id, "attempt": attempt, "channel": channel,
+                    "snapshot_id": snapshot.get("snapshot_id"), "outcome": outcome,
+                    "decision": visible, "json_error": visible_error or json_error})
 
         before_post = snapshot.get("before_post")
         if before_post is not None:
             before_post()
+        if role == "AI-3" and snapshot.get("market_pack") is not None:
+            append_decision_snapshot(context.get("decision_id"), "ai3_input", {
+                "call_id": call_id, "attempt": attempt, "channel": channel,
+                "snapshot_id": snapshot.get("snapshot_id"),
+                "risk_review_version": GUARDIAN_RISK_REVIEW_VERSION,
+                "market_evidence": snapshot["market_pack"]})
         attempted = attempt
         try:
             response = requests.post(active["url"], headers=headers, json=data, timeout=request_timeout,
@@ -3389,10 +3415,18 @@ class ThreeAITrader(base.FibVolumePATrader):
         df_m5 = self.get_rates(base.mt5.TIMEFRAME_M5, 40, shift=1)
         df_m15 = self.get_rates(base.mt5.TIMEFRAME_M15, 40, shift=1)
         df_h1 = self.get_rates(base.mt5.TIMEFRAME_H1, 40, shift=1)
+        # Full precision ATR/source proof stays on the host; prompt bars keep their
+        # existing compact representation. Never infer closed bars from a quote.
+        risk_bars = {}
+        for frame, data in (("M1", df_m1), ("M5", df_m5)):
+            columns = ["time", "open", "high", "low", "close"]
+            risk_bars[frame] = (data[columns].tail(15).to_dict("records")
+                if data is not None and all(key in data.columns for key in columns) else [])
         tick = None
         with self._mt5_lock:
             tick = base.mt5.symbol_info_tick(base.SYMBOL)
         quote = quote_from_tick(tick)
+        risk_server_now = float(getattr(tick, "time_msc", 0) or 0)/1000. or float(getattr(tick, "time", 0) or 0)
         payload = {
             "symbol": base.SYMBOL,
             "snapshot_id": request_trace_id("ai3"),
@@ -3414,6 +3448,8 @@ class ThreeAITrader(base.FibVolumePATrader):
         target_offset = None
         for position in positions:
             ticket = int(position.ticket)
+            risk_review = dict(version=GUARDIAN_RISK_REVIEW_VERSION, available=False,
+                reason="saved_guard_identity_quote_or_broker_unknown", automatic_action="none")
             with self._mt5_lock:
                 state = self.guardian_states.get(ticket)
                 profit_guard = state.profit_floor.export() if state and state.profit_floor else None
@@ -3447,6 +3483,23 @@ class ThreeAITrader(base.FibVolumePATrader):
                             cash_per_price=state.profit_floor.cash_per_price, costs=state.profit_floor.cost_cash,
                             tick_size=float(info.trade_tick_size or info.point))
                     profit_guard["fee_status"] = "opening_history_plus_exit_reserve" if state.profit_floor.fees_known else "estimated_reserve"
+                    if (initial_target_namespace and profit_guard["quote_status"]["valid"] and broker_gap > 0
+                            and target_positions[str(ticket)]["identity"] == state.identity):
+                        cash = self.profit_cash_facts(position, state)
+                        profit_guard.update(state.profit_floor.export())
+                        profit_guard.update(state.profit_floor.protection_details(
+                            state.direction, state.entry_price, state.initial_sl))
+                        profit_guard["fee_status"] = "opening_history_plus_exit_reserve" if state.profit_floor.fees_known else "estimated_reserve"
+                        risk_review = guardian_risk_facts(direction=state.direction,
+                            entry_time=state.identity["time"], entry=state.entry_price,
+                            current_sl=float(position.sl or 0.), bid=float(tick.bid), ask=float(tick.ask),
+                            server_now=risk_server_now, m1=risk_bars["M1"], m5=risk_bars["M5"],
+                            atr_floor=state.profit_floor.atr_floor,
+                            room_atr=state.profit_floor.rules["room_atr"],
+                            room_spread=state.profit_floor.rules["room_spread"],
+                            room_abs=state.profit_floor.rules["room_abs"], broker_gap=broker_gap,
+                            tick_size=float(info.trade_tick_size or info.point),
+                            cash_per_price=cash[0] if cash else None, costs=cash[1] if cash else None)
             with self._state_lock:
                 saved_context = self.entry_contexts.get(str(ticket))
                 context = dict(saved_context) if isinstance(saved_context, dict) else None
@@ -3499,6 +3552,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                 "profit": round(float(position.profit or 0), 2),
                 "virtual_sl": round(float(state.virtual_sl), 2) if state else 0,
                 "profit_guard": profit_guard,
+                "risk_review": risk_review,
                 "hold_minutes": round(max(0.0, hold_minutes), 1),
                 "holding_review": base.holding_status(lifecycle_state, ticket, quote["observed_at"]),
                 "initial_risk": round(risk, 2) if risk > 0 else None,
@@ -3510,6 +3564,12 @@ class ThreeAITrader(base.FibVolumePATrader):
         if state_changed:
             self.save_entry_contexts()
         for item in payload["positions"]:
+            risk_review = item["risk_review"]
+            base.logger.info("AI-3走弱复核 ticket=%s available=%s M1_warning=%s M5_weakening=%s "
+                             "review_sl=%s candidate_sl=%s estimated_net=%s reason=%s",
+                             item["ticket"], risk_review.get("available"), risk_review.get("m1_warning"),
+                             risk_review.get("m5_weakening"), risk_review.get("review_sl"),
+                             risk_review.get("candidate_sl"), risk_review.get("candidate_estimated_net"), risk_review.get("reason"))
             guard = item.get("profit_guard")
             if guard:
                 base.logger.info("AI-3保护证据 ticket=%s broker_sl=%s protected_sl=%s desired_sl=%s "
@@ -3542,11 +3602,14 @@ class ThreeAITrader(base.FibVolumePATrader):
         target_proof = dict(version=GUARDIAN_TARGET_REVIEW_VERSION, snapshot_id=payload["snapshot_id"],
             account_namespace=target_namespace, observed_at=quote["observed_at"], server_offset=target_offset,
             bid=payload["bid"], ask=payload["ask"], positions=target_positions,
+            risk_review_version=GUARDIAN_RISK_REVIEW_VERSION, risk_server_now=risk_server_now,
+            risk_bars=copy.deepcopy(risk_bars),
             bars={frame:copy.deepcopy(payload.get(frame.lower()+"_bars",[])) for frame in GUARDIAN_TARGET_FRAMES})
         return {"prompt": prompt_json(
             '请只输出完整JSON: {"action":"hold|tighten_sl|adjust_protection|close","ticket":0,"snapshot_id":"本次snapshot_id","new_stop_loss":null,"new_take_profit":null,"take_profit_evidence":[],"reasoning":"..."}', payload),
                 "snapshot_id": payload["snapshot_id"], "quote": quote,
                 "protection_review": target_proof,
+                "market_pack": payload,
                 "input_pack_version": AI3_INPUT_PACK_VERSION,
                 "tickets": {int(item["ticket"]) for item in payload["positions"]},
                 "instructions": role_instructions("AI-3", [item["entry_context"].get("strategy_contract") or {} for item in payload["positions"]]),
@@ -3638,7 +3701,56 @@ class ThreeAITrader(base.FibVolumePATrader):
             if not base.sl_change_is_tighter(direction, current_sl, new_sl):
                 base.logger.info("AI-3 止损不会放宽 ticket=%s %s -> %s" % (position.ticket, current_sl, new_sl))
                 continue
-            self.modify_position_sl(position, new_sl, "AI-3 tighten")
+            state = self.guardian_states.get(int(position.ticket))
+            if state and state.profit_floor:
+                self.apply_ai3_stop_review(position, payload, review)
+            else:
+                # Legacy positions keep their original guardian path.
+                self.modify_position_sl(position, new_sl, "AI-3 tighten")
+
+    def ai3_stop_validator(self, position, payload, review):
+        """Return a final, locked broker validator; never trust a model-supplied proof."""
+        ticket = int(position.ticket)
+        state = self.guardian_states.get(ticket)
+        guard = state.profit_floor if state else None
+        if not guard or not isinstance(review, dict):
+            raise ValueError("SL original guarded POST proof unavailable")
+        expected = review.get("positions", {}).get(str(ticket), {}).get("identity")
+        if expected != state.identity:
+            raise ValueError("SL original full identity unavailable or changed")
+        def verify(live, tick, info, planned_sl, current_tp):
+            fresh = {}
+            for frame in GUARDIAN_RISK_FRAMES:
+                df = self.get_rates(getattr(base.mt5, "TIMEFRAME_"+frame), 40, shift=1)
+                columns = ["time", "open", "high", "low", "close"]
+                fresh[frame] = (df[columns].tail(15).to_dict("records")
+                    if df is not None and all(key in df.columns for key in columns) else [])
+            grid = float(info.trade_tick_size or info.point)
+            gap = max(float(info.trade_stops_level), float(info.trade_freeze_level))*float(info.point)+grid
+            # Ordinary AI risk reduction never borrows the local cash-tier room exception.
+            atr = guardian_atr14(fresh["M5"])
+            room = guard.room(atr, float(tick.ask-tick.bid), gap)
+            return validate_stop(payload, review, identity=base.guardian_identity(live),
+                account_namespace=self.guardian_target_namespace(), now=time.time(),
+                bid=float(tick.bid), ask=float(tick.ask), current_sl=float(live.sl or 0.),
+                current_tp=current_tp, risk=state.risk, planned_sl=planned_sl,
+                server_offset=guard.server_offset,
+                server_now=float(getattr(tick,"time_msc",0) or 0)/1000. or float(tick.time),
+                minimum_room=room, fresh_bars=fresh)
+        return expected, verify
+
+    def apply_ai3_stop_review(self, position, payload, review):
+        with self._mt5_lock:
+            try:
+                expected, verify = self.ai3_stop_validator(position, payload, review)
+                new_sl = payload.get("new_stop_loss")
+                if type(new_sl) not in (int,float) or not math.isfinite(new_sl) or new_sl <= 0:
+                    raise ValueError("SL absolute price invalid")
+                return self.modify_position_sl(position, new_sl, "AI-3 weakening/structure review",
+                    expected_identity=expected, sl_validator=verify)
+            except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+                base.logger.info("AI-3 SL跳过 ticket=%s: %s", position.ticket, exc)
+                return False
 
     def apply_ai3_target_review(self, position, payload, review):
         """A TP reply cannot supply or reconstruct its own trusted POST evidence."""
@@ -3663,6 +3775,12 @@ class ThreeAITrader(base.FibVolumePATrader):
             new_tp = payload.get("new_take_profit")
             if type(new_tp) not in (int,float) or not math.isfinite(new_tp) or new_tp <= 0:
                 return False
+            sl_verify = None
+            if new_sl is not None:
+                try:
+                    _, sl_verify = self.ai3_stop_validator(position, payload, review)
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    return False
             def verify(live,tick,info,planned_sl,requested_tp):
                 sign = 1 if state.direction == "BUY" else -1
                 if sign*(planned_sl-guard.protected_sl) < -1e-8:
@@ -3688,7 +3806,7 @@ class ThreeAITrader(base.FibVolumePATrader):
                     current_tp=float(live.tp or 0.),risk=state.risk,cash_per_price=cash[0],costs=cash[1],
                     tick_size=grid,broker_gap=gap,atr_floor=guard.atr_floor,rules=rules,fresh_bars=fresh)
             return self.modify_position_sl(position,new_sl,"AI-3 protection review",
-                new_take_profit=new_tp,expected_identity=expected,tp_validator=verify)
+                new_take_profit=new_tp,expected_identity=expected,tp_validator=verify,sl_validator=sl_verify)
 
     def select_ai3_positions(self, payload):
         positions = self.get_positions()
@@ -3735,6 +3853,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                          QUALITY_VERSION, QUALITY_GRADING_ORDER_VERSION, QUALITY_LEVEL_POINTS, AI_CONFIDENCE)
         base.logger.info("AI-3输入=%s 原入场证据前置、动态报价后置，保持M1复核与完整证据；实际缓存以ai_usage为准",
                          AI3_INPUT_PACK_VERSION)
+        base.logger.info("AI-3走弱复核=%s：M1只预警，闭合M5结合原入场理由评估SL；浮亏可减险，参考价不自动执行",
+                         GUARDIAN_RISK_REVIEW_VERSION)
         base.logger.info("AI-1证据引用=%s 每次POST声明快照绑定目录，ID解码后严格核候选隔离和事实路径，不修补错误旧引用",
                          AI1_CITATION_VERSION)
         base.logger.info("止损价格=%s BUY向下/SELL向上量化，严格保留M5极值缓冲与止损上限", base.STOP_PRICE_VERSION)

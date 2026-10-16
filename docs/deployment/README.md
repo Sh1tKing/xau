@@ -1,5 +1,7 @@
 # 当前默认策略：亚欧美三盘自主AI粗筛（模拟账户）
 
+2026-10-16护盘复核：`guardian-weakening-review-v1`让M1走弱只预警，最新闭合M5走弱后由AI-3结合原入场理由决定hold还是收紧SL，浮亏时也可合法减险。代码只给完整回撤空间内的参考价，不自动平仓或自动照单改SL。原profit-floor-v3离散现金阶梯、原始SLTP/风险及旧仓冻结参数保留。实际POST及可见决策写入ai3_input/ai3_response快照，便于分析真实护盘行为。完整覆盖两个主脚本和strategies，必须包含新`guardian_risk.py`；保留服务器.env、日志与全部持仓/结算状态，再自行重启单实例。代码验证不代表AI收益提高，详见[设计](../superpowers/specs/2026-10-16-ai3-weakening-review.md)。
+
 2026-10-16契约修复：新请求`entry-quality-v5`将问题程度集中到唯一issues，由Python生成等级；旧v1-v4严格兼容，原始坏卡仍拒绝。护盘使用原`profit-floor-v3`阶梯，不含暂停的连续插值。覆盖三个黄金脚本和完整strategies（含quality.py），保留服务器自己的.env、日志、持仓与结算状态，再自行重启单实例。实际模型、档位、token上限、超时和阈值无需改；准确代码签名、SHA与离线结果看本次MANIFEST。设计见[意见与评分同源](../superpowers/specs/2026-10-16-ai1-bound-quality.md)。
 
 2026-10-15新仓护盘更新为`profit-floor-v3`：持续确认净浮盈2/4/6/10/15时，增加0.20/1/2/4/6账户币种的保护底线，留原风险四分之一、三倍点差、1.00价格单位及broker要求的回撤空间；普通跟随仍保留完整M5 ATR。AI-3依据原理由和闭合M5/M15/H1复核SL及TP，可原子调整或只改TP；SL不回退，延长TP须实际SL已扣费保本。已有仓（含旧v3阶梯）不迁移。详见[设计](../superpowers/specs/2026-10-15-stepped-profit-and-ai3-target-review.md)。

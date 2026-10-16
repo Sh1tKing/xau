@@ -76,8 +76,8 @@ class GuardianClockExecutionTests(unittest.TestCase):
 
     def test_ai3_tighten_uses_same_bounded_quote_check(self):
         self.quote_with_broker_lead(105.)
-        self.trader.execute_ai3(dict(action="tighten_sl", ticket=123,
-                                    new_stop_loss=102., reasoning="offline clock regression"))
+        # POST identity/source validation is independent of this final clock gate.
+        self.assertTrue(self.trader.modify_position_sl(self.position,102.,"AI-3 tighten"))
         self.assertEqual(self.position.sl, 102.)
         self.assertEqual(self.state.profit_floor.protected_sl, 102.)
 

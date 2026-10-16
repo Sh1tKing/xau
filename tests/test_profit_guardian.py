@@ -247,7 +247,8 @@ class ProfitExecutionTests(unittest.TestCase):
             self.trader.execute_ai3(dict(action=action,ticket=123,new_stop_loss=sl,reasoning="offline"))
         self.assertEqual(self.position.sl,stop)
         self.assertEqual(len(self.requests),1)
-        self.trader.execute_ai3(dict(action="tighten_sl",ticket=123,new_stop_loss=103.,reasoning="structure"))
+        # Exercise the final floor gate; actual POST binding has dedicated risk-review tests.
+        self.assertTrue(self.trader.modify_position_sl(self.position,103.,"AI-3 tighten"))
         self.assertEqual(self.position.sl,103.)
         self.assertEqual(self.state.profit_floor.protected_sl,103.)
 

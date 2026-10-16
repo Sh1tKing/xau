@@ -51,6 +51,10 @@ def main():
             import xauusd_fib_volume_pa_ai3 as ai
             patches_state = patch.object(ai,"AI3_STATE_FILE",str(Path(temp)/"entry.json"))
             patches_state.start()
+            patches_snapshots = patch.object(ai,"AI_DECISION_SNAPSHOT_DIR",str(Path(temp)/"ai_decisions"))
+            patches_usage = patch.object(ai,"AI_USAGE_DIR",str(Path(temp)/"ai_usage"))
+            patches_snapshots.start()
+            patches_usage.start()
             original_store_init = ai.base.GuardStore.__init__
             store_number = 0
             def isolated_store(store,path):
@@ -98,6 +102,8 @@ def main():
             finally:
                 for scope in reversed(patches):scope.stop()
                 patches_store.stop()
+                patches_usage.stop()
+                patches_snapshots.stop()
                 patches_state.stop()
                 patches_log.stop()
     unchanged = before == digest()

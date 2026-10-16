@@ -1258,7 +1258,9 @@ def candle_parts(row) -> Dict[str, float]:
     }
 
 
-def detect_liquidity_sweep(df: pd.DataFrame, action: str, atr: float) -> Tuple[bool, str]:
+def detect_liquidity_sweep(df: pd.DataFrame, action: str, atr: float, evidence=None) -> Tuple[bool, str]:
+    if evidence is not None:
+        evidence.clear()
     if df is None or len(df) < 20 or atr <= 0:
         return False, ""
     work = df.reset_index(drop=True)
@@ -1280,6 +1282,8 @@ def detect_liquidity_sweep(df: pd.DataFrame, action: str, atr: float) -> Tuple[b
         last = candle_parts(work.iloc[-1])
         body_top = max(float(swept["open"]), float(swept["close"]))
         if last["close"] > body_top and last["range"] >= 0.3 * atr:
+            if evidence is not None:
+                evidence.update(liquidity_sweep_roles(source.iloc[lows[-1]], swept, work.iloc[-1], "low", swing))
             return True, "M15扫低点后收回"
     elif action == "sell" and highs:
         swing = float(source["high"].iloc[highs[-1]])
@@ -1294,8 +1298,20 @@ def detect_liquidity_sweep(df: pd.DataFrame, action: str, atr: float) -> Tuple[b
         last = candle_parts(work.iloc[-1])
         body_bottom = min(float(swept["open"]), float(swept["close"]))
         if last["close"] < body_bottom and last["range"] >= 0.3 * atr:
+            if evidence is not None:
+                evidence.update(liquidity_sweep_roles(source.iloc[highs[-1]], swept, work.iloc[-1], "high", swing))
             return True, "M15扫高点后收回"
     return False, ""
+
+def liquidity_sweep_roles(pivot, swept, confirmation, field, level):
+    """Expose the existing multi-bar event without changing its detector/score."""
+    def bar(row):
+        return {"time": int(row["time"]) if "time" in row else None,
+                **{key: float(row[key]) for key in ("open", "high", "low", "close")}}
+    return dict(pivot=bar(pivot), sweep=bar(swept), confirmation=bar(confirmation),
+                pivot_field=field, pivot_price=float(level),
+                latest_bar_role="confirmation", prior_extreme_role="false_break_reference")
+
 
 def classify_price_action(df: pd.DataFrame, action: str, atr: float, evidence=None) -> Tuple[int, str]:
     if evidence is not None:
@@ -1373,7 +1389,8 @@ def classify_price_action(df: pd.DataFrame, action: str, atr: float, evidence=No
             score += 12
             notes.append("跌破前K低点确认")
 
-    swept, sweep_note = detect_liquidity_sweep(df, action, atr)
+    sweep_facts = {} if evidence is not None else None
+    swept, sweep_note = detect_liquidity_sweep(df, action, atr, evidence=sweep_facts)
     if swept:
         score += 22
         notes.append(sweep_note)
@@ -1385,6 +1402,8 @@ def classify_price_action(df: pd.DataFrame, action: str, atr: float, evidence=No
             "min_body": float(min_body),
             "prior_extreme": float(prior_low if action == "buy" else prior_high),
             "prior_extreme_field": "low" if action == "buy" else "high",
+            "prior_extreme_role": "false_break_reference",
+            "liquidity_sweep_evidence": sweep_facts if swept else None,
             "checks": {
                 "engulfing": bool(engulfing),
                 "wick_rejection": bool(lower_rejection if action == "buy" else upper_rejection),
@@ -2830,7 +2849,8 @@ class FibVolumePATrader:
         return False
 
     def modify_position_sl(self, position, new_sl: float, reason: str, *,
-                           new_take_profit=None, expected_identity=None, tp_validator=None) -> bool:
+                           new_take_profit=None, expected_identity=None, tp_validator=None,
+                           sl_validator=None) -> bool:
         ticket = int(getattr(position, "ticket", 0))
         try:
             proposed_sl = None if new_sl is None and new_take_profit is not None else float(new_sl)
@@ -2950,6 +2970,12 @@ class FibVolumePATrader:
                         logger.info("减亏修改暂缓：无冻结确认目标、当前净浮盈不足或量化目标过近 ticket=%s", ticket)
                         return False
         target_tp = current_tp
+        if sl_validator is not None:
+            try:
+                sl_validator(live, tick, info, new_sl, current_tp)
+            except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+                logger.info("AI-3 SL复核拒绝 ticket=%s: %s", ticket, exc)
+                return False
         if new_take_profit is not None:
             try:
                 target_tp = tp_validator(live, tick, info, new_sl, new_take_profit)
