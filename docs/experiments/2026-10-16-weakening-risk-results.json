@@ -1,0 +1,2266 @@
+{
+  "source_meta": {
+    "server_offset": 3.0,
+    "point": 0.01,
+    "contract_size": 100.0,
+    "spread_now": 33,
+    "guardian_fee_cash": 0.1
+  },
+  "policy": {
+    "version": "profit-floor-v3",
+    "min_net_lock": 0.2,
+    "fee_reserve": 0.1,
+    "room_atr": 1.0,
+    "room_spread": 3.0,
+    "room_abs": 0.5,
+    "advance_abs": 0.2,
+    "advance_atr": 0.1,
+    "confirm_seconds": 1.0,
+    "stages": [
+      [
+        0.0,
+        0.3
+      ],
+      [
+        1.0,
+        0.4
+      ],
+      [
+        2.0,
+        0.5
+      ]
+    ],
+    "cash_floors": [
+      [
+        2.0,
+        0.2
+      ],
+      [
+        4.0,
+        1.0
+      ],
+      [
+        6.0,
+        2.0
+      ],
+      [
+        10.0,
+        4.0
+      ],
+      [
+        15.0,
+        6.0
+      ]
+    ],
+    "floor_room_r": 0.25,
+    "floor_room_abs": 1.0,
+    "tp_review": {
+      "version": "guardian-target-review-v1",
+      "max_r": 6.0,
+      "max_age_seconds": 90.0,
+      "max_move_r": 0.25,
+      "min_change_abs": 0.2,
+      "min_change_atr": 0.1
+    }
+  },
+  "version": "weakening-risk-proxy-v1",
+  "inputs_sha256": {
+    "xau_fib_pa_logs\\backtest\\trades_legacy_base_20261010_121738_891629_e76a49b4.csv": "dce418f972a30b84e266639a62266236967910a6c0de73f3947693ec2d738702",
+    "docs\\experiments\\2026-10-16-weakening-risk-protocol.md": "8ad270114e841c6feeddc381f2ab0c945725c9b320a0c5d1156d71d1244fe2c1",
+    "docs\\experiments\\replay_guardian_weakening.py": "38df630d0f12498c56bbc2463710a4c722999fb91b30d6a982ea01c126781506",
+    "xau_fib_pa_logs\\backtest\\rates_H1.csv": "ecf48934659fc4d3e3d52924941224fcd0ce2fb0d8ed7182a11f76a49fad7e61",
+    "xau_fib_pa_logs\\backtest\\rates_M1.csv": "3fd2d9dd10026cb6c0c323dcc79c8aeca80e83af8477a240517c8a51fb51c0aa",
+    "xau_fib_pa_logs\\backtest\\rates_M15.csv": "5fe647998b4f435db5369e6d4542f8a87d9c2307aadbf6712e5533f5e746cb2f",
+    "xau_fib_pa_logs\\backtest\\rates_M5.csv": "783a80ed2e8ba1632a66f66225e1f7d569bacf50cadc1ab27a131720b311e382",
+    "xau_fib_pa_logs\\backtest\\rates_meta.json": "3f8b712958cdd82de3dac0add936fca10311a3e54f96976b35d645da689c6198"
+  },
+  "summary": {
+    "all": {
+      "baseline": {
+        "n": 1958,
+        "wins": 1031,
+        "losses": 927,
+        "win_rate": 52.656,
+        "net": -334.15,
+        "positive": 3179.19,
+        "negative": 3513.34,
+        "profit_factor": 0.9049,
+        "mean_win": 3.0836,
+        "mean_loss": -3.79
+      },
+      "wait_0": {
+        "metrics": {
+          "n": 1958,
+          "wins": 1031,
+          "losses": 927,
+          "win_rate": 52.656,
+          "net": -329.55,
+          "positive": 3179.19,
+          "negative": 3508.74,
+          "profit_factor": 0.9061,
+          "mean_win": 3.0836,
+          "mean_loss": -3.785
+        },
+        "delta": 4.6,
+        "improved": 3,
+        "worsened": 0,
+        "unchanged": 1955,
+        "accepted": 6,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-06-26 01:00",
+            "side": "sell",
+            "baseline": -4.62,
+            "candidate": -4.62,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 01:30",
+            "side": "sell",
+            "baseline": -2.79,
+            "candidate": -2.79,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:00",
+            "side": "sell",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:15",
+            "side": "sell",
+            "baseline": -6.76,
+            "candidate": -6.76,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:50",
+            "side": "sell",
+            "baseline": -7.18,
+            "candidate": -7.18,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 03:45",
+            "side": "sell",
+            "baseline": 8.7,
+            "candidate": 8.7,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 04:15",
+            "side": "sell",
+            "baseline": -3.13,
+            "candidate": -3.13,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 11:15",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_1": {
+        "metrics": {
+          "n": 1958,
+          "wins": 1031,
+          "losses": 927,
+          "win_rate": 52.656,
+          "net": -334.15,
+          "positive": 3179.19,
+          "negative": 3513.34,
+          "profit_factor": 0.9049,
+          "mean_win": 3.0836,
+          "mean_loss": -3.79
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 1958,
+        "accepted": 2,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-06-26 01:00",
+            "side": "sell",
+            "baseline": -4.62,
+            "candidate": -4.62,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 01:30",
+            "side": "sell",
+            "baseline": -2.79,
+            "candidate": -2.79,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:00",
+            "side": "sell",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:15",
+            "side": "sell",
+            "baseline": -6.76,
+            "candidate": -6.76,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:50",
+            "side": "sell",
+            "baseline": -7.18,
+            "candidate": -7.18,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 03:45",
+            "side": "sell",
+            "baseline": 8.7,
+            "candidate": 8.7,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 04:15",
+            "side": "sell",
+            "baseline": -3.13,
+            "candidate": -3.13,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 11:15",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_2": {
+        "metrics": {
+          "n": 1958,
+          "wins": 1031,
+          "losses": 927,
+          "win_rate": 52.656,
+          "net": -334.15,
+          "positive": 3179.19,
+          "negative": 3513.34,
+          "profit_factor": 0.9049,
+          "mean_win": 3.0836,
+          "mean_loss": -3.79
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 1958,
+        "accepted": 3,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-06-26 01:00",
+            "side": "sell",
+            "baseline": -4.62,
+            "candidate": -4.62,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 01:30",
+            "side": "sell",
+            "baseline": -2.79,
+            "candidate": -2.79,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:00",
+            "side": "sell",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:15",
+            "side": "sell",
+            "baseline": -6.76,
+            "candidate": -6.76,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:50",
+            "side": "sell",
+            "baseline": -7.18,
+            "candidate": -7.18,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 03:45",
+            "side": "sell",
+            "baseline": 8.7,
+            "candidate": 8.7,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 04:15",
+            "side": "sell",
+            "baseline": -3.13,
+            "candidate": -3.13,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 11:15",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          }
+        ]
+      }
+    },
+    "buy": {
+      "baseline": {
+        "n": 908,
+        "wins": 451,
+        "losses": 457,
+        "win_rate": 49.67,
+        "net": -295.26,
+        "positive": 1473.88,
+        "negative": 1769.14,
+        "profit_factor": 0.8331,
+        "mean_win": 3.268,
+        "mean_loss": -3.8712
+      },
+      "wait_0": {
+        "metrics": {
+          "n": 908,
+          "wins": 451,
+          "losses": 457,
+          "win_rate": 49.67,
+          "net": -292.74,
+          "positive": 1473.88,
+          "negative": 1766.62,
+          "profit_factor": 0.8343,
+          "mean_win": 3.268,
+          "mean_loss": -3.8657
+        },
+        "delta": 2.52,
+        "improved": 2,
+        "worsened": 0,
+        "unchanged": 906,
+        "accepted": 4,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-06-26 16:00",
+            "side": "buy",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 16:05",
+            "side": "buy",
+            "baseline": 5.1,
+            "candidate": 5.1,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 16:25",
+            "side": "buy",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 16:50",
+            "side": "buy",
+            "baseline": -3.22,
+            "candidate": -3.22,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 17:00",
+            "side": "buy",
+            "baseline": 8.67,
+            "candidate": 8.67,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 18:45",
+            "side": "buy",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 20:00",
+            "side": "buy",
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 20:45",
+            "side": "buy",
+            "baseline": 9.74,
+            "candidate": 9.74,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_1": {
+        "metrics": {
+          "n": 908,
+          "wins": 451,
+          "losses": 457,
+          "win_rate": 49.67,
+          "net": -295.26,
+          "positive": 1473.88,
+          "negative": 1769.14,
+          "profit_factor": 0.8331,
+          "mean_win": 3.268,
+          "mean_loss": -3.8712
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 908,
+        "accepted": 2,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-06-26 16:00",
+            "side": "buy",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 16:05",
+            "side": "buy",
+            "baseline": 5.1,
+            "candidate": 5.1,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 16:25",
+            "side": "buy",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 16:50",
+            "side": "buy",
+            "baseline": -3.22,
+            "candidate": -3.22,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 17:00",
+            "side": "buy",
+            "baseline": 8.67,
+            "candidate": 8.67,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 18:45",
+            "side": "buy",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 20:00",
+            "side": "buy",
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 20:45",
+            "side": "buy",
+            "baseline": 9.74,
+            "candidate": 9.74,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_2": {
+        "metrics": {
+          "n": 908,
+          "wins": 451,
+          "losses": 457,
+          "win_rate": 49.67,
+          "net": -295.26,
+          "positive": 1473.88,
+          "negative": 1769.14,
+          "profit_factor": 0.8331,
+          "mean_win": 3.268,
+          "mean_loss": -3.8712
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 908,
+        "accepted": 2,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-06-26 16:00",
+            "side": "buy",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 16:05",
+            "side": "buy",
+            "baseline": 5.1,
+            "candidate": 5.1,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 16:25",
+            "side": "buy",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 16:50",
+            "side": "buy",
+            "baseline": -3.22,
+            "candidate": -3.22,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 17:00",
+            "side": "buy",
+            "baseline": 8.67,
+            "candidate": 8.67,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 18:45",
+            "side": "buy",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 20:00",
+            "side": "buy",
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 20:45",
+            "side": "buy",
+            "baseline": 9.74,
+            "candidate": 9.74,
+            "delta": 0.0
+          }
+        ]
+      }
+    },
+    "sell": {
+      "baseline": {
+        "n": 1050,
+        "wins": 580,
+        "losses": 470,
+        "win_rate": 55.238,
+        "net": -38.89,
+        "positive": 1705.31,
+        "negative": 1744.2,
+        "profit_factor": 0.9777,
+        "mean_win": 2.9402,
+        "mean_loss": -3.7111
+      },
+      "wait_0": {
+        "metrics": {
+          "n": 1050,
+          "wins": 580,
+          "losses": 470,
+          "win_rate": 55.238,
+          "net": -36.81,
+          "positive": 1705.31,
+          "negative": 1742.12,
+          "profit_factor": 0.9789,
+          "mean_win": 2.9402,
+          "mean_loss": -3.7066
+        },
+        "delta": 2.08,
+        "improved": 1,
+        "worsened": 0,
+        "unchanged": 1049,
+        "accepted": 2,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-06-26 01:00",
+            "side": "sell",
+            "baseline": -4.62,
+            "candidate": -4.62,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 01:30",
+            "side": "sell",
+            "baseline": -2.79,
+            "candidate": -2.79,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:00",
+            "side": "sell",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:15",
+            "side": "sell",
+            "baseline": -6.76,
+            "candidate": -6.76,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:50",
+            "side": "sell",
+            "baseline": -7.18,
+            "candidate": -7.18,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 03:45",
+            "side": "sell",
+            "baseline": 8.7,
+            "candidate": 8.7,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 04:15",
+            "side": "sell",
+            "baseline": -3.13,
+            "candidate": -3.13,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 11:15",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_1": {
+        "metrics": {
+          "n": 1050,
+          "wins": 580,
+          "losses": 470,
+          "win_rate": 55.238,
+          "net": -38.89,
+          "positive": 1705.31,
+          "negative": 1744.2,
+          "profit_factor": 0.9777,
+          "mean_win": 2.9402,
+          "mean_loss": -3.7111
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 1050,
+        "accepted": 0,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-06-26 01:00",
+            "side": "sell",
+            "baseline": -4.62,
+            "candidate": -4.62,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 01:30",
+            "side": "sell",
+            "baseline": -2.79,
+            "candidate": -2.79,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:00",
+            "side": "sell",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:15",
+            "side": "sell",
+            "baseline": -6.76,
+            "candidate": -6.76,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:50",
+            "side": "sell",
+            "baseline": -7.18,
+            "candidate": -7.18,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 03:45",
+            "side": "sell",
+            "baseline": 8.7,
+            "candidate": 8.7,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 04:15",
+            "side": "sell",
+            "baseline": -3.13,
+            "candidate": -3.13,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 11:15",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_2": {
+        "metrics": {
+          "n": 1050,
+          "wins": 580,
+          "losses": 470,
+          "win_rate": 55.238,
+          "net": -38.89,
+          "positive": 1705.31,
+          "negative": 1744.2,
+          "profit_factor": 0.9777,
+          "mean_win": 2.9402,
+          "mean_loss": -3.7111
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 1050,
+        "accepted": 1,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-06-26 01:00",
+            "side": "sell",
+            "baseline": -4.62,
+            "candidate": -4.62,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 01:30",
+            "side": "sell",
+            "baseline": -2.79,
+            "candidate": -2.79,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:00",
+            "side": "sell",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:15",
+            "side": "sell",
+            "baseline": -6.76,
+            "candidate": -6.76,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:50",
+            "side": "sell",
+            "baseline": -7.18,
+            "candidate": -7.18,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 03:45",
+            "side": "sell",
+            "baseline": 8.7,
+            "candidate": 8.7,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 04:15",
+            "side": "sell",
+            "baseline": -3.13,
+            "candidate": -3.13,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 11:15",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          }
+        ]
+      }
+    },
+    "2026-06": {
+      "baseline": {
+        "n": 80,
+        "wins": 49,
+        "losses": 31,
+        "win_rate": 61.25,
+        "net": 38.25,
+        "positive": 184.17,
+        "negative": 145.92,
+        "profit_factor": 1.2621,
+        "mean_win": 3.7586,
+        "mean_loss": -4.7071
+      },
+      "wait_0": {
+        "metrics": {
+          "n": 80,
+          "wins": 49,
+          "losses": 31,
+          "win_rate": 61.25,
+          "net": 38.25,
+          "positive": 184.17,
+          "negative": 145.92,
+          "profit_factor": 1.2621,
+          "mean_win": 3.7586,
+          "mean_loss": -4.7071
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 80,
+        "accepted": 0,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-06-26 01:00",
+            "side": "sell",
+            "baseline": -4.62,
+            "candidate": -4.62,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 01:30",
+            "side": "sell",
+            "baseline": -2.79,
+            "candidate": -2.79,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:00",
+            "side": "sell",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:15",
+            "side": "sell",
+            "baseline": -6.76,
+            "candidate": -6.76,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:50",
+            "side": "sell",
+            "baseline": -7.18,
+            "candidate": -7.18,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 03:45",
+            "side": "sell",
+            "baseline": 8.7,
+            "candidate": 8.7,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 04:15",
+            "side": "sell",
+            "baseline": -3.13,
+            "candidate": -3.13,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 11:15",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_1": {
+        "metrics": {
+          "n": 80,
+          "wins": 49,
+          "losses": 31,
+          "win_rate": 61.25,
+          "net": 38.25,
+          "positive": 184.17,
+          "negative": 145.92,
+          "profit_factor": 1.2621,
+          "mean_win": 3.7586,
+          "mean_loss": -4.7071
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 80,
+        "accepted": 0,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-06-26 01:00",
+            "side": "sell",
+            "baseline": -4.62,
+            "candidate": -4.62,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 01:30",
+            "side": "sell",
+            "baseline": -2.79,
+            "candidate": -2.79,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:00",
+            "side": "sell",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:15",
+            "side": "sell",
+            "baseline": -6.76,
+            "candidate": -6.76,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:50",
+            "side": "sell",
+            "baseline": -7.18,
+            "candidate": -7.18,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 03:45",
+            "side": "sell",
+            "baseline": 8.7,
+            "candidate": 8.7,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 04:15",
+            "side": "sell",
+            "baseline": -3.13,
+            "candidate": -3.13,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 11:15",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_2": {
+        "metrics": {
+          "n": 80,
+          "wins": 49,
+          "losses": 31,
+          "win_rate": 61.25,
+          "net": 38.25,
+          "positive": 184.17,
+          "negative": 145.92,
+          "profit_factor": 1.2621,
+          "mean_win": 3.7586,
+          "mean_loss": -4.7071
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 80,
+        "accepted": 0,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-06-26 01:00",
+            "side": "sell",
+            "baseline": -4.62,
+            "candidate": -4.62,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 01:30",
+            "side": "sell",
+            "baseline": -2.79,
+            "candidate": -2.79,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:00",
+            "side": "sell",
+            "baseline": 2.0,
+            "candidate": 2.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:15",
+            "side": "sell",
+            "baseline": -6.76,
+            "candidate": -6.76,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 02:50",
+            "side": "sell",
+            "baseline": -7.18,
+            "candidate": -7.18,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 03:45",
+            "side": "sell",
+            "baseline": 8.7,
+            "candidate": 8.7,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 04:15",
+            "side": "sell",
+            "baseline": -3.13,
+            "candidate": -3.13,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-06-26 11:15",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          }
+        ]
+      }
+    },
+    "2026-07": {
+      "baseline": {
+        "n": 618,
+        "wins": 306,
+        "losses": 312,
+        "win_rate": 49.515,
+        "net": -219.81,
+        "positive": 897.01,
+        "negative": 1116.82,
+        "profit_factor": 0.8032,
+        "mean_win": 2.9314,
+        "mean_loss": -3.5796
+      },
+      "wait_0": {
+        "metrics": {
+          "n": 618,
+          "wins": 306,
+          "losses": 312,
+          "win_rate": 49.515,
+          "net": -218.16,
+          "positive": 897.01,
+          "negative": 1115.17,
+          "profit_factor": 0.8044,
+          "mean_win": 2.9314,
+          "mean_loss": -3.5743
+        },
+        "delta": 1.65,
+        "improved": 1,
+        "worsened": 0,
+        "unchanged": 617,
+        "accepted": 2,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-07-01 00:15",
+            "side": "buy",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 00:55",
+            "side": "buy",
+            "baseline": -6.97,
+            "candidate": -6.97,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 01:05",
+            "side": "buy",
+            "baseline": -2.91,
+            "candidate": -2.91,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 01:15",
+            "side": "buy",
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 01:45",
+            "side": "buy",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 02:45",
+            "side": "buy",
+            "baseline": -1.22,
+            "candidate": -1.22,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 06:15",
+            "side": "sell",
+            "baseline": -1.19,
+            "candidate": -1.19,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 06:45",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_1": {
+        "metrics": {
+          "n": 618,
+          "wins": 306,
+          "losses": 312,
+          "win_rate": 49.515,
+          "net": -219.81,
+          "positive": 897.01,
+          "negative": 1116.82,
+          "profit_factor": 0.8032,
+          "mean_win": 2.9314,
+          "mean_loss": -3.5796
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 618,
+        "accepted": 1,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-07-01 00:15",
+            "side": "buy",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 00:55",
+            "side": "buy",
+            "baseline": -6.97,
+            "candidate": -6.97,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 01:05",
+            "side": "buy",
+            "baseline": -2.91,
+            "candidate": -2.91,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 01:15",
+            "side": "buy",
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 01:45",
+            "side": "buy",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 02:45",
+            "side": "buy",
+            "baseline": -1.22,
+            "candidate": -1.22,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 06:15",
+            "side": "sell",
+            "baseline": -1.19,
+            "candidate": -1.19,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 06:45",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_2": {
+        "metrics": {
+          "n": 618,
+          "wins": 306,
+          "losses": 312,
+          "win_rate": 49.515,
+          "net": -219.81,
+          "positive": 897.01,
+          "negative": 1116.82,
+          "profit_factor": 0.8032,
+          "mean_win": 2.9314,
+          "mean_loss": -3.5796
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 618,
+        "accepted": 1,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-07-01 00:15",
+            "side": "buy",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 00:55",
+            "side": "buy",
+            "baseline": -6.97,
+            "candidate": -6.97,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 01:05",
+            "side": "buy",
+            "baseline": -2.91,
+            "candidate": -2.91,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 01:15",
+            "side": "buy",
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 01:45",
+            "side": "buy",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 02:45",
+            "side": "buy",
+            "baseline": -1.22,
+            "candidate": -1.22,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 06:15",
+            "side": "sell",
+            "baseline": -1.19,
+            "candidate": -1.19,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-07-01 06:45",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          }
+        ]
+      }
+    },
+    "2026-08": {
+      "baseline": {
+        "n": 555,
+        "wins": 284,
+        "losses": 271,
+        "win_rate": 51.171,
+        "net": -181.95,
+        "positive": 908.95,
+        "negative": 1090.9,
+        "profit_factor": 0.8332,
+        "mean_win": 3.2005,
+        "mean_loss": -4.0255
+      },
+      "wait_0": {
+        "metrics": {
+          "n": 555,
+          "wins": 284,
+          "losses": 271,
+          "win_rate": 51.171,
+          "net": -181.08,
+          "positive": 908.95,
+          "negative": 1090.03,
+          "profit_factor": 0.8339,
+          "mean_win": 3.2005,
+          "mean_loss": -4.0223
+        },
+        "delta": 0.87,
+        "improved": 1,
+        "worsened": 0,
+        "unchanged": 554,
+        "accepted": 1,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-08-01 00:00",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 00:25",
+            "side": "sell",
+            "baseline": -3.43,
+            "candidate": -3.43,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 00:40",
+            "side": "sell",
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 00:55",
+            "side": "sell",
+            "baseline": -2.08,
+            "candidate": -2.08,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 01:50",
+            "side": "sell",
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 02:30",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 02:55",
+            "side": "sell",
+            "baseline": -2.41,
+            "candidate": -2.41,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 03:35",
+            "side": "sell",
+            "baseline": -2.11,
+            "candidate": -2.11,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_1": {
+        "metrics": {
+          "n": 555,
+          "wins": 284,
+          "losses": 271,
+          "win_rate": 51.171,
+          "net": -181.95,
+          "positive": 908.95,
+          "negative": 1090.9,
+          "profit_factor": 0.8332,
+          "mean_win": 3.2005,
+          "mean_loss": -4.0255
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 555,
+        "accepted": 0,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-08-01 00:00",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 00:25",
+            "side": "sell",
+            "baseline": -3.43,
+            "candidate": -3.43,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 00:40",
+            "side": "sell",
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 00:55",
+            "side": "sell",
+            "baseline": -2.08,
+            "candidate": -2.08,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 01:50",
+            "side": "sell",
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 02:30",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 02:55",
+            "side": "sell",
+            "baseline": -2.41,
+            "candidate": -2.41,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 03:35",
+            "side": "sell",
+            "baseline": -2.11,
+            "candidate": -2.11,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_2": {
+        "metrics": {
+          "n": 555,
+          "wins": 284,
+          "losses": 271,
+          "win_rate": 51.171,
+          "net": -181.95,
+          "positive": 908.95,
+          "negative": 1090.9,
+          "profit_factor": 0.8332,
+          "mean_win": 3.2005,
+          "mean_loss": -4.0255
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 555,
+        "accepted": 0,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-08-01 00:00",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 00:25",
+            "side": "sell",
+            "baseline": -3.43,
+            "candidate": -3.43,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 00:40",
+            "side": "sell",
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 00:55",
+            "side": "sell",
+            "baseline": -2.08,
+            "candidate": -2.08,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 01:50",
+            "side": "sell",
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 02:30",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 02:55",
+            "side": "sell",
+            "baseline": -2.41,
+            "candidate": -2.41,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-08-01 03:35",
+            "side": "sell",
+            "baseline": -2.11,
+            "candidate": -2.11,
+            "delta": 0.0
+          }
+        ]
+      }
+    },
+    "2026-09": {
+      "baseline": {
+        "n": 584,
+        "wins": 327,
+        "losses": 257,
+        "win_rate": 55.993,
+        "net": 53.28,
+        "positive": 1010.87,
+        "negative": 957.59,
+        "profit_factor": 1.0556,
+        "mean_win": 3.0913,
+        "mean_loss": -3.726
+      },
+      "wait_0": {
+        "metrics": {
+          "n": 584,
+          "wins": 327,
+          "losses": 257,
+          "win_rate": 55.993,
+          "net": 55.36,
+          "positive": 1010.87,
+          "negative": 955.51,
+          "profit_factor": 1.0579,
+          "mean_win": 3.0913,
+          "mean_loss": -3.7179
+        },
+        "delta": 2.08,
+        "improved": 1,
+        "worsened": 0,
+        "unchanged": 583,
+        "accepted": 2,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-09-01 00:05",
+            "side": "sell",
+            "baseline": -3.52,
+            "candidate": -3.52,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 00:15",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 01:20",
+            "side": "sell",
+            "baseline": 1.62,
+            "candidate": 1.62,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 01:30",
+            "side": "sell",
+            "baseline": -7.63,
+            "candidate": -7.63,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 02:00",
+            "side": "sell",
+            "baseline": 7.67,
+            "candidate": 7.67,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 02:30",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 03:00",
+            "side": "sell",
+            "baseline": -2.46,
+            "candidate": -2.46,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 03:15",
+            "side": "sell",
+            "baseline": -2.73,
+            "candidate": -2.73,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_1": {
+        "metrics": {
+          "n": 584,
+          "wins": 327,
+          "losses": 257,
+          "win_rate": 55.993,
+          "net": 53.28,
+          "positive": 1010.87,
+          "negative": 957.59,
+          "profit_factor": 1.0556,
+          "mean_win": 3.0913,
+          "mean_loss": -3.726
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 584,
+        "accepted": 0,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-09-01 00:05",
+            "side": "sell",
+            "baseline": -3.52,
+            "candidate": -3.52,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 00:15",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 01:20",
+            "side": "sell",
+            "baseline": 1.62,
+            "candidate": 1.62,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 01:30",
+            "side": "sell",
+            "baseline": -7.63,
+            "candidate": -7.63,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 02:00",
+            "side": "sell",
+            "baseline": 7.67,
+            "candidate": 7.67,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 02:30",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 03:00",
+            "side": "sell",
+            "baseline": -2.46,
+            "candidate": -2.46,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 03:15",
+            "side": "sell",
+            "baseline": -2.73,
+            "candidate": -2.73,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_2": {
+        "metrics": {
+          "n": 584,
+          "wins": 327,
+          "losses": 257,
+          "win_rate": 55.993,
+          "net": 53.28,
+          "positive": 1010.87,
+          "negative": 957.59,
+          "profit_factor": 1.0556,
+          "mean_win": 3.0913,
+          "mean_loss": -3.726
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 584,
+        "accepted": 1,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-09-01 00:05",
+            "side": "sell",
+            "baseline": -3.52,
+            "candidate": -3.52,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 00:15",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 01:20",
+            "side": "sell",
+            "baseline": 1.62,
+            "candidate": 1.62,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 01:30",
+            "side": "sell",
+            "baseline": -7.63,
+            "candidate": -7.63,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 02:00",
+            "side": "sell",
+            "baseline": 7.67,
+            "candidate": 7.67,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 02:30",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 03:00",
+            "side": "sell",
+            "baseline": -2.46,
+            "candidate": -2.46,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-09-01 03:15",
+            "side": "sell",
+            "baseline": -2.73,
+            "candidate": -2.73,
+            "delta": 0.0
+          }
+        ]
+      }
+    },
+    "2026-10": {
+      "baseline": {
+        "n": 121,
+        "wins": 65,
+        "losses": 56,
+        "win_rate": 53.719,
+        "net": -23.92,
+        "positive": 178.19,
+        "negative": 202.11,
+        "profit_factor": 0.8816,
+        "mean_win": 2.7414,
+        "mean_loss": -3.6091
+      },
+      "wait_0": {
+        "metrics": {
+          "n": 121,
+          "wins": 65,
+          "losses": 56,
+          "win_rate": 53.719,
+          "net": -23.92,
+          "positive": 178.19,
+          "negative": 202.11,
+          "profit_factor": 0.8816,
+          "mean_win": 2.7414,
+          "mean_loss": -3.6091
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 121,
+        "accepted": 1,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-10-01 02:45",
+            "side": "sell",
+            "baseline": -1.19,
+            "candidate": -1.19,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 03:25",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 03:40",
+            "side": "sell",
+            "baseline": 1.48,
+            "candidate": 1.48,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 03:50",
+            "side": "sell",
+            "baseline": -1.59,
+            "candidate": -1.59,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 03:55",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 06:25",
+            "side": "sell",
+            "baseline": 1.38,
+            "candidate": 1.38,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 08:00",
+            "side": "sell",
+            "baseline": 3.95,
+            "candidate": 3.95,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 08:15",
+            "side": "sell",
+            "baseline": 6.78,
+            "candidate": 6.78,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_1": {
+        "metrics": {
+          "n": 121,
+          "wins": 65,
+          "losses": 56,
+          "win_rate": 53.719,
+          "net": -23.92,
+          "positive": 178.19,
+          "negative": 202.11,
+          "profit_factor": 0.8816,
+          "mean_win": 2.7414,
+          "mean_loss": -3.6091
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 121,
+        "accepted": 1,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-10-01 02:45",
+            "side": "sell",
+            "baseline": -1.19,
+            "candidate": -1.19,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 03:25",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 03:40",
+            "side": "sell",
+            "baseline": 1.48,
+            "candidate": 1.48,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 03:50",
+            "side": "sell",
+            "baseline": -1.59,
+            "candidate": -1.59,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 03:55",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 06:25",
+            "side": "sell",
+            "baseline": 1.38,
+            "candidate": 1.38,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 08:00",
+            "side": "sell",
+            "baseline": 3.95,
+            "candidate": 3.95,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 08:15",
+            "side": "sell",
+            "baseline": 6.78,
+            "candidate": 6.78,
+            "delta": 0.0
+          }
+        ]
+      },
+      "wait_2": {
+        "metrics": {
+          "n": 121,
+          "wins": 65,
+          "losses": 56,
+          "win_rate": 53.719,
+          "net": -23.92,
+          "positive": 178.19,
+          "negative": 202.11,
+          "profit_factor": 0.8816,
+          "mean_win": 2.7414,
+          "mean_loss": -3.6091
+        },
+        "delta": 0.0,
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 121,
+        "accepted": 1,
+        "sign_lost": 0,
+        "sign_saved": 0,
+        "worst": [
+          {
+            "open_bj": "2026-10-01 02:45",
+            "side": "sell",
+            "baseline": -1.19,
+            "candidate": -1.19,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 03:25",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 03:40",
+            "side": "sell",
+            "baseline": 1.48,
+            "candidate": 1.48,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 03:50",
+            "side": "sell",
+            "baseline": -1.59,
+            "candidate": -1.59,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 03:55",
+            "side": "sell",
+            "baseline": 0.2,
+            "candidate": 0.2,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 06:25",
+            "side": "sell",
+            "baseline": 1.38,
+            "candidate": 1.38,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 08:00",
+            "side": "sell",
+            "baseline": 3.95,
+            "candidate": 3.95,
+            "delta": 0.0
+          },
+          {
+            "open_bj": "2026-10-01 08:15",
+            "side": "sell",
+            "baseline": 6.78,
+            "candidate": 6.78,
+            "delta": 0.0
+          }
+        ]
+      }
+    }
+  },
+  "source_integrity_unchanged": true,
+  "integrity_file_count": 103,
+  "method": "independent fixed entries, closed-M1/M5 mechanical proxy, no AI, next-bar effect; extra wait 0/1/2 M1 bars",
+  "limitations": "reused local-entry cache; not current adaptive AI outcomes, not portfolio P&L, no tick/live broker/slippage; common historical 90min cap",
+  "baseline_exact_matches_prior_full_replay": 1958,
+  "temporal_audit": "All 11 accepted pending proposals (6/2/3) have closed M5 evidence no later than signal; apply_ts >= signal_ts + extra_wait*60; all per-step SL monotonic assertions passed.",
+  "changed_pairs_wait_0": [
+    {
+      "open_bj": "2026-07-27 13:15",
+      "side": "buy",
+      "fill_server_ts": 1785140100,
+      "entry": 4094.87,
+      "sl": 4087.85,
+      "tp": 4107.2,
+      "baseline": {
+        "close_bj": "2026-07-27 13:25",
+        "exit": 4087.85,
+        "exit_reason": "初始止损",
+        "pnl": -7.12,
+        "hold_min": 10,
+        "accepted": [],
+        "rejected": 0,
+        "signals": 0
+      },
+      "wait_0": {
+        "close_bj": "2026-07-27 13:22",
+        "exit": 4089.5,
+        "exit_reason": "移动止损",
+        "pnl": -5.47,
+        "hold_min": 7,
+        "accepted": [
+          {
+            "signal_ts": 1785140400,
+            "apply_ts": 1785140400,
+            "stop": 4089.5,
+            "price": 4091.91,
+            "minimum_room": 2.4064285714285427,
+            "m5_end": 1785140400
+          }
+        ],
+        "rejected": 0,
+        "signals": 1
+      },
+      "wait_1": {
+        "close_bj": "2026-07-27 13:25",
+        "exit": 4087.85,
+        "exit_reason": "初始止损",
+        "pnl": -7.12,
+        "hold_min": 10,
+        "accepted": [],
+        "rejected": 2,
+        "signals": 2
+      },
+      "wait_2": {
+        "close_bj": "2026-07-27 13:25",
+        "exit": 4087.85,
+        "exit_reason": "初始止损",
+        "pnl": -7.12,
+        "hold_min": 10,
+        "accepted": [],
+        "rejected": 1,
+        "signals": 1
+      }
+    },
+    {
+      "open_bj": "2026-08-04 10:45",
+      "side": "buy",
+      "fill_server_ts": 1785822300,
+      "entry": 4061.87,
+      "sl": 4054.73,
+      "tp": 4074.39,
+      "baseline": {
+        "close_bj": "2026-08-04 11:42",
+        "exit": 4054.73,
+        "exit_reason": "初始止损",
+        "pnl": -7.24,
+        "hold_min": 57,
+        "accepted": [],
+        "rejected": 0,
+        "signals": 0
+      },
+      "wait_0": {
+        "close_bj": "2026-08-04 11:40",
+        "exit": 4055.6,
+        "exit_reason": "移动止损",
+        "pnl": -6.37,
+        "hold_min": 55,
+        "accepted": [
+          {
+            "signal_ts": 1785823080,
+            "apply_ts": 1785823080,
+            "stop": 4055.6,
+            "price": 4059.77,
+            "minimum_room": 4.1692857142857065,
+            "m5_end": 1785822900
+          }
+        ],
+        "rejected": 0,
+        "signals": 1
+      },
+      "wait_1": {
+        "close_bj": "2026-08-04 11:42",
+        "exit": 4054.73,
+        "exit_reason": "初始止损",
+        "pnl": -7.24,
+        "hold_min": 57,
+        "accepted": [],
+        "rejected": 1,
+        "signals": 1
+      },
+      "wait_2": {
+        "close_bj": "2026-08-04 11:42",
+        "exit": 4054.73,
+        "exit_reason": "初始止损",
+        "pnl": -7.24,
+        "hold_min": 57,
+        "accepted": [],
+        "rejected": 1,
+        "signals": 1
+      }
+    },
+    {
+      "open_bj": "2026-09-08 18:15",
+      "side": "sell",
+      "fill_server_ts": 1788873300,
+      "entry": 4396.33,
+      "sl": 4404.0,
+      "tp": 4382.47,
+      "baseline": {
+        "close_bj": "2026-09-08 18:20",
+        "exit": 4404.0,
+        "exit_reason": "初始止损",
+        "pnl": -7.77,
+        "hold_min": 5,
+        "accepted": [],
+        "rejected": 0,
+        "signals": 0
+      },
+      "wait_0": {
+        "close_bj": "2026-09-08 18:20",
+        "exit": 4401.92,
+        "exit_reason": "移动止损",
+        "pnl": -5.69,
+        "hold_min": 5,
+        "accepted": [
+          {
+            "signal_ts": 1788873600,
+            "apply_ts": 1788873600,
+            "stop": 4401.92,
+            "price": 4398.450000000001,
+            "minimum_room": 3.465714285714317,
+            "m5_end": 1788873600
+          }
+        ],
+        "rejected": 0,
+        "signals": 1
+      },
+      "wait_1": {
+        "close_bj": "2026-09-08 18:20",
+        "exit": 4404.0,
+        "exit_reason": "初始止损",
+        "pnl": -7.77,
+        "hold_min": 5,
+        "accepted": [],
+        "rejected": 0,
+        "signals": 1
+      },
+      "wait_2": {
+        "close_bj": "2026-09-08 18:20",
+        "exit": 4404.0,
+        "exit_reason": "初始止损",
+        "pnl": -7.77,
+        "hold_min": 5,
+        "accepted": [],
+        "rejected": 0,
+        "signals": 1
+      }
+    }
+  ]
+}
