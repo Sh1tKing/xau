@@ -930,6 +930,37 @@ def compact_review_pack(review):
     return {"market_evidence": result.pop("market_evidence"), **result}
 
 
+def _ai1_reference_examples(request):
+    """Format-only examples from this exact catalog, never a proposed opinion or plan."""
+    paths = {group["base"] + suffix: identifier
+             for group in request["evidence_catalog"]["groups"]
+             for identifier, suffix in group["refs"].items()}
+    examples = []
+    for index, candidate in enumerate(request.get("opportunities", [])):
+        if not candidate or candidate.get("action") not in ("buy", "sell"):
+            continue
+        side = candidate["action"]
+        prefix = "/opportunities/%s" % index
+        evidence = prefix + "/strategy_evidence/" + side + "/evidence"
+        example = {"opportunity_id": candidate["opportunity_id"], "direction": side,
+                   "usage": "仅示范字段和当前可复制ID，不是行情结论；归属、程度和理由须按本次事实独立判断。"}
+        volume = paths.get(evidence + "/volume")
+        if volume is not None:
+            example["volume_observation"] = {
+                "dimension": "counter_evidence", "kind": "observation", "cause": "volume",
+                "event_group": None, "severity": "minor",
+                "reason": "<仅当普通量构成轻微意见时，填写本次核实的量能事实>", "evidence_refs": [volume]}
+        dependencies = ["/live_quote/" + ("ask" if side == "buy" else "bid"),
+                        evidence + "/recent_extremes", prefix + "/local_plan_feasibility", "/rules/max_stop_abs"]
+        refs = [paths[path] for path in dependencies if path in paths and scope_allowed(path, index, side)]
+        if refs:
+            example["unassessed_target"] = {
+                "reason": "<仅在保护先阻断时说明目标尚未评估及其依赖；不宣称目标或RR达标>",
+                "evidence_refs": refs}
+        examples.append(example)
+    return examples
+
+
 def prepare_ai1_request_pack(pack):
     """Describe only paths that survive request compaction, with snapshot-bound IDs."""
     request = compact_market_pack(pack)
@@ -938,7 +969,11 @@ def prepare_ai1_request_pack(pack):
     rubric.pop("reference_paths", None)  # Static legacy examples were invalid in pool mode.
     rubric["reference_path_policy"] = ("evidence_refs只复制本次evidence_catalog.groups.refs的ID键；"
         "路径由该组base加对应值定义，只用共享组或所选opportunity_id/方向组。不能猜路径或沿用旧快照ID。"
-        "volume和bar_behavior是同级事实；候选参数在strategy_contract，数据在strategy_evidence/方向/evidence。")
+        "volume和bar_behavior是同级事实；候选参数在strategy_contract，数据在strategy_evidence/方向/evidence。"
+        "quality_reference_examples仅是当前格式和引用示范，不是行情结论或交易指令。")
+    rubric["output_contract"] = quality_rubric_fields()["output_contract"]
+    # Keep changing IDs after the catalog, outside the stable cached rubric prefix.
+    request["quality_reference_examples"] = _ai1_reference_examples(request)
     return request
 
 
@@ -1059,7 +1094,7 @@ def quality_rubric(analysis_mode=False):
             "trigger": ("真实原始已收盘K线所证自主打法触发可为adequate，无需固定检测器；analysis_checkpoint本身不能证明触发。" if analysis_mode else "本地M15或M5已收盘规则或strategy_evidence.closed_trigger命中可为adequate；更明确独立确认可为strong，不强制双周期。颜色、弱量不否定false_break。"),
             "protection": "止损保护命名结构、新版本的规范anchor及最近3根M5极值和原缓冲、距离不超过上限为adequate；不能用更近保护塞入SL8，不能只因相对ATR较紧就认定无保护。",
             "target": "目标有给定依据、说明重要反向障碍及合理穿越或障碍前止盈、有效报价RR至少1.5为adequate；每根影线不机械升级首障碍硬门，刚过1.5无需在其他项重复扣分。",
-            "counter_evidence": "没有可核实反向证据为strong；普通量用volume、浅回撤用shallow_retrace放observations；H1旧影线、单根M5反向、未确认M15反转仅是minor，可用opposing_structure放observations。区分这些与机器已确认的相反结构及方向blockers；已知逆H1背景不自动重大扣分。仅有轻微观察评adequate；独立及时的重大反向结构须放reservations并评weak，同cause/event只声明一次。",
+            "counter_evidence": "没有可核实反向证据可support=strong；普通量cause=volume、浅回撤cause=shallow_retrace仅在issues声明kind=observation、severity=minor。H1旧影线、单根M5反向、未确认M15反转仅是minor，可用cause=opposing_structure。区分机器已确认的相反结构和方向blockers；已知逆H1背景不自动重大扣分。独立及时的重大反向结构在issues声明kind=reservation、severity=material，Python派生等级，不另填weak或旧意见数组；同cause/event只声明一次。",
         },
         "proposal_policy": "硬伤或必要证据缺失则no；已成立的候选仅有minor意见时给出提案，最终分数及Python/AI2决定是否放行。不要将不确定未来获利当成必要字段缺失。",
         "quote_policy": ("自主候选reference_price是本次成功POST live_quote的BUY Ask/SELL Bid；coarse_reference_price与local_plan_feasibility保留原本地M15方案诊断。AI2/Python再核新报价。" if analysis_mode else "reference_price与live_quote来自不同时间，差异本身不是事实冲突；用live_quote核实当前可行性，AI2/Python还会复核执行。"),
@@ -1527,7 +1562,9 @@ def ai1_json_template():
             "invalidation": "<失效条件>", "target_basis": "<目标依据>", "fact_conflicts": [], "unknowns": [],
             "wait_basis": [{"code": "missing_trigger", "reason": "<实际等待条件>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}],
             "quality_assessment": {"version": QUALITY_VERSION, "direction": "buy", "issues": [], "dimensions": {
-                name: {"support": "adequate", "reason": "<本项正向支持；不利程度须归属唯一issues>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}
+                name: {"support": "adequate", "reason": ("<目标依据；若保护先阻断未评估，说明依赖并引用阻断事实>" if name == "target"
+                                                       else "<本项正向支持；不利程度须归属唯一issues>"),
+                       "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径，no时也非空>"]}
                 for name in QUALITY_DIMENSIONS}}}
 
 

@@ -6,6 +6,7 @@ LEDGER_VERSION = "entry-quality-v4"
 CURRENT_VERSION = "entry-quality-v5"
 LEDGER_GRADING_ORDER_VERSION = "ai1-issue-first-v1"
 GRADING_ORDER_VERSION = "ai1-bound-severity-v1"
+OUTPUT_SHAPE_VERSION = "ai1-quality-shape-v1"
 DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_evidence")
 LEVEL_RULES = {
     "strong": {"points": 20, "severity": None, "minimum_reservations": 0},
@@ -307,11 +308,28 @@ BOUND_GRADING_POLICY = (
     "独立触发缺陷或目标障碍必须声明自己的原因与真实证据，不能借其他项的意见。"
     "方向许可不等于触发；不能编造缺陷、隐藏事实或把重大意见降为轻微来通过契约。"
 )
+ISSUE_DIMENSION_POLICY = (
+    "dimension只可为structure/trigger/protection/target/counter_evidence；"
+    "volume是cause，不是第六个dimension。问题主题与归属是两个字段，按事实选择五项之一；"
+    "量能归counter_evidence只是示例，不把同cause全局强制归某一项，也不复制意见。"
+)
+NONEMPTY_REFERENCE_POLICY = (
+    "buy/sell/no均须填全五项，每项、每条issue及wait_basis的evidence_refs必须非空，至少一个本次真实引用；"
+    "观望、未评估或先被其他条件阻断都不能省略引用，不能填[]、null、占位符或旧快照ID。"
+)
+BLOCKED_TARGET_POLICY = (
+    "若保护先阻断而target尚未评估，target.reason明确说明未评估及前置依赖，"
+    "evidence_refs引用导致阻断的本次报价/保护/风险限额等实际事实，可与protection复用引用；"
+    "这不是目标已成立，不编造TP/RR，不改no为交易，也不为同一阻断再复制一条target意见。"
+    "独立的目标缺陷仍须按真实事实另声明；输入有数据但本轮未评估不等于missing_data。"
+)
+OUTPUT_SHAPE_POLICY = ISSUE_DIMENSION_POLICY + NONEMPTY_REFERENCE_POLICY + BLOCKED_TARGET_POLICY
 CURRENT_INSTRUCTIONS = (
     "按quality_rubric分析，不猜胜率、不复制本地分、不抬分。quality_assessment={version,direction,issues,dimensions}，"
     "version=" + CURRENT_VERSION + "，direction为buy/sell。" + CURRENT_RESERVATIONS_POLICY + BOUND_GRADING_POLICY
     + "仅轻微意见不剥夺合法提案；硬伤、必要证据缺失、无触发或重要障碍前空间不足则no并写顶层wait_basis。"
     "M15或M5已有确认不能因另一周期未确认声称没有触发；所有理由、意见和等待条件引用本次真实evidence_refs。"
+    + OUTPUT_SHAPE_POLICY
 )
 
 
@@ -319,7 +337,8 @@ def bound_schema(refs):
     """The only adverse severity is in its uniquely owned issue, never a second grade."""
     dimension = _object({"support": {"type": "string", "enum": ["adequate", "strong"]},
                          "reason": {"type": "string"}, "evidence_refs": refs})
-    dimension["description"] = "只声明正向支持，不另写最终level；必要证据缺失须在issues声明blocking，不能藏在reason中。"
+    dimension["description"] = ("只声明正向支持，不另写最终level；必要证据缺失须在issues声明blocking，不能藏在reason中。"
+                                + NONEMPTY_REFERENCE_POLICY + BLOCKED_TARGET_POLICY)
     branches = []
     for kind, causes, severities in (
             ("reservation", SCORED_CAUSES - {"hard_limit", "missing_data"}, ("minor", "material", "blocking")),
@@ -328,7 +347,7 @@ def bound_schema(refs):
         branches.append(_object({
             "cause": {"type": "string", "enum": sorted(causes)},
             "event_group": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-            "dimension": {"type": "string", "enum": list(DIMENSIONS)},
+            "dimension": {"type": "string", "enum": list(DIMENSIONS), "description": ISSUE_DIMENSION_POLICY},
             "kind": {"type": "string", "enum": [kind]},
             "severity": {"type": "string", "enum": list(severities)},
             "reason": {"type": "string"}, "evidence_refs": refs}))
@@ -373,7 +392,8 @@ def decode_bound(card):
             return None, "AI-1质量评估意见字段错误: " + path
         name, kind, severity = issue["dimension"], issue["kind"], issue["severity"]
         if not isinstance(name, str) or name not in DIMENSIONS or kind not in ("reservation", "observation"):
-            return None, "AI-1质量评估意见归属无效: " + path
+            return None, ("AI-1质量评估意见归属无效: %s dimension=%r kind=%r；dimension只可为%s，不能填cause"
+                          % (path, name, kind, "/".join(DIMENSIONS)))
         if not isinstance(severity, str) or severity not in ("minor", "material", "blocking"):
             return None, "AI-1质量评估意见程度无效: " + path
         cause, event, refs = issue["cause"], issue["event_group"], issue["evidence_refs"]
@@ -412,5 +432,9 @@ def bound_rubric_fields():
     fields = rubric_fields()
     fields.update(version=CURRENT_VERSION, reservations_policy=CURRENT_RESERVATIONS_POLICY,
                   issue_layout="single_ledger_bound_severity", grading_order_version=GRADING_ORDER_VERSION,
-                  grading_order_policy=BOUND_GRADING_POLICY)
+                  grading_order_policy=BOUND_GRADING_POLICY,
+                  output_contract={"version": OUTPUT_SHAPE_VERSION, "dimension_values": list(DIMENSIONS),
+                                   "minimum_evidence_refs": 1, "issue_dimension_policy": ISSUE_DIMENSION_POLICY,
+                                   "reference_policy": NONEMPTY_REFERENCE_POLICY,
+                                   "blocked_target_policy": BLOCKED_TARGET_POLICY})
     return fields

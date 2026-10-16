@@ -113,7 +113,9 @@ def _paths(value,base,depth):
 
 
 def build_catalog(pack):
-    source={k:v for k,v in pack.items() if k not in ('evidence_catalog','quality_rubric')}
+    # Format guidance contains current catalog IDs, not source facts; including
+    # it would create a circular scope hash. It is never an allowed citation root.
+    source={k:v for k,v in pack.items() if k not in ('evidence_catalog','quality_rubric','quality_reference_examples')}
     scope=hashlib.sha256(json.dumps(source,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()[:10]
     groups=[]
     def add(base,paths,owner=None):
