@@ -28,6 +28,7 @@ from strategies.guardian_review import (VERSION as GUARDIAN_TARGET_REVIEW_VERSIO
 from strategies.citations import (VERSION as AI1_CITATION_VERSION, MISSING as _MISSING_EVIDENCE,
                                  build_catalog, catalog_bindings, pointer_value, resolve_references, scope_allowed)
 from strategies.quality import (CURRENT_VERSION as QUALITY_VERSION, VERSION as DIMENSIONAL_QUALITY_VERSION,
+                                LEDGER_VERSION as LEDGER_QUALITY_VERSION,
                                 GRADING_ORDER_VERSION as QUALITY_GRADING_ORDER_VERSION,
                                 PREVIOUS_VERSION as PREVIOUS_QUALITY_VERSION,
                                 LEVEL_POINTS as QUALITY_LEVEL_POINTS, DIMENSIONS as QUALITY_DIMENSIONS,
@@ -36,7 +37,8 @@ from strategies.quality import (CURRENT_VERSION as QUALITY_VERSION, VERSION as D
                                 ISSUE_DEDUPLICATION_POLICY as QUALITY_DEDUPLICATION_POLICY,
                                 CURRENT_INSTRUCTIONS as QUALITY_INSTRUCTIONS, dimension_error as quality_dimension_error,
                                 dimension_schema as quality_dimension_schema, ledger_schema as quality_ledger_schema,
-                                decode_ledger as decode_quality_ledger, ledger_rubric_fields as quality_rubric_fields)
+                                decode_ledger as decode_quality_ledger, bound_schema as quality_bound_schema,
+                                decode_bound as decode_bound_quality, bound_rubric_fields as quality_rubric_fields)
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -215,7 +217,9 @@ AI2_INSTRUCTIONS += PRICE_ACTION_INSTRUCTIONS
 AI1_INSTRUCTIONS += QUALITY_INSTRUCTIONS + (
     "本次输入有evidence_catalog时，evidence_refs只复制目录中的短ID，不手写、拼接或猜测JSON路径；目录标注所属opportunity_id和direction，只选自身组或共享组。目录base+值是Python声明的实际路径，不需要自行输出。"
     "没有目录的旧输入才用真实JSON Pointer。每项reason≤35汉字，只列必要证据；同cause/event只扣一项。"
-    "Python据level加总，不输出自由confidence；cause的定义以quality_rubric.cause_rules为准。"
+    "Python据唯一意见的severity和本项support生成等级再加总，不输出level或自由confidence；cause定义以quality_rubric.cause_rules为准。"
+    "remaining_stop_space只属于原本地固定SL/TP：BUY为Bid-该SL，SELL为该SL-Ask；不是Ask/Bid到M5极值的距离。"
+    "它不足时可自主提出另一个有真实保护依据且满足全部风险门的方案，不能把本地原方案失败当成全局禁止。"
     "执行止损空间问题归protection，实时RR不足归target，不能因报价漂移把已命中的触发评missing。"
     "no仍评允许方向，wait_basis列{code,reason,evidence_refs}，code为hard_limit/missing_structure/missing_trigger/missing_data/target_space/material_counter_evidence。"
     "已有周期触发不写missing_trigger；仅minor且位置/确认/保护/目标成立应提案交审核，不无限等待更漂亮形态。"
@@ -901,7 +905,7 @@ def compact_review_pack(review):
     result["market_evidence"] = compact_market_pack(result["market_evidence"])
     result["proposal"] = {key: value for key, value in result["proposal"].items()
                           if key not in ("details", "reasoning")}
-    for key in ("quality_assessment", "quality_score", "quality_version", "model_reported_confidence"):
+    for key in ("quality_assessment", "quality_score", "quality_version", "quality_grades", "model_reported_confidence"):
         result["ai1_raw_proposal"].pop(key, None)
     market = result["market_evidence"]
     for key in ("atr", "h1_trend", "m15_trend", "regime", "regime_text", "session", "setup",
@@ -1118,6 +1122,21 @@ def normalize_ai1_quality(payload, pack):
         return _normalize_ai1_quality_v1(payload, pack)
     wire_payload, wire_version = payload, version
     if version == QUALITY_VERSION:
+        projection, error = decode_bound_quality(card)
+        if error:
+            return wire_payload, error
+        for item in list(card["dimensions"].values()) + card["issues"]:
+            invalid = [ref for ref in item["evidence_refs"] if not _evidence_pointer_exists(pack, ref)]
+            if invalid:
+                return wire_payload, "AI-1质量评估证据路径无效: %s" % invalid
+        normalized, error = _normalize_ai1_quality_v1({**payload, "quality_assessment": projection}, pack)
+        if error:
+            return wire_payload, error
+        normalized["quality_version"] = wire_version
+        normalized["quality_assessment"] = copy.deepcopy(wire_payload["quality_assessment"])
+        normalized["quality_grades"] = {name: item["level"] for name, item in projection["dimensions"].items()}
+        return normalized, ""
+    if version == LEDGER_QUALITY_VERSION:
         card, error = decode_quality_ledger(card)
         if error:
             return wire_payload, error
@@ -1175,7 +1194,7 @@ def normalize_ai1_quality(payload, pack):
         return wire_payload, error
     normalized["quality_version"] = wire_version
     normalized["quality_assessment"]["version"] = wire_version
-    if wire_version == QUALITY_VERSION:
+    if wire_version == LEDGER_QUALITY_VERSION:
         # The expanded legacy form is only an internal validation projection.
         # Persist/send the declared ledger once, without duplicating opinions downstream.
         normalized["quality_assessment"] = copy.deepcopy(wire_payload["quality_assessment"])
@@ -1382,6 +1401,8 @@ def response_json_schema(role, request_pack=None, quality_version=None):
         refs = {"type": "array", "minItems": 1,
                 "items": {"$ref": "#/$defs/evidence_ref"} if evidence_ids else text}
         if quality_version is None or quality_version == QUALITY_VERSION:
+            card, dimension = quality_bound_schema(refs)
+        elif quality_version == LEDGER_QUALITY_VERSION:
             card, dimension = quality_ledger_schema(refs)
         elif quality_version == DIMENSIONAL_QUALITY_VERSION:
             dimension = quality_dimension_schema(refs)
@@ -1494,15 +1515,15 @@ def ai1_json_template():
             "invalidation": "<失效条件>", "target_basis": "<目标依据>", "fact_conflicts": [], "unknowns": [],
             "wait_basis": [{"code": "missing_trigger", "reason": "<实际等待条件>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}],
             "quality_assessment": {"version": QUALITY_VERSION, "direction": "buy", "issues": [], "dimensions": {
-                name: {"level": "adequate", "reason": "<本项证据结论>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}
+                name: {"support": "adequate", "reason": "<本项正向支持；不利程度须归属唯一issues>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}
                 for name in QUALITY_DIMENSIONS}}}
 
 
 AI1_INSTRUCTIONS += (
     "严格输出一个完整JSON对象，闭合所有括号，不输出Markdown或分析过程。wait_basis必须在顶层，与quality_assessment并列，"
-    "quality_assessment按version/direction/issues/dimensions顺序输出；五项统一只写level/reason/evidence_refs，意见只写在issues。以下仅示范层级，示例方向/等级/理由/路径不可复用，须按实际证据重填；"
+    "quality_assessment按version/direction/issues/dimensions顺序输出；五项只写support/reason/evidence_refs，severity只写在唯一issues；不要另写level。以下仅示范层级，示例方向/支持/理由/路径不可复用，须按实际证据重填；"
     "有交易提案时wait_basis为空数组。按模板先写顶层wait_basis再写quality_assessment，末尾依次闭合最后维度、dimensions、quality_assessment、顶层对象。"
-    "先写issues，先核对cause/event唯一，再声明dimension和kind，最后按quality_rubric.grading_order_policy评五项，意见清单为空也写issues=[]；不输出五套reservations/observations。"
+    "先写issues，核对cause/event唯一，再声明dimension/kind/severity，最后填五项正向support；Python按唯一不利程度生成等级。清单为空也写issues=[]；不输出五套reservations/observations。"
     "输出前核对括号、字段层级、必填数组及意见唯一归属，不复制同一事实的意见条目，不改交易判断或等级来满足格式。格式模板："
     + json.dumps(ai1_json_template(), ensure_ascii=False, separators=(",", ":"))
 )
@@ -3173,8 +3194,9 @@ class ThreeAITrader(base.FibVolumePATrader):
             )
             if not quality_error:
                 card = parsed["quality_assessment"]
-                grades = {key: item["level"] for key, item in card["dimensions"].items()}
-                if parsed["quality_version"] == QUALITY_VERSION:
+                grades = (parsed["quality_grades"] if parsed["quality_version"] == QUALITY_VERSION else
+                          {key: item["level"] for key, item in card["dimensions"].items()})
+                if parsed["quality_version"] in (QUALITY_VERSION, LEDGER_QUALITY_VERSION):
                     base.logger.info("AI-1质量明细 decision=%s version=%s grades=%s issues=%s wait_basis=%s",
                                      decision_id, parsed["quality_version"], grades, card["issues"], parsed.get("wait_basis", []))
                 else:

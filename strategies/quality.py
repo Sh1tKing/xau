@@ -2,8 +2,10 @@
 
 VERSION = "entry-quality-v3"
 PREVIOUS_VERSION = "entry-quality-v2"
-CURRENT_VERSION = "entry-quality-v4"
-GRADING_ORDER_VERSION = "ai1-issue-first-v1"
+LEDGER_VERSION = "entry-quality-v4"
+CURRENT_VERSION = "entry-quality-v5"
+LEDGER_GRADING_ORDER_VERSION = "ai1-issue-first-v1"
+GRADING_ORDER_VERSION = "ai1-bound-severity-v1"
 DIMENSIONS = ("structure", "trigger", "protection", "target", "counter_evidence")
 LEVEL_RULES = {
     "strong": {"points": 20, "severity": None, "minimum_reservations": 0},
@@ -166,7 +168,7 @@ GRADING_ORDER_POLICY = (
     "止损风险须按正确方向计算参考价与保护价加缓冲的距离，再与rules.max_stop_abs比较，不得误报超限。"
     "不得隐藏重大反证、删除事实、将重大改minor或为了契约通过抬等级；应先按独立证据判断。"
 )
-CURRENT_RESERVATIONS_POLICY = (
+LEDGER_RESERVATIONS_POLICY = (
     "level唯一声明程度：" + "/".join("%s%s" % (level, rule["points"]) for level, rule in LEVEL_RULES.items()) + "；"
     + LEDGER_POLICY
     + "strong不得归属任何意见；adequate的reservation为minor，weak为material，missing为blocking；"
@@ -178,10 +180,10 @@ CURRENT_RESERVATIONS_POLICY = (
     "独立及时的重大反证必须reservation；重大意见与独立轻微观察可以并存。"
     "没有意见也必须写issues=[]；Python生成原因ID和程度，不由模型声明分数或修改判断来满足格式。"
 )
-CURRENT_INSTRUCTIONS = (
+LEDGER_INSTRUCTIONS = (
     "按quality_rubric评五项，不猜胜率、不复制本地分、不抬分。"
-    "quality_assessment={version,direction,issues,dimensions}，version=" + CURRENT_VERSION + "，direction为buy/sell。"
-    + CURRENT_RESERVATIONS_POLICY
+    "quality_assessment={version,direction,issues,dimensions}，version=" + LEDGER_VERSION + "，direction为buy/sell。"
+    + LEDGER_RESERVATIONS_POLICY
     + "仅有轻微意见不剥夺合法提案；硬伤、必要证据缺失、无触发或重要障碍前空间不足则no并列顶层wait_basis。"
     "M15或M5已有确认不能以另一周期未确认声称缺少触发；所有等级理由、意见及等待引用本次真实evidence_refs。"
     "按quality_rubric.grading_order_policy先写issues再评五项，不能用同一反证给触发和反证两项重复扣分。"
@@ -203,7 +205,7 @@ def ledger_schema(refs):
             "dimension": {"type": "string", "enum": list(DIMENSIONS)},
             "kind": {"type": "string", "enum": [kind]},
             "reason": {"type": "string"}, "evidence_refs": refs}))
-    card = _object({"version": {"type": "string", "enum": [CURRENT_VERSION]},
+    card = _object({"version": {"type": "string", "enum": [LEDGER_VERSION]},
                     "direction": {"type": "string", "enum": ["buy", "sell"]},
                     "issues": {"type": "array", "items": {"anyOf": branches},
                                "description": "先声明每个cause/event的唯一归属，不按五个维度复制同一条意见。"},
@@ -273,12 +275,142 @@ def decode_ledger(card):
 
 def ledger_rubric_fields():
     fields = rubric_fields()
-    fields.update(version=CURRENT_VERSION, reservations_policy=CURRENT_RESERVATIONS_POLICY,
+    fields.update(version=LEDGER_VERSION, reservations_policy=LEDGER_RESERVATIONS_POLICY,
                   issue_layout="single_ledger_unique_dimension_owner",
-                  grading_order_version=GRADING_ORDER_VERSION, grading_order_policy=GRADING_ORDER_POLICY)
+                  grading_order_version=LEDGER_GRADING_ORDER_VERSION, grading_order_policy=GRADING_ORDER_POLICY)
     return fields
 
 
 def rubric_fields():
     return {"version": VERSION, "level_points": dict(LEVEL_POINTS), "reservations_policy": RESERVATIONS_POLICY,
             "reservation_causes": sorted(CAUSES), "cause_rules": {cause: dict(rule) for cause, rule in CAUSE_RULES.items()}}
+
+
+CURRENT_RESERVATIONS_POLICY = (
+    "意见与降级同源：五个dimensions只含support/reason/evidence_refs，support仅adequate或strong，"
+    "说明本项正向证据支持，不独立输出level或分数。所有不利程度只在唯一issues清单声明一次。"
+    "每条含dimension/kind/cause/event_group/severity/reason/evidence_refs；"
+    "observation的severity只能minor；reservation按事实为minor/material/blocking。"
+    "同cause/event全卡仅一个归属；空event按真实引用集合去重，不改名规避，同cause独立事件仍保留。"
+    "Python逐项取最严重意见：blocking reservation为missing0，material reservation为weak8；"
+    "仅有轻微意见为adequate16，无意见则按support给adequate16或strong20。每项只计一次，观察不叠扣。"
+    "volume/shallow_retrace只能minor observation；hard_limit/missing_data必须blocking reservation。"
+    "必要证据不存在或触发未成立须在实际所属项声明blocking，不能用support=adequate掩盖缺失；"
+    "支持强也不能覆盖阻断问题。已有真实触发不能说成缺失，轻微反向不作重大或阻断。"
+    "同一事实可在多项reason中说明，不重复声明为多项问题；独立的结构、触发、保护或目标缺陷须各有唯一意见。"
+    "没有意见也须issues=[]，不得省掉独立重大反证来抬分或为了格式改变buy/sell/no。"
+)
+BOUND_GRADING_POLICY = (
+    "先核实真实事实、必需数据、原始收盘触发与硬风险，逐个声明独立问题的唯一归属及程度，"
+    "再填五项正向support和证据；最终等级由Python按本项最严重意见生成，不再另外声明weak/missing。"
+    "trigger评本方向触发，counter_evidence评独立反向信息，同一反证不能同时当触发缺失重复扣分。"
+    "独立触发缺陷或目标障碍必须声明自己的原因与真实证据，不能借其他项的意见。"
+    "方向许可不等于触发；不能编造缺陷、隐藏事实或把重大意见降为轻微来通过契约。"
+)
+CURRENT_INSTRUCTIONS = (
+    "按quality_rubric分析，不猜胜率、不复制本地分、不抬分。quality_assessment={version,direction,issues,dimensions}，"
+    "version=" + CURRENT_VERSION + "，direction为buy/sell。" + CURRENT_RESERVATIONS_POLICY + BOUND_GRADING_POLICY
+    + "仅轻微意见不剥夺合法提案；硬伤、必要证据缺失、无触发或重要障碍前空间不足则no并写顶层wait_basis。"
+    "M15或M5已有确认不能因另一周期未确认声称没有触发；所有理由、意见和等待条件引用本次真实evidence_refs。"
+)
+
+
+def bound_schema(refs):
+    """The only adverse severity is in its uniquely owned issue, never a second grade."""
+    dimension = _object({"support": {"type": "string", "enum": ["adequate", "strong"]},
+                         "reason": {"type": "string"}, "evidence_refs": refs})
+    dimension["description"] = "只声明正向支持，不另写最终level；必要证据缺失须在issues声明blocking，不能藏在reason中。"
+    branches = []
+    for kind, causes, severities in (
+            ("reservation", SCORED_CAUSES - {"hard_limit", "missing_data"}, ("minor", "material", "blocking")),
+            ("reservation", {"hard_limit", "missing_data"}, ("blocking",)),
+            ("observation", OBSERVATION_CAUSES, ("minor",))):
+        branches.append(_object({
+            "cause": {"type": "string", "enum": sorted(causes)},
+            "event_group": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "dimension": {"type": "string", "enum": list(DIMENSIONS)},
+            "kind": {"type": "string", "enum": [kind]},
+            "severity": {"type": "string", "enum": list(severities)},
+            "reason": {"type": "string"}, "evidence_refs": refs}))
+    card = _object({"version": {"type": "string", "enum": [CURRENT_VERSION]},
+                    "direction": {"type": "string", "enum": ["buy", "sell"]},
+                    "issues": {"type": "array", "items": {"anyOf": branches}},
+                    "dimensions": _object({name: {"$ref": "#/$defs/quality_dimension"} for name in DIMENSIONS})})
+    card["description"] = CURRENT_RESERVATIONS_POLICY
+    return card, dimension
+
+
+def decode_bound(card):
+    """Compile a declared v5 card; do not migrate, complete or regrade older cards."""
+    import copy
+    root = "/quality_assessment"
+    if (not isinstance(card, dict) or set(card) != {"version", "direction", "issues", "dimensions"}
+            or card["version"] != CURRENT_VERSION):
+        return None, "AI-1质量评估字段错误: v5须包含version/direction/issues/dimensions"
+    if not isinstance(card["direction"], str) or card["direction"] not in ("buy", "sell"):
+        return None, "AI-1质量评估无效: 方向不一致"
+    dimensions, issues = card["dimensions"], card["issues"]
+    if not isinstance(dimensions, dict) or set(dimensions) != set(DIMENSIONS):
+        return None, "AI-1质量评估无效: 五项缺失"
+    if not isinstance(issues, list):
+        return None, "AI-1质量评估字段错误: /quality_assessment/issues必须是数组"
+    for name, item in dimensions.items():
+        path = root + "/dimensions/" + name
+        if not isinstance(item, dict) or set(item) != {"support", "reason", "evidence_refs"}:
+            return None, "AI-1质量评估字段错误: %s v5只含support/reason/evidence_refs" % path
+        if not isinstance(item["support"], str) or item["support"] not in ("adequate", "strong"):
+            return None, "AI-1质量评估支持程度无效: " + path
+        if not isinstance(item["reason"], str) or not item["reason"].strip():
+            return None, "AI-1质量评估原因缺失: " + path
+        refs = item["evidence_refs"]
+        if not isinstance(refs, list) or not refs or any(not isinstance(ref, str) for ref in refs):
+            return None, "AI-1质量评估证据无效: " + path + "/evidence_refs"
+    seen, owned, reservations = {}, {name: [] for name in DIMENSIONS}, []
+    fields = {"dimension", "kind", "cause", "event_group", "severity", "reason", "evidence_refs"}
+    for index, issue in enumerate(issues):
+        path = "%s/issues/%s" % (root, index)
+        if not isinstance(issue, dict) or set(issue) != fields:
+            return None, "AI-1质量评估意见字段错误: " + path
+        name, kind, severity = issue["dimension"], issue["kind"], issue["severity"]
+        if not isinstance(name, str) or name not in DIMENSIONS or kind not in ("reservation", "observation"):
+            return None, "AI-1质量评估意见归属无效: " + path
+        if not isinstance(severity, str) or severity not in ("minor", "material", "blocking"):
+            return None, "AI-1质量评估意见程度无效: " + path
+        cause, event, refs = issue["cause"], issue["event_group"], issue["evidence_refs"]
+        if not isinstance(cause, str) or cause not in CAUSES or event is not None and not isinstance(event, str):
+            return None, "AI-1质量评估原因无效: " + path
+        if (kind == "observation" and (severity != "minor" or cause not in OBSERVATION_CAUSES)
+                or kind == "reservation" and cause not in SCORED_CAUSES
+                or cause in ("hard_limit", "missing_data") and (kind != "reservation" or severity != "blocking")):
+            return None, "AI-1质量评估程度不符: %s cause=%s kind=%s severity=%s" % (path, cause, kind, severity)
+        if not isinstance(issue["reason"], str) or not issue["reason"].strip():
+            return None, "AI-1质量评估原因缺失: " + path
+        if not isinstance(refs, list) or not refs or any(not isinstance(ref, str) for ref in refs):
+            return None, "AI-1质量评估证据无效: " + path + "/evidence_refs"
+        key = (cause, event or tuple(sorted(set(refs))))
+        if key in seen:
+            return None, "AI-1质量评估重复扣分/意见: %s cause=%s 与%s重复；同一原因和事件只能声明一次" % (path, cause, seen[key])
+        seen[key] = path
+        owned[name].append(issue)
+        if kind == "reservation":
+            reservations.append({key: copy.deepcopy(value) for key, value in issue.items() if key != "kind"}
+                                | {"id": "issue:%s" % index})
+    decoded = {"version": "entry-quality-v1", "direction": card["direction"],
+               "dimensions": {}, "reservations": reservations}
+    for name in DIMENSIONS:
+        entries = owned[name]
+        severities = {item["severity"] for item in entries if item["kind"] == "reservation"}
+        level = ("missing" if "blocking" in severities else "weak" if "material" in severities else
+                 "adequate" if entries else dimensions[name]["support"])
+        decoded["dimensions"][name] = {"level": level, "reason": dimensions[name]["reason"],
+            "evidence_refs": copy.deepcopy(dimensions[name]["evidence_refs"]),
+            "reservation_ids": [item["id"] for item in reservations if item["dimension"] == name]}
+    return decoded, ""
+
+
+def bound_rubric_fields():
+    fields = rubric_fields()
+    fields.update(version=CURRENT_VERSION, reservations_policy=CURRENT_RESERVATIONS_POLICY,
+                  issue_layout="single_ledger_bound_severity", grading_order_version=GRADING_ORDER_VERSION,
+                  grading_order_policy=BOUND_GRADING_POLICY)
+    return fields

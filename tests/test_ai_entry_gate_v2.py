@@ -111,9 +111,9 @@ class EntryGateV2Tests(unittest.TestCase):
         self.assertEqual(card["properties"]["version"]["enum"], [ai.QUALITY_VERSION])
         self.assertNotIn("reservations", card["properties"])
         dimension = ai.response_json_schema("AI-1")["$defs"]["quality_dimension"]
-        self.assertEqual(set(dimension["properties"]), {"level", "reason", "evidence_refs"})
+        self.assertEqual(set(dimension["properties"]), {"support", "reason", "evidence_refs"})
         issue = card["properties"]["issues"]["items"]["anyOf"][0]["properties"]
-        self.assertEqual(set(issue), {"dimension", "kind", "cause", "event_group", "reason", "evidence_refs"})
+        self.assertEqual(set(issue), {"dimension", "kind", "cause", "event_group", "severity", "reason", "evidence_refs"})
         self.assertEqual(ai.ai1_json_template()["quality_assessment"]["version"], ai.QUALITY_VERSION)
 
     def test_new_cards_score_symmetrically_without_mutating_model_evidence(self):

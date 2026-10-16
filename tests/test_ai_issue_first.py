@@ -60,7 +60,7 @@ class IssueFirstTests(unittest.TestCase):
             issues.append({"dimension": "trigger", "kind": "reservation", "cause": "trigger_weakness",
                            "event_group": "own-trigger-event", "reason": "本方向的独立触发不足",
                            "evidence_refs": ["/h1_trend"]})
-        raw["quality_assessment"] = {"version": ai.QUALITY_VERSION, "direction": "sell",
+        raw["quality_assessment"] = {"version": ai.LEDGER_QUALITY_VERSION, "direction": "sell",
                                      "issues": issues, "dimensions": dimensions}
         return pack, raw
 

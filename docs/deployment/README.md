@@ -1,5 +1,7 @@
 # 当前默认策略：亚欧美三盘自主AI粗筛（模拟账户）
 
+2026-10-16契约修复：新请求`entry-quality-v5`将问题程度集中到唯一issues，由Python生成等级；旧v1-v4严格兼容，原始坏卡仍拒绝。护盘使用原`profit-floor-v3`阶梯，不含暂停的连续插值。覆盖三个黄金脚本和完整strategies（含quality.py），保留服务器自己的.env、日志、持仓与结算状态，再自行重启单实例。实际模型、档位、token上限、超时和阈值无需改；准确代码签名、SHA与离线结果看本次MANIFEST。设计见[意见与评分同源](../superpowers/specs/2026-10-16-ai1-bound-quality.md)。
+
 2026-10-15新仓护盘更新为`profit-floor-v3`：持续确认净浮盈2/4/6/10/15时，增加0.20/1/2/4/6账户币种的保护底线，留原风险四分之一、三倍点差、1.00价格单位及broker要求的回撤空间；普通跟随仍保留完整M5 ATR。AI-3依据原理由和闭合M5/M15/H1复核SL及TP，可原子调整或只改TP；SL不回退，延长TP须实际SL已扣费保本。已有仓（含旧v3阶梯）不迁移。详见[设计](../superpowers/specs/2026-10-15-stepped-profit-and-ai3-target-review.md)。
 
 请一次覆盖三个黄金脚本及完整`strategies/`，务必包含新`strategies/guardian_review.py`。保留服务器实际`.env`及`strategy_event_state.json`、`ai3_position_state.json`、`guardian_profit_state.json`、`close_notification_state.json`、`recent_settled_trades.json`与日历缓存，再自行重启单实例。`.env`现有`profit_floor_v1/v2`无需改写，新订单采用v3；没有重启的进程仍是旧代码。实际来源提交、逐文件SHA与验证结果以`MANIFEST.json`为准。

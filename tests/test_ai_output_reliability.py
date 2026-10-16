@@ -211,7 +211,7 @@ class OutputReliabilityTests(unittest.TestCase):
     def test_schema_description_states_empty_arrays_explicitly(self):
         schema = ai.response_json_schema('AI-1')
         self.assertEqual(set(schema['$defs']['quality_dimension']['properties']),
-                         {'level', 'reason', 'evidence_refs'})
+                         {'support', 'reason', 'evidence_refs'})
         self.assertIn('issues', schema['properties']['quality_assessment']['required'])
         template = ai.ai1_json_template()
         self.assertLess(list(template).index('wait_basis'), list(template).index('quality_assessment'))

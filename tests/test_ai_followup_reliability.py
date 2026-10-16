@@ -74,7 +74,7 @@ class FollowupQualityTests(unittest.TestCase):
         policy = quality.ISSUE_DEDUPLICATION_POLICY
         self.assertIn("reason/evidence_refs", policy)
         self.assertIn("M15", policy)
-        self.assertIn(quality.LEDGER_POLICY, ai.AI1_INSTRUCTIONS)
+        self.assertIn(quality.CURRENT_RESERVATIONS_POLICY, ai.AI1_INSTRUCTIONS)
         schema = ai.response_json_schema("AI-1", self.archive["request_pack"], quality_version=ai.DIMENSIONAL_QUALITY_VERSION)
         self.assertEqual(schema["properties"]["quality_assessment"]["description"], policy)
         Draft202012Validator.check_schema(schema)

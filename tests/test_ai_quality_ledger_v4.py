@@ -16,7 +16,7 @@ def card(side="buy"):
     pack, raw = quality_sample(side)
     raw["opportunity_id"] = ""
     raw["quality_assessment"] = {
-        "version": ai.QUALITY_VERSION, "direction": side,
+        "version": ai.LEDGER_QUALITY_VERSION, "direction": side,
         "dimensions": {name: {"level": "adequate", "reason": "本次实际事实",
                               "evidence_refs": ["/h1_trend"]} for name in ai.QUALITY_DIMENSIONS},
         "issues": []}
@@ -55,10 +55,10 @@ class LedgerContractTests(unittest.TestCase):
             for observation in old[name][kind]:
                 ledger.append({"dimension": name, "kind": kind[:-1], **observation})
         raw["quality_assessment"] = {
-            "version": ai.QUALITY_VERSION, "direction": "buy", "issues": ledger,
+            "version": ai.LEDGER_QUALITY_VERSION, "direction": "buy", "issues": ledger,
             "dimensions": {name: {k: value[k] for k in ("level", "reason", "evidence_refs")}
                            for name, value in old.items()}}
-        schema = ai.response_json_schema("AI-1", self.archive["request_pack"])
+        schema = ai.response_json_schema("AI-1", self.archive["request_pack"], quality_version=ai.LEDGER_QUALITY_VERSION)
         self.assertTrue(Draft202012Validator(schema).is_valid(raw))
         original = copy.deepcopy(raw)
         result, error = ai.normalize_ai1_quality(raw, self.archive["request_pack"])
@@ -69,17 +69,17 @@ class LedgerContractTests(unittest.TestCase):
         self.assertEqual(ai.ai1_result_status(result, "", None), "watch")
         self.assertEqual({name: d["level"] for name, d in result["quality_assessment"]["dimensions"].items()},
                          {name: old[name]["level"] for name in ai.QUALITY_DIMENSIONS})
-        self.assertEqual(result["quality_version"], ai.QUALITY_VERSION)
+        self.assertEqual(result["quality_version"], ai.LEDGER_QUALITY_VERSION)
 
     def test_schema_has_one_issue_array_and_uniform_dimensions(self):
-        schema = ai.response_json_schema("AI-1")
+        schema = ai.response_json_schema("AI-1", quality_version=ai.LEDGER_QUALITY_VERSION)
         Draft202012Validator.check_schema(schema)
         dim = schema["$defs"]["quality_dimension"]
         self.assertEqual(set(dim["properties"]), {"level", "reason", "evidence_refs"})
         fields = schema["properties"]["quality_assessment"]["properties"]
         self.assertEqual(set(fields), {"version", "direction", "dimensions", "issues"})
         self.assertEqual(fields["version"]["enum"], ["entry-quality-v4"])
-        self.assertIn(quality.LEDGER_POLICY, ai.AI1_INSTRUCTIONS)
+        self.assertIn(quality.CURRENT_RESERVATIONS_POLICY, ai.AI1_INSTRUCTIONS)
         self.assertEqual(ai.quality_rubric(True)["reservations_policy"], quality.CURRENT_RESERVATIONS_POLICY)
         self.assertLess(len(json.dumps(schema)),
                         len(json.dumps(ai.response_json_schema("AI-1", quality_version=ai.DIMENSIONAL_QUALITY_VERSION))))
@@ -100,11 +100,11 @@ class LedgerContractTests(unittest.TestCase):
             pack, raw = card()
             raw["quality_assessment"]["dimensions"]["structure"][field] = []
             before = copy.deepcopy(raw)
-            self.assertFalse(Draft202012Validator(ai.response_json_schema("AI-1")).is_valid(raw))
+            self.assertFalse(Draft202012Validator(ai.response_json_schema("AI-1", quality_version=ai.LEDGER_QUALITY_VERSION)).is_valid(raw))
             result, error = ai.normalize_ai1_quality(raw, pack)
             self.assertIn("v4只含", error)
             self.assertEqual(raw, before)
-            self.assertEqual(result["quality_assessment"]["version"], ai.QUALITY_VERSION)
+            self.assertEqual(result["quality_assessment"]["version"], ai.LEDGER_QUALITY_VERSION)
             self.assertNotIn("quality_score", result)
 
     def test_duplicated_issues_still_rejected_across_owners_kinds_and_ref_order(self):
@@ -187,7 +187,7 @@ class LedgerContractTests(unittest.TestCase):
             for cause in causes:
                 pack, raw = card()
                 raw["quality_assessment"]["issues"] = [issue(kind=kind, cause=cause)]
-                self.assertFalse(Draft202012Validator(ai.response_json_schema("AI-1")).is_valid(raw))
+                self.assertFalse(Draft202012Validator(ai.response_json_schema("AI-1", quality_version=ai.LEDGER_QUALITY_VERSION)).is_valid(raw))
                 self.assertIn("程度不符", ai.normalize_ai1_quality(raw, pack)[1])
 
     def test_blocking_trade_and_minor_material_wait_remain_forbidden(self):
@@ -206,7 +206,7 @@ class LedgerContractTests(unittest.TestCase):
         pack = ai.prepare_ai1_request_pack(facts_pool())
         from test_ai_strategy_opportunities import payload
         old = payload()
-        raw = {**old, "quality_assessment": {"version": ai.QUALITY_VERSION, "direction": "buy", "issues": [],
+        raw = {**old, "quality_assessment": {"version": ai.LEDGER_QUALITY_VERSION, "direction": "buy", "issues": [],
             "dimensions": {name: {k: v[k] for k in ("level", "reason", "evidence_refs")}
                            for name, v in old["quality_assessment"]["dimensions"].items()}}}
         raw = cite(pack, raw)
@@ -218,7 +218,7 @@ class LedgerContractTests(unittest.TestCase):
 
     def test_local_schema_diagnostics_detect_missing_ledger_and_wrong_wire_types(self):
         _, raw = card()
-        schema = ai.response_json_schema("AI-1")
+        schema = ai.response_json_schema("AI-1", quality_version=ai.LEDGER_QUALITY_VERSION)
         samples = [raw]
         for change in ("ledger_missing", "owner_invalid", "kind_invalid", "empty_refs", "wrong_grade", "boolean_price"):
             value = copy.deepcopy(raw)
@@ -264,11 +264,11 @@ class LedgerEntryChainTests(unittest.TestCase):
                 raw = original(request)
                 raw["quality_assessment"] = {
                     "version": ai.QUALITY_VERSION, "direction": side,
-                    "dimensions": {name: {"level": "adequate", "reason": "原始M5事实支持",
+                    "dimensions": {name: {"support": "adequate", "reason": "原始M5事实支持",
                                           "evidence_refs": ["/m5_bars/79"]} for name in ai.QUALITY_DIMENSIONS},
-                    "issues": [issue(refs=["/m5_bars/79"])]}
+                    "issues": [{**issue(refs=["/m5_bars/79"]), "severity": "minor"}]}
                 if invalid:
-                    raw["quality_assessment"]["issues"].append(issue("structure", refs=["/m5_bars/79"]))
+                    raw["quality_assessment"]["issues"].append({**issue("structure", refs=["/m5_bars/79"]), "severity": "minor"})
                 if watch:
                     raw.update(action="no", stop_loss=None, take_profit=None,
                                wait_basis=[{"code": "target_space", "reason": "目标空间不足",
@@ -304,7 +304,7 @@ class LedgerEntryChainTests(unittest.TestCase):
                 self.assertEqual(saved["quality_assessment"]["issues"][0]["evidence_refs"], ["/m5_bars/79"])
                 self.assertNotIn("reservations", saved["quality_assessment"])
                 self.assertEqual(set(saved["quality_assessment"]["dimensions"]["counter_evidence"]),
-                                 {"level", "reason", "evidence_refs"})
+                                 {"support", "reason", "evidence_refs"})
                 fixture.trader.load_entry_contexts()
                 self.assertEqual(fixture.trader.entry_contexts["123"], saved)
                 review = next(s[2]["review"] for s in fixture.snapshots if s[1] == "ai2_input")
@@ -317,7 +317,7 @@ class LedgerEntryChainTests(unittest.TestCase):
         finally:
             fixture.doCleanups()
 
-    def test_three_sessions_both_directions_v4_through_ai2_and_saved_guardian_context(self):
+    def test_three_sessions_both_directions_v5_through_ai2_and_saved_guardian_context(self):
         for profile in ("asia_adaptive", "london_adaptive", "us_adaptive"):
             for side in ("buy", "sell"):
                 with self.subTest(profile=profile, side=side):
