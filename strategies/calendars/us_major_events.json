@@ -1,76 +1,160 @@
 {
   "format": 1,
   "version": "news-pause-v1",
-  "notes": "Official scheduled dates verified 2026-10-14. Bootstrap expires seven days after verified_at. Live refresh replaces coverage; no permanent fabricated schedule. BLS dates transcribed from official annual calendar; BEA and Fed parsed from official public documents.",
+  "notes": "Official schedules rechecked 2026-10-17. BLS October list checked through web retrieval; direct local requests returned403. BEA and Fed parsed from official HTTPS responses. Bootstrap verification expires after seven days; live cache and seed jointly determine usable coverage. This is not a permanent calendar or a new event family.",
   "frames": [
     {
       "provider": "bls",
-      "verified_at": 1791984966.965847,
+      "verified_at": 1792220055.371202,
       "coverage_from": 1790827200.0,
-      "coverage_until": 1798779600.0,
+      "coverage_until": 1793505600.0,
       "events": [
         {
           "family": "nfp",
           "at": 1790944200.0,
-          "title": "美国非农",
-          "source": "https://www.bls.gov/schedule/2026/"
+          "title": "Employment Situation",
+          "source": "https://www.bls.gov/schedule/2026/10_sched_list.htm"
         },
         {
           "family": "cpi",
           "at": 1791981000.0,
-          "title": "美国CPI",
-          "source": "https://www.bls.gov/schedule/2026/"
+          "title": "Consumer Price Index",
+          "source": "https://www.bls.gov/schedule/2026/10_sched_list.htm"
         },
         {
           "family": "ppi",
           "at": 1792067400.0,
-          "title": "美国PPI",
-          "source": "https://www.bls.gov/schedule/2026/"
-        },
-        {
-          "family": "nfp",
-          "at": 1793971800.0,
-          "title": "美国非农",
-          "source": "https://www.bls.gov/schedule/2026/"
-        },
-        {
-          "family": "cpi",
-          "at": 1794317400.0,
-          "title": "美国CPI",
-          "source": "https://www.bls.gov/schedule/2026/"
-        },
-        {
-          "family": "ppi",
-          "at": 1794576600.0,
-          "title": "美国PPI",
-          "source": "https://www.bls.gov/schedule/2026/"
-        },
-        {
-          "family": "nfp",
-          "at": 1796391000.0,
-          "title": "美国非农",
-          "source": "https://www.bls.gov/schedule/2026/"
-        },
-        {
-          "family": "cpi",
-          "at": 1796909400.0,
-          "title": "美国CPI",
-          "source": "https://www.bls.gov/schedule/2026/"
-        },
-        {
-          "family": "ppi",
-          "at": 1797341400.0,
-          "title": "美国PPI",
-          "source": "https://www.bls.gov/schedule/2026/"
+          "title": "Producer Price Index",
+          "source": "https://www.bls.gov/schedule/2026/10_sched_list.htm"
         }
       ]
     },
     {
       "provider": "bea",
-      "verified_at": 1791984966.965847,
-      "coverage_from": 1769087700.0,
+      "verified_at": 1792220055.371202,
+      "coverage_from": 1738242900.0,
       "coverage_until": 1829568600.0,
       "events": [
+        {
+          "family": "gdp",
+          "at": 1738243800.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1738330200.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1740663000.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1740749400.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1743078600.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1743165000.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1746016200.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1746021600.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1748521800.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1748608200.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1750941000.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1751027400.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1753878600.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1753965000.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1756384200.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1756470600.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1758803400.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1758889800.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "pce",
+          "at": 1764946800.0,
+          "title": "Personal Income and Outlays",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
+        {
+          "family": "gdp",
+          "at": 1766496600.0,
+          "title": "Gross Domestic Product",
+          "source": "https://apps.bea.gov/API/signup/release_dates.json"
+        },
         {
           "family": "gdp",
           "at": 1769088600.0,
@@ -375,9 +459,9 @@
     },
     {
       "provider": "fed",
-      "verified_at": 1791984966.965847,
+      "verified_at": 1792220055.371202,
       "coverage_from": 1790827200.0,
-      "coverage_until": 1798779600.0,
+      "coverage_until": 1793505600.0,
       "events": [
         {
           "family": "fomc_minutes",
@@ -396,30 +480,6 @@
           "at": 1793212200.0,
           "title": "美联储发布会",
           "source": "https://www.federalreserve.gov/newsevents/2026-october.htm"
-        },
-        {
-          "family": "fomc_minutes",
-          "at": 1795028400.0,
-          "title": "FOMC会议纪要",
-          "source": "https://www.federalreserve.gov/newsevents/2026-november.htm"
-        },
-        {
-          "family": "fomc_decision",
-          "at": 1796842800.0,
-          "title": "美联储利率决议",
-          "source": "https://www.federalreserve.gov/newsevents/2026-december.htm"
-        },
-        {
-          "family": "fomc_press_conference",
-          "at": 1796844600.0,
-          "title": "美联储发布会",
-          "source": "https://www.federalreserve.gov/newsevents/2026-december.htm"
-        },
-        {
-          "family": "fomc_minutes",
-          "at": 1798657200.0,
-          "title": "FOMC会议纪要",
-          "source": "https://www.federalreserve.gov/newsevents/2026-december.htm"
         }
       ]
     }

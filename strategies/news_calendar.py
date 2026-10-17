@@ -27,6 +27,7 @@ WINDOW_SECONDS = 15 * 60
 MAX_AGE_SECONDS = 7 * 86400
 REFRESH_SECONDS = 6 * 3600
 RETRY_SECONDS = 15 * 60
+READINESS_VERSION = "news-coverage-v1"
 NY = ZoneInfo("America/New_York")
 BJ = ZoneInfo("Asia/Shanghai")
 BLS_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
@@ -305,6 +306,46 @@ def evaluate(frames, now, since=None):
     return PauseStatus(True, degraded=degraded)
 
 
+def coverage_report(frames, now, through=None, seed=()):
+    """Describe continuous verified coverage, not permission to trade through news.
+
+    A long coverage_until cannot extend the seven-day verification lifetime.
+    Cache and bootstrap are both included; future unobserved verifications are not.
+    """
+    through = now if through is None else through
+    if not _number(now) or not _number(through) or through < now:
+        raise CalendarError("检查终点必须是当前或未来的带时区时刻")
+    providers = {}
+    candidates = [(v,"cache") for v in frames]+[(v,"bootstrap") for v in seed]
+    for provider in FAMILIES:
+        rows=[]
+        for value,kind in candidates:
+            validate_frame(value)
+            if value["provider"] != provider or value["verified_at"] > now+5:
+                continue
+            end=min(value["coverage_until"],value["verified_at"]+MAX_AGE_SECONDS)
+            if end > now:
+                rows.append((value["coverage_from"],end,value,kind))
+        cursor=now
+        used=[]
+        while True:
+            available=[r for r in rows if r[0] <= cursor < r[1]]
+            if not available:
+                break
+            selected=max(available,key=lambda r:(r[1],r[2]["verified_at"]))
+            cursor=selected[1]
+            used.append({"kind":selected[3],"verified_at_utc":utc(selected[2]["verified_at"]),
+                         "usable_until_beijing":local_time(selected[1]),
+                         "sources":sorted({e["source"] for e in selected[2]["events"]})})
+        providers[provider]={"available_now":cursor > now,"covers_through":cursor > through,
+                             "usable_until_utc":utc(cursor) if cursor > now else None,
+                             "usable_until_beijing":local_time(cursor) if cursor > now else None,
+                             "segments":used}
+    return {"version":READINESS_VERSION,"checked_at_utc":utc(now),"through_utc":utc(through),
+            "available_now":all(p["available_now"] for p in providers.values()),
+            "covers_through":all(p["covers_through"] for p in providers.values()),"providers":providers}
+
+
 def _get(url):
     response = requests.get(url, timeout=(5, 12), headers={"User-Agent": "MYQ-Gold-News-Calendar/1"})
     response.raise_for_status()
@@ -386,7 +427,14 @@ class NewsCalendar:
                     v["coverage_until"] == value["coverage_until"])]
                 self._frames.append(value)
             stored = copy.deepcopy(self._frames)
-            self._next_refresh = time.monotonic() + (RETRY_SECONDS if failures else REFRESH_SECONDS)
+            interval=RETRY_SECONDS if failures else REFRESH_SECONDS
+            if not failures:
+                # A fresh short weekly feed must not wait six hours past its end.
+                readiness=coverage_report(stored,now,seed=self._seed)
+                ends=[instant(p["usable_until_utc"]) for p in readiness["providers"].values() if p["available_now"]]
+                if ends:
+                    interval=min(interval,max(60.,min(ends)-now-300.))
+            self._next_refresh = time.monotonic() + interval
         if fresh:
             try:
                 # Fsync must never hold the calendar lock used by entry checks
@@ -394,7 +442,15 @@ class NewsCalendar:
                 self._persist(stored)
             except OSError as exc:
                 self._log("warning", "新闻日历缓存写入失败: %s；内存有效日程保留", type(exc).__name__)
+            readiness=self.coverage(now)
+            self._log("info", "%s 刷新完成 provider_usable_until=%s；期限同时受覆盖范围和核对日期限制",
+                      READINESS_VERSION, {p:v["usable_until_beijing"] for p,v in readiness["providers"].items()})
         return not failures
+
+    def coverage(self, now=None, through=None):
+        now=time.time() if now is None else now
+        with self._lock:
+            return coverage_report(self._frames,now,through,self._seed)
 
     def _persist(self, snapshots):
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -456,7 +512,14 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="黄金重大事件日历检查，不连接MT5、不调用AI、不下单")
     parser.add_argument("--refresh", action="store_true", help="立即刷新公开日历并写缓存")
+    parser.add_argument("--through", help="检查连续覆盖到该ISO时刻（必须含时区）；不是允许期间持续开仓")
     args = parser.parse_args()
+    try:
+        through=instant(args.through) if args.through else None
+        if through is not None and through < time.time():
+            raise CalendarError("检查终点不能早于当前时刻")
+    except CalendarError as exc:
+        parser.error(str(exc))
     base = Path(__file__).resolve().parents[1]
     value = NewsCalendar.from_environment(base, base/"xau_fib_pa_logs")
     if args.refresh:
@@ -464,10 +527,12 @@ def main():
     # CLI check is read-only unless --refresh was explicitly supplied.
     value.request_refresh = lambda: None
     status = value.status()
+    readiness=value.coverage(through=through)
     print(json.dumps({"version": VERSION, "enabled": value.enabled, "new_entry_allowed": status.allowed,
                       "reason": status.reason, "resume_beijing": local_time(status.resume_at) if status.resume_at else None,
-                      "cached_fallback": status.degraded, "cache": str(value.cache_path)}, ensure_ascii=False))
-    return 0 if status.allowed else 2
+                      "cached_fallback": status.degraded, "cache": str(value.cache_path),
+                      "coverage":readiness}, ensure_ascii=False))
+    return 0 if status.allowed and (not args.through or value.enabled and readiness["covers_through"]) else 2
 
 
 if __name__ == "__main__":

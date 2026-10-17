@@ -23,6 +23,8 @@ from urllib.parse import urlsplit
 
 import requests
 from strategies.evidence import _rounded_number, _bar_payload, _extreme_bar, bars_for_prompt, bar_times_for_prompt
+from strategies.ai_transport import VERSION as AI_TRANSPORT_VERSION, PrimaryTimeoutBackoff
+from strategies.entry_context import VERSION as ENTRY_CONTEXT_VERSION, build as build_entry_context
 from strategies.guardian_review import (VERSION as GUARDIAN_TARGET_REVIEW_VERSION,
                                         FRAMES as GUARDIAN_TARGET_FRAMES, validate_target)
 from strategies.guardian_risk import (VERSION as GUARDIAN_RISK_REVIEW_VERSION,
@@ -114,6 +116,9 @@ _CHAT_OPTIONS_LOCK = threading.RLock()
 _CHAT_OPTIONS = {}
 _CAP_BLOCKED_ROUTES = {}
 _CAP_BLOCKED_ROUTES_LOCK = threading.RLock()
+AI1_PRIMARY_TIMEOUT_THRESHOLD = max(0, env_int("FIB_PA_AI1_PRIMARY_TIMEOUT_THRESHOLD", 2))
+AI1_PRIMARY_COOLDOWN_SEC = max(0, env_int("FIB_PA_AI1_PRIMARY_COOLDOWN_SEC", 900))
+_PRIMARY_TIMEOUT_BACKOFF = PrimaryTimeoutBackoff()
 COST_CONTROL_VERSION = "cost-latency-v2"
 AI3_THINKING_CONTROL_VERSION = "xau-ai3-thinking-v1"
 AI3_INPUT_PACK_VERSION = "ai3-cache-prefix-v1"
@@ -141,6 +146,8 @@ def loaded_code_signature():
                      os.path.join(BASE_DIR, "strategies", "direction.py"),
                      os.path.join(BASE_DIR, "strategies", "recent_trades.py"),
                      os.path.join(BASE_DIR, "strategies", "adaptive.py"),
+                     os.path.join(BASE_DIR, "strategies", "entry_context.py"),
+                     os.path.join(BASE_DIR, "strategies", "ai_transport.py"),
                      os.path.join(BASE_DIR, "strategies", "calendars", "us_major_events.json"),
                      os.path.join(BASE_DIR, "strategies", "lifecycle.py"),
                      os.path.join(BASE_DIR, "strategies", "framework.py")):
@@ -204,6 +211,14 @@ AI2_INSTRUCTIONS += (
     "ai1_snapshot是原分析报价，market_evidence.live_quote是本次审核新报价；比较变化，按final_plan_feasibility核实当前执行区间、止损触发侧剩余空间及追价。"
     "executable=false是当前方案硬伤；不得扩大执行区间或移动SL/TP来放行。APPROVE只针对本次快照，Python仍会复核下单瞬间报价。"
 )
+ENTRY_CONTEXT_INSTRUCTIONS = (
+    "entry_context区分EMA50位置背景与最近六根闭合K线推进/最近三根净变化/最后一根变化、距窗口收盘峰谷和窗口位置，不是新增硬门；H1 bull许可不等于当前动能向上，bear镜像。"
+    "结合direction_context原M15事件状态/失效、实际触发及最强反证判断顺势还是反弹，不能把旧事件失效或背景许可冒充新的触发。"
+    "同方向再次入场时对照recent_trades及本次闭合K线，说明新的触发/恢复依据与目标前障碍空间；历史缺失明示，不按上笔输赢自动反手或拒绝。"
+    "保留自主反弹方案，不要求M15/M5双重触发，不把窗口中部、短线逆向或每根影线直接变成硬否决。"
+)
+AI1_INSTRUCTIONS += ENTRY_CONTEXT_INSTRUCTIONS
+AI2_INSTRUCTIONS += ENTRY_CONTEXT_INSTRUCTIONS + "只核实明确事实矛盾与原硬伤，不因上述背景说明自行加门槛。"
 OBSTACLE_EVIDENCE_INSTRUCTIONS = (
     "obstacles是候选且不穷尽结构，Fib端点不天然为独立强障碍。unknown/unassessed结合origin_bar/observed评估，不自动硬否决。"
     "event_group仅合并已核实同源极值，同价不同时间分别保留，空组不合并，同组各次反向证据仍需看。归属未知不等于关键证据缺失。"
@@ -795,6 +810,9 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
         pack["m5_bars"] = bars_for_prompt(df_m5, len(df_m5))
         from strategies.patterns import patterns_facts
         pack["patterns"] = {"M15": patterns_facts(df_m15, "M15"), "M5": patterns_facts(df_m5, "M5")}
+    pack["entry_context"] = build_entry_context(
+        pack, base.ema_last(df_h1["close"], 50), base.ema_last(df_m15["close"], 50),
+        len(df_h1), len(df_m15))
     return pack, fib, atr, price
 
 
@@ -1836,8 +1854,47 @@ def cap_route_key(role, active, protocol, token_field, cap, effort, thinking):
             token_field, cap, effort, thinking)
 
 
+def _transport_route_usable(role, route, backup=False):
+    if not route["url"] or not route["key"]:
+        return False
+    protocol = request_protocol(route["url"])
+    thinking = request_thinking_mode(role, backup)
+    with _CHAT_OPTIONS_LOCK:
+        options = dict(_CHAT_OPTIONS.get((route["url"], route["model"]), {}))
+    omit = options.get("omit_reasoning", False)
+    if thinking == "between_tools" and protocol != "anthropic":
+        return False
+    if request_reasoning_configuration_error(route["model"], thinking, route["effort"], omit):
+        return False
+    field = "max_tokens" if protocol == "anthropic" else options.get("token_field",
+        "max_completion_tokens" if route["model"].lower().startswith(("gpt-","o1","o3","o4")) else "max_tokens")
+    sent = route["effort"] if route["effort"] and not omit and thinking != "disabled" else None
+    key = cap_route_key(role, route, protocol, field, AI_MAX_TOKENS.get(role,4096), sent, thinking)
+    with _CAP_BLOCKED_ROUTES_LOCK:
+        return key not in _CAP_BLOCKED_ROUTES
+
+
 def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, still_current=None,
               request_context=None, refresh_request=None):
+    primary = {"model": model, "effort": effort, "url": str(url or "").strip(),
+               "key": str(api_key or "").strip()}
+    backup = backup_chat_config(role, model, effort, url, api_key)
+    enabled = (role == "AI-1" and base.SYMBOL == "XAUUSD" and backup != primary
+               and _transport_route_usable(role, primary) and _transport_route_usable(role, backup, True))
+    identity = (role, primary["url"], model, hashlib.sha256(primary["key"].encode()).digest(),
+                effort, request_thinking_mode(role), AI_MAX_TOKENS.get(role), timeout,
+                AI1_PRIMARY_TIMEOUT_THRESHOLD, AI1_PRIMARY_COOLDOWN_SEC)
+    lease = _PRIMARY_TIMEOUT_BACKOFF.enter(identity, AI1_PRIMARY_TIMEOUT_THRESHOLD,
+                                            AI1_PRIMARY_COOLDOWN_SEC, enabled)
+    try:
+        return _call_chat(role, model, effort, instructions, prompt, timeout, url, api_key,
+                          still_current, request_context, refresh_request, lease)
+    finally:
+        _PRIMARY_TIMEOUT_BACKOFF.release(lease)
+
+
+def _call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, still_current=None,
+               request_context=None, refresh_request=None, transport_lease=None):
     primary = {"model": model, "effort": effort, "url": str(url or "").strip(),
                "key": str(api_key or "").strip()}
     backup = backup_chat_config(role, model, effort, url, api_key)
@@ -1866,6 +1923,10 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                             role, urlsplit(active["url"]).hostname, active["model"], AI_HTTP_RETRIES)
         return True
 
+    if transport_lease is not None and transport_lease.bypass:
+        base.logger.warning("%s %s 主路读超时暂避剩余=%.1fs或恢复检查进行中；本轮正常任务使用已配置备用，不增加HTTP预算或探测请求",
+                            role, AI_TRANSPORT_VERSION, transport_lease.remaining)
+        switch_to_backup()
     if not primary["key"] or not primary["url"]:
         if not switch_to_backup():
             raise RuntimeError("%s 缺少 %s" % (role, "API key" if not primary["key"] else "请求 URL"))
@@ -2030,6 +2091,9 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 "refresh_elapsed_sec": round(refresh_elapsed, 3),
                 "read_timeout_sec": request_timeout,
                 "headers_elapsed_sec": response_progress.get("headers_elapsed_sec"),
+                "read_timeout_stage": ("reading_body" if response_progress else "awaiting_headers") if outcome == "read_timeout" else None,
+                "transport_health_version": AI_TRANSPORT_VERSION,
+                "primary_temporarily_bypassed": bool(transport_lease and transport_lease.bypass),
                 "body_complete": response is not None,
                 "prompt_chars": len(request_prompt), "instructions_chars": len(request_instructions), "profile_rules": snapshot.get("profile_rules"),
                 "input_pack_version": snapshot.get("input_pack_version"),
@@ -2082,6 +2146,8 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                                 role, attempt, AI_HTTP_RETRIES, label, last_problem)
             is_read_timeout = (isinstance(exc, requests.Timeout) and not isinstance(exc, requests.ConnectTimeout)
                                or "read timed out" in str(exc).lower())
+            if is_read_timeout and channel == "primary" and transport_lease is not None:
+                _PRIMARY_TIMEOUT_BACKOFF.read_timeout(transport_lease, AI1_PRIMARY_TIMEOUT_THRESHOLD, AI1_PRIMARY_COOLDOWN_SEC)
             if is_read_timeout and response_progress:
                 base.logger.warning("%s 已收到HTTP %s响应头(%.2fs)，正文读取超时，等待=%ss (%s)",
                                     role, response_progress["http_status"], response_progress["headers_elapsed_sec"],
@@ -2099,6 +2165,8 @@ def call_chat(role, model, effort, instructions, prompt, timeout, url, api_key, 
                 break
             time.sleep(AI_HTTP_RETRY_PAUSE)
             continue
+        if channel == "primary" and transport_lease is not None:
+            transport_lease = _PRIMARY_TIMEOUT_BACKOFF.response_received(transport_lease)
         response.encoding = "utf-8"
         try:
             result = response.json()
@@ -3904,6 +3972,8 @@ class ThreeAITrader(base.FibVolumePATrader):
                          COST_CONTROL_VERSION, AI_MAX_TOKENS, AI_READ_TIMEOUT_RETRIES, AI_USAGE_DIR)
         base.logger.info("AI请求可靠性=%s 代码=%s 输出超限配置暂停后续付费请求，主备共享实际HTTP预算",
                          AI_REVIEW_RELIABILITY_VERSION, CLIENT_CODE_SIGNATURE)
+        base.logger.info("AI-1传输=%s 连续读超时阈值=%s 暂避=%ss；仅可用独立备用时启用，恢复借正常任务；入场事实=%s",
+                         AI_TRANSPORT_VERSION, AI1_PRIMARY_TIMEOUT_THRESHOLD, AI1_PRIMARY_COOLDOWN_SEC, ENTRY_CONTEXT_VERSION)
         base.logger.info("AI-2思考控制 主路=%s 备用=%s；备用等待=%ss，空白继承主路=%ss",
                          request_thinking_mode("AI-2") or "provider_default",
                          request_thinking_mode("AI-2", True) or "provider_default",

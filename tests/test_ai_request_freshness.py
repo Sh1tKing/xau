@@ -30,6 +30,7 @@ class FreshnessTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         for scope in (patch.dict(ai.os.environ, {"FIB_PA_NEWS_PAUSE_ENABLED": "false"}, clear=True),
+                      patch.object(ai, "_PRIMARY_TIMEOUT_BACKOFF", ai.PrimaryTimeoutBackoff()),
                       patch.dict(ai._CHAT_OPTIONS, {}, clear=True),
                       patch.object(ai, "AI3_STATE_FILE", str(Path(self.temp.name) / "state.json")),
                       patch.object(ai, "AI_USAGE_DIR", self.temp.name),

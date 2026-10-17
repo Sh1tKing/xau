@@ -1,5 +1,9 @@
 # XAUUSD 三AI交易系统
 
+AI-1默认在同一主路连续两次读超时后暂避15分钟，仅在已有可用独立备用时启用；不额外发付费探测，下一轮正常任务在期限结束后检查恢复。模型、档位、单次超时和总HTTP预算保持实际配置，`FIB_PA_AI1_PRIMARY_TIMEOUT_THRESHOLD=0`可关闭暂避。入场新增`entry-context-v1`，把EMA50位置背景、闭合K线推进/收盘峰谷与实时窗口位置分开交给AI1/AI2，保留反弹自主权及原硬限制。见[下一周执行准备](docs/superpowers/specs/2026-10-17-week-start-readiness.md)。
+
+日历现在同时检查运行缓存和启动备用的覆盖范围与七天核对期限。可运行`python -m strategies.news_calendar --through 2026-10-24T07:00:00+08:00`只读检查覆盖到指定带时区时刻；加`--refresh`才访问公开来源并写日历缓存。输出`coverage.providers`显示实际截止和cache/bootstrap来源，覆盖有效不代表新闻休息期间允许开仓。自定义缓存路径需通过进程环境变量`FIB_PA_NEWS_CALENDAR_CACHE`传给该CLI；CLI不读取或打印AI密钥。
+
 AI-1新请求使用`entry-quality-v5`：每个独立问题只声明一次归属和严重程度，由Python生成五项等级与总分，避免等级与意见清单脱节。20/16/8/0、实际质量门槛和入场风控保持；旧版本坏卡仍拒绝。此次按用户要求保留下面的`profit-floor-v3`阶梯护盘，没有加入平滑过渡。见[契约设计](docs/superpowers/specs/2026-10-16-ai1-bound-quality.md)。
 
 重大美国事件（非农、CPI/PPI、GDP/PCE、FOMC决议/发布会/纪要）默认在发布时间前后各15分钟停止新开仓，已有仓位继续锁盈和AI-3护仓。夏令时自动处理，相接窗口合并；日历不可用时单独记录原因，窗口结束后重新分析行情。见[新闻休息设计](docs/superpowers/specs/2026-10-14-news-entry-pause.md)。

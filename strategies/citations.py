@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 import re
+from strategies.entry_context import citation_allowed as entry_context_citation_allowed
 
 VERSION = 'ai1-citations-v1'
 MISSING = object()
@@ -31,6 +32,8 @@ RECENT_ENTRY = {'direction_policy_version', 'route', 'h1_background', 'structure
 
 
 def _public_shared(parts):
+    if parts[0] == 'entry_context':
+        return entry_context_citation_allowed(parts)
     if parts[0] == 'direction_context':
         if len(parts) == 2 and parts[1] in DIRECTION_FIELDS:
             return True
@@ -79,7 +82,7 @@ def scope_allowed(pointer,index,action):
         return False
     if any(p in HIDDEN for p in parts):
         return False
-    if parts[0] in ('direction_context', 'recent_trades'):
+    if parts[0] in ('direction_context', 'recent_trades', 'entry_context'):
         return _public_shared(parts)
     if len(parts)>=3 and parts[:2]==['opportunities',str(index)]:
         if 'strategy_evidence' in parts:
@@ -139,7 +142,7 @@ def build_catalog(pack):
             add('/'+key,_paths(value,'/'+key,1))
         else: simple.append('/'+key)
     add('',simple)
-    for root in ('direction_context', 'recent_trades'):
+    for root in ('direction_context', 'recent_trades', 'entry_context'):
         value = pack.get(root)
         if isinstance(value, dict):
             add('/'+root, [path for path in _paths(value, '/'+root, 4)

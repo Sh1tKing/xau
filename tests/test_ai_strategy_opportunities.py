@@ -73,6 +73,7 @@ class OpportunityAITests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         for scope in (patch.dict(ai.os.environ, {"FIB_PA_NEWS_PAUSE_ENABLED": "false"}, clear=True), patch.dict(ai._CHAT_OPTIONS, {}, clear=True),
+                      patch.object(ai, '_PRIMARY_TIMEOUT_BACKOFF', ai.PrimaryTimeoutBackoff()),
                       patch.object(ai, 'AI3_STATE_FILE', str(Path(self.temp.name)/'state.json')),
                       patch.object(ai, 'AI_USAGE_DIR', self.temp.name), patch.object(ai, 'AI1_URL', 'https://unit.test/chat'),
                       patch.object(ai, 'AI1_KEY', 'mock'), patch.object(ai, 'AI2_URL', 'https://unit.test/chat'),
