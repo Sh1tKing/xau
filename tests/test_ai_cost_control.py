@@ -554,8 +554,11 @@ class PromptCompactionTests(unittest.TestCase):
         sent_requests = []
         def refreshed_chat(*args, **kwargs):
             sent_requests.append(kwargs["refresh_request"]())
-            return (json.dumps(raw) if args[0] == "AI-1" else
-                    '{"decision":"APPROVE","defects":[],"reasoning":"verified","fact_conflicts":[]}')
+            if args[0]=='AI-1':
+                from test_ai_citations import cite
+                request=json.loads(sent_requests[-1]['prompt'].split('\n',1)[1])
+                return json.dumps(cite(request,raw))
+            return '{"decision":"APPROVE","defects":[],"reasoning":"verified","fact_conflicts":[]}'
         with tempfile.TemporaryDirectory() as folder, patch.object(ai, "AI3_STATE_FILE", str(Path(folder)/"state.json")):
             trader = ai.ThreeAITrader()
             with patch.object(trader, "get_context", return_value=(frame, frame, frame)), \

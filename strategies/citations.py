@@ -5,7 +5,9 @@ import json
 import re
 from strategies.entry_context import citation_allowed as entry_context_citation_allowed
 
-VERSION = 'ai1-citations-v1'
+LEGACY_VERSION = 'ai1-citations-v1'
+VERSION = 'ai1-citations-v2'
+SUPPORTED_VERSIONS = (LEGACY_VERSION, VERSION)
 MISSING = object()
 SHARED_ROOTS = {'m15_bars','m5_bars','h1_bars','patterns','live_quote','atr','h1_trend',
                 'm15_trend','m15_ema21','m15_ema21_distance_atr','bar_closure'}
@@ -115,19 +117,26 @@ def _paths(value,base,depth):
     return result
 
 
-def build_catalog(pack):
+def build_catalog(pack, version=VERSION):
+    if version not in SUPPORTED_VERSIONS:
+        raise ValueError('AI-1证据引用协议版本无效: '+str(version))
     # Format guidance contains current catalog IDs, not source facts; including
     # it would create a circular scope hash. It is never an allowed citation root.
     source={k:v for k,v in pack.items() if k not in ('evidence_catalog','quality_rubric','quality_reference_examples')}
     scope=hashlib.sha256(json.dumps(source,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()[:10]
     groups=[]
+    next_ref=0
     def add(base,paths,owner=None):
+        nonlocal next_ref
         paths=list(dict.fromkeys(paths))
         paths=[p for p in paths if pointer_value(pack,p) is not MISSING and pointer_value(pack,p) is not None]
         if 'opportunities' in pack:
             paths=[p for p in paths if any(scope_allowed(p,i,c.get('action')) for i,c in enumerate(pack['opportunities']) if c)]
         if not paths: return
-        group={'base':base,'refs':{scope+'.'+str(len(groups))+'.'+str(n):p[len(base):] for n,p in enumerate(paths)}}
+        refs={(scope+'.'+str(len(groups))+'.'+str(n) if version == LEGACY_VERSION
+               else 'r'+str(next_ref+n)):p[len(base):] for n,p in enumerate(paths)}
+        next_ref+=len(paths)
+        group={'base':base,'refs':refs}
         if owner: group.update(opportunity_id=owner['opportunity_id'],direction=owner['action'])
         groups.append(group)
     simple=[]
@@ -183,13 +192,16 @@ def build_catalog(pack):
     else:
         for key in ('strategy_evidence','computed_evidence','local_plan_feasibility','strategy_contract','reference_price'):
             if key in pack: add('/'+key,_paths(pack[key],'/'+key,2))
-    return {'version':VERSION,'scope':scope,'groups':groups}
+    return {'version':version,'scope':scope,'groups':groups}
 
 
 def catalog_bindings(pack):
     catalog=pack.get('evidence_catalog')
     if catalog is None: return {}
-    if catalog!=build_catalog(pack):
+    version=catalog.get('version') if isinstance(catalog,dict) else None
+    if version not in SUPPORTED_VERSIONS:
+        raise ValueError('AI-1证据引用协议版本无效: '+str(version))
+    if catalog!=build_catalog(pack,version=version):
         raise ValueError('AI-1证据目录与本次请求快照不一致')
     return {identifier:group['base']+suffix for group in catalog['groups'] for identifier,suffix in group['refs'].items()}
 
@@ -198,13 +210,18 @@ def resolve_references(payload,pack):
     """Explicit advertised IDs only. Real legacy pointers retain their original meaning."""
     result=copy.deepcopy(payload)
     references=catalog_bindings(pack)
+    catalog=pack.get('evidence_catalog') or {}
+    scoped=catalog.get('version') == VERSION
+    if scoped and (not isinstance(payload,dict) or not isinstance(payload.get('evidence_scope'),str)
+                   or payload['evidence_scope'] != catalog['scope']):
+        raise ValueError('AI-1 evidence_scope缺失或不属于本次请求快照')
     def visit(value):
         if isinstance(value,dict):
             for key,child in value.items():
                 if key=='evidence_refs' and isinstance(child,list):
                     decoded=[]
                     for ref in child:
-                        if isinstance(ref,str) and ref.startswith('/'):
+                        if not scoped and isinstance(ref,str) and ref.startswith('/'):
                             decoded.append(ref)  # Never repair nesting, aliases or list indices.
                         elif isinstance(ref,str) and ref in references:
                             decoded.append(references[ref])

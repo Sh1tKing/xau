@@ -1,5 +1,7 @@
 # XAUUSD 三AI交易系统
 
+AI1新请求采用`ai1-citations-v2`：回复只在顶层写一次`evidence_scope`，证据使用本次目录的`r0/r1/...`短编号，减少重复抄哈希。快照、目录、候选隔离和真实路径仍严格校验；旧v1按原规则兼容，不自动修括号或猜引用。Schema与模板统一顺序并以顶层reasoning收尾。见[契约修复验证](docs/experiments/2026-10-19-ai1-scoped-citations-validation.md)。
+
 AI-1默认在同一主路连续两次读超时后暂避15分钟，仅在已有可用独立备用时启用；不额外发付费探测，下一轮正常任务在期限结束后检查恢复。模型、档位、单次超时和总HTTP预算保持实际配置，`FIB_PA_AI1_PRIMARY_TIMEOUT_THRESHOLD=0`可关闭暂避。入场新增`entry-context-v1`，把EMA50位置背景、闭合K线推进/收盘峰谷与实时窗口位置分开交给AI1/AI2，保留反弹自主权及原硬限制。见[下一周执行准备](docs/superpowers/specs/2026-10-17-week-start-readiness.md)。
 
 日历现在同时检查运行缓存和启动备用的覆盖范围与七天核对期限。可运行`python -m strategies.news_calendar --through 2026-10-24T07:00:00+08:00`只读检查覆盖到指定带时区时刻；加`--refresh`才访问公开来源并写日历缓存。输出`coverage.providers`显示实际截止和cache/bootstrap来源，覆盖有效不代表新闻休息期间允许开仓。自定义缓存路径需通过进程环境变量`FIB_PA_NEWS_CALENDAR_CACHE`传给该CLI；CLI不读取或打印AI密钥。

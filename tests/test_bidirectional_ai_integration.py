@@ -40,6 +40,7 @@ class BidirectionalAITests(unittest.TestCase):
         scope.start(); self.addCleanup(scope.stop)
         fixture.packs = []
         def proposal(request):
+            from test_ai_citations import cite
             pack = json.loads(request["messages"][-1]["content"].split("\n", 1)[1])
             fixture.packs.append(deepcopy(pack))
             own = next(item for item in pack["opportunities"] if item["action"] == side)
@@ -54,7 +55,7 @@ class BidirectionalAITests(unittest.TestCase):
             refs = ["/direction_context/m15_leg/confirmation/close"]
             for item in value["quality_assessment"]["dimensions"].values():
                 item["evidence_refs"] = list(refs)
-            return value
+            return cite(pack,value)
         fixture.proposal = proposal
         return fixture
 

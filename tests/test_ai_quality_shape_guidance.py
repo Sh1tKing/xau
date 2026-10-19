@@ -114,11 +114,11 @@ class FreshShapeGuidance(unittest.TestCase):
         source["snapshot_id"] = "refreshed"
         second = ai.prepare_ai1_request_pack(source)
         self.assertNotEqual(first["evidence_catalog"]["scope"], second["evidence_catalog"]["scope"])
-        old = set(bindings(first))
-        new = set(bindings(second))
+        old = {(first['evidence_catalog']['scope'],ref) for ref in bindings(first)}
+        new = {(second['evidence_catalog']['scope'],ref) for ref in bindings(second)}
         for example in request_examples(second):
             for key in ("volume_observation", "unassessed_target"):
-                refs = set(example[key]["evidence_refs"])
+                refs = {(second['evidence_catalog']['scope'],ref) for ref in example[key]["evidence_refs"]}
                 self.assertTrue(refs <= new)
                 self.assertFalse(refs & old)
 

@@ -198,7 +198,7 @@ class EntryContextTests(unittest.TestCase):
         changed=copy.deepcopy(request);changed['live_quote']['ask']+=1
         changed['entry_context']=ec.build(changed,100,113,120,150)
         new=build_catalog(changed)
-        refs=lambda c:{key for group in c['groups'] for key in group['refs']}
+        refs=lambda c:{(c['scope'],key) for group in c['groups'] for key in group['refs']}
         self.assertTrue(refs(old).isdisjoint(refs(new)))
         review=ai.compact_review_pack({'market_evidence':pack,'proposal':{},'ai1_raw_proposal':{}})
         self.assertEqual(review['market_evidence']['entry_context'],before['entry_context'])

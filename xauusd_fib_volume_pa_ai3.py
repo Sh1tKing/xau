@@ -46,6 +46,10 @@ from strategies.quality import (CURRENT_VERSION as QUALITY_VERSION, VERSION as D
                                 decode_ledger as decode_quality_ledger, bound_schema as quality_bound_schema,
                                 decode_bound as decode_bound_quality, bound_rubric_fields as quality_rubric_fields)
 
+AI1_RESPONSE_FIELDS = ('quality_assessment', 'wait_basis', 'opportunity_id', 'evidence_scope',
+                      'action', 'stop_loss', 'take_profit', 'trigger_evidence', 'invalidation',
+                      'target_basis', 'fact_conflicts', 'unknowns', 'reasoning')
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
@@ -985,7 +989,8 @@ def prepare_ai1_request_pack(pack):
     request["evidence_catalog"] = build_catalog(request)
     rubric = request.setdefault("quality_rubric", {})
     rubric.pop("reference_paths", None)  # Static legacy examples were invalid in pool mode.
-    rubric["reference_path_policy"] = ("evidence_refs只复制本次evidence_catalog.groups.refs的ID键；"
+    rubric["reference_path_policy"] = ("将本次evidence_catalog.scope原样复制到顶层evidence_scope且只写一次；"
+        "evidence_refs只复制本次evidence_catalog.groups.refs的r短编号，不重复抄哈希，不拼接分组或字段序号；"
         "路径由该组base加对应值定义，只用共享组或所选opportunity_id/方向组。不能猜路径或沿用旧快照ID。"
         "volume和bar_behavior是同级事实；候选参数在strategy_contract，数据在strategy_evidence/方向/evidence。"
         "quality_reference_examples仅是当前格式和引用示范，不是行情结论或交易指令。")
@@ -1490,6 +1495,11 @@ def response_json_schema(role, request_pack=None, quality_version=None):
             "fact_conflicts": texts, "unknowns": texts,
             "quality_assessment": card,
             "wait_basis": {"type": "array", "items": wait}})
+        catalog=request_pack.get('evidence_catalog',{}) if request_pack is not None else {}
+        if catalog.get('version') == AI1_CITATION_VERSION:
+            schema['properties']['evidence_scope']={"type":"string","enum":[catalog['scope']]}
+        schema=_object_schema({key:schema['properties'][key] for key in AI1_RESPONSE_FIELDS
+                               if key in schema['properties']})
         schema["$defs"] = {"quality_dimension": dimension}
         if evidence_ids:
             schema["$defs"]["evidence_ref"] = {"type": "string", "enum": list(evidence_ids)}
@@ -1575,21 +1585,25 @@ def response_schema_error(payload, schema):
 
 
 def ai1_json_template():
-    return {"opportunity_id": "<本次候选ID；仅无opportunities的legacy输入可空字符串>", "action": "no", "stop_loss": None, "take_profit": None,
+    template = {"opportunity_id": "<本次候选ID；仅无opportunities的legacy输入可空字符串>",
+            "evidence_scope": "<原样复制本次evidence_catalog.scope，仅此一处>",
+            "action": "no", "stop_loss": None, "take_profit": None,
             "reasoning": "<本次结论>", "trigger_evidence": "<实际触发或缺失>",
             "invalidation": "<失效条件>", "target_basis": "<目标依据>", "fact_conflicts": [], "unknowns": [],
-            "wait_basis": [{"code": "missing_trigger", "reason": "<实际等待条件>", "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径>"]}],
+            "wait_basis": [{"code": "missing_trigger", "reason": "<实际等待条件>", "evidence_refs": ["<本次refs中的r短编号>"]}],
             "quality_assessment": {"version": QUALITY_VERSION, "direction": "buy", "issues": [], "dimensions": {
                 name: {"support": "adequate", "reason": ("<目标依据；若保护先阻断未评估，说明依赖并引用阻断事实>" if name == "target"
                                                        else "<本项正向支持；不利程度须归属唯一issues>"),
-                       "evidence_refs": ["<本次evidence_catalog中的ID；旧输入用真实路径，no时也非空>"]}
+                       "evidence_refs": ["<本次refs中的r短编号，no时也非空>"]}
                 for name in QUALITY_DIMENSIONS}}}
+    return {key:template[key] for key in AI1_RESPONSE_FIELDS}
 
 
 AI1_INSTRUCTIONS += (
     "严格输出一个完整JSON对象，闭合所有括号，不输出Markdown或分析过程。wait_basis必须在顶层，与quality_assessment并列，"
     "quality_assessment按version/direction/issues/dimensions顺序输出；五项只写support/reason/evidence_refs，severity只写在唯一issues；不要另写level。以下仅示范层级，示例方向/支持/理由/路径不可复用，须按实际证据重填；"
-    "有交易提案时wait_basis为空数组。按模板先写顶层wait_basis再写quality_assessment，末尾依次闭合最后维度、dimensions、quality_assessment、顶层对象。"
+    "有交易提案时wait_basis为空数组。Schema和模板采用同一字段顺序：先完成quality_assessment，再写顶层wait_basis及其余字段，最后写顶层reasoning字符串并结束对象。"
+    "evidence_scope只在顶层原样复制本次evidence_catalog.scope一次；所有evidence_refs只选本次refs已列出的r短编号，不重复写快照哈希或自行拼编号。"
     "先写issues，核对cause/event唯一，再声明dimension/kind/severity，最后填五项正向support；Python按唯一不利程度生成等级。清单为空也写issues=[]；不输出五套reservations/observations。"
     "输出前核对括号、字段层级、必填数组及意见唯一归属，不复制同一事实的意见条目，不改交易判断或等级来满足格式。格式模板："
     + json.dumps(ai1_json_template(), ensure_ascii=False, separators=(",", ":"))

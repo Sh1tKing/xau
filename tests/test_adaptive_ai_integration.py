@@ -98,6 +98,7 @@ class AdaptiveAITests(unittest.TestCase):
         return SimpleNamespace(retcode=base.mt5.TRADE_RETCODE_DONE, order=123, price=request['price'], comment='mock')
 
     def proposal(self, request):
+        from test_ai_citations import cite
         pack = json.loads(request['messages'][-1]['content'].split('\n', 1)[1])
         own = pack['opportunities'][0]
         self.assertEqual(own['action'], self.side)
@@ -106,8 +107,8 @@ class AdaptiveAITests(unittest.TestCase):
         value['stop_loss'], value['take_profit'] = (97., 109.) if self.side == 'buy' else (103., 91.)
         value['trigger_evidence'] = '原始最近三根M5位置及收盘实体，自主顺势交易依据'
         for card in value['quality_assessment']['dimensions'].values():
-            card['evidence_refs'] = ['/m5_bars/79/close']
-        return value
+            card['evidence_refs'] = ['/m5_bars/79']
+        return cite(pack,value)
 
     def run_entry(self, mutate=None, review='APPROVE', before_review=None, protocol='chat'):
         def post(url, **kwargs):
@@ -160,7 +161,7 @@ class AdaptiveAITests(unittest.TestCase):
                     other.doCleanups()
 
     def test_no_reject_missing_quality_bad_json_and_invalid_plan_never_order(self):
-        cases = [('no', lambda v: dict(v, action='no', wait_basis=[{'code':'missing_trigger','reason':'无触发','evidence_refs':['/m5_bars/79/close']}]), 'APPROVE'),
+        cases = [('no', lambda v: dict(v, action='no', wait_basis=[{'code':'missing_trigger','reason':'无触发','evidence_refs':v['quality_assessment']['dimensions']['trigger']['evidence_refs']}]), 'APPROVE'),
                  ('reject', None, 'REJECT'), ('quality', lambda v: {k:x for k,x in v.items() if k!='quality_assessment'}, 'APPROVE'),
                  ('json', lambda v: '{bad}', 'APPROVE'), ('sl8', lambda v: dict(v, stop_loss=90.), 'APPROVE'),
                  ('finite', lambda v: dict(v, stop_loss=float('inf')), 'APPROVE'),

@@ -33,6 +33,8 @@ def bindings(pack):
 
 def cite(pack,raw):
     result=copy.deepcopy(raw)
+    if pack['evidence_catalog']['version']=='ai1-citations-v2':
+        result['evidence_scope']=pack['evidence_catalog']['scope']
     by_path={path:identifier for identifier,path in bindings(pack).items()}
     def visit(value):
         if isinstance(value,dict):
@@ -96,7 +98,7 @@ class CitationTests(unittest.TestCase):
         newer=ai.prepare_ai1_request_pack(changed)
         foreign=next(k for k,v in ids.items() if v=='/opportunities/0/strategy_evidence/buy/evidence/volume')
         for ref,source in ((foreign,pack),('invented',pack),(old,newer)):
-            value=payload();value['quality_assessment']['dimensions']['trigger']['evidence_refs']=[ref]
+            value=cite(pack,payload());value['quality_assessment']['dimensions']['trigger']['evidence_refs']=[ref]
             self.assertTrue(ai.normalize_ai1_quality(value,source)[1],ref)
 
     def test_bad_old_json_pointers_stay_invalid_and_are_never_repaired(self):

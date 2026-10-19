@@ -154,10 +154,12 @@ class QualityScorecardTests(unittest.TestCase):
                                           tick_volume=100) for i in range(80)])
         local = ai.base.StrategyResult("buy", 60, False, "local candidate", 106, 113, 60, 0, {"setup": "pullback"})
         def response(*args, **kwargs):
+            from test_ai_citations import cite
             _, payload = sample("buy")
             # Refer to an actual field shared by the real input pack.
             payload["quality_assessment"]["dimensions"]["trigger"]["evidence_refs"] = ["/h1_trend"]
-            return ai.json.dumps(payload)
+            request=ai.json.loads(kwargs['refresh_request']()['prompt'].split('\n',1)[1])
+            return ai.json.dumps(cite(request,payload))
         with tempfile.TemporaryDirectory() as folder, patch.object(ai, "AI3_STATE_FILE", str(Path(folder)/"state.json")):
             trader = ai.ThreeAITrader()
             with patch.object(trader, "get_context", return_value=(frame, frame, frame)), \

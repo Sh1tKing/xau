@@ -214,7 +214,8 @@ class OutputReliabilityTests(unittest.TestCase):
                          {'support', 'reason', 'evidence_refs'})
         self.assertIn('issues', schema['properties']['quality_assessment']['required'])
         template = ai.ai1_json_template()
-        self.assertLess(list(template).index('wait_basis'), list(template).index('quality_assessment'))
+        self.assertLess(list(template).index('quality_assessment'), list(template).index('wait_basis'))
+        self.assertEqual(list(template)[-1],'reasoning')
         self.assertNotIn('wait_basis', template['quality_assessment'])
         self.assertEqual(template['quality_assessment']['issues'], [])
 

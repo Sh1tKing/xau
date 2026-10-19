@@ -198,7 +198,7 @@ class ReviewReliabilityTests(unittest.TestCase):
             self.call()
         event=self.events()[0]
         self.assertEqual(event['usage_reported'],{'output_tokens':90})
-        self.assertEqual(event['citation_version'],'ai1-citations-v1')
+        self.assertEqual(event['citation_version'],'ai1-citations-v2')
         self.assertTrue(event['client_code_signature'])
         self.assertFalse(event['token_limit_violation'])
 

@@ -155,11 +155,44 @@ class OpportunityAITests(unittest.TestCase):
             value = copy.deepcopy(next(snapshots))
             market_frames = frames if frames is not None else (frame(), frame(), frame())
             return *market_frames, local, value, None, 2., 100.
+        # Static fixtures describe a semantic legacy card. Author its wire IDs
+        # from the actual mock POST; do not transform callable/raw failure replies.
+        iterator = None if callable(responses) else iter(responses)
+        def respond(*args, **kwargs):
+            if iterator is None:
+                return responses(*args, **kwargs)
+            response=next(iterator)
+            if isinstance(response,BaseException):
+                raise response
+            if isinstance(response,type) and issubclass(response,BaseException):
+                raise response()
+            if not isinstance(response,Response) or not isinstance(response.value,dict):
+                return response
+            body=kwargs['json']
+            prompt=body['messages'][-1]['content']
+            request=json.loads(prompt.split('\n',1)[1])
+            catalog=request.get('evidence_catalog',{})
+            if (catalog.get('version')!='ai1-citations-v2' or 'quality_assessment' not in response.value
+                    or 'evidence_scope' in response.value):
+                return response
+            value=copy.deepcopy(response.value)
+            by_path={group['base']+suffix:key for group in catalog['groups'] for key,suffix in group['refs'].items()}
+            def encode(item):
+                if isinstance(item,dict):
+                    for key,child in item.items():
+                        if key=='evidence_refs' and isinstance(child,list):
+                            item[key]=[by_path.get(ref,ref) for ref in child]
+                        else: encode(child)
+                elif isinstance(item,list):
+                    for child in item: encode(child)
+            encode(value)
+            value['evidence_scope']=catalog['scope']
+            return Response(value)
         scopes = [patch.object(self.trader, 'collect_entry_snapshot', side_effect=collect),
                   patch.object(self.trader, 'entry_is_current', return_value=True),
                   patch.object(self.trader, 'ensure_strategy_current'), patch.object(self.trader, 'release_task'),
                   patch.object(self.trader, 'notify_lines'), patch.object(self.trader, 'alert_api_failure'),
-                  patch.object(ai, 'append_decision_snapshot'), patch.object(ai.requests, 'post', side_effect=responses)]
+                  patch.object(ai, 'append_decision_snapshot'), patch.object(ai.requests, 'post', side_effect=respond)]
         if finalize is not None:
             scopes.append(patch.object(ai, 'finalize_ai_proposal', side_effect=finalize))
         from contextlib import ExitStack
