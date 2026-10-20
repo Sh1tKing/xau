@@ -78,7 +78,8 @@ class AdaptiveProfileTests(unittest.TestCase):
                         {"demo_only": False}, {"one_entry_per_event": False}):
             with self.subTest(changes=changes), self.assertRaises(StrategyError):
                 Registry.validate(replace(strategy, **changes))
-        Registry.validate(replace(strategy, analysis_mode=False, demo_only=False, direction_policy=None))
+        legacy_parameters = {k:v for k,v in strategy.parameters.items() if k != "chop_policy"}
+        Registry.validate(replace(strategy, analysis_mode=False, demo_only=False, direction_policy=None, parameters=legacy_parameters))
 
     def test_definition_parameter_edits_keep_contract_role_rules_and_soft_math_coherent(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -31,7 +31,7 @@ def definition(profile):
 
 
 class BidirectionalStrategyContractTests(unittest.TestCase):
-    def test_all_sessions_explicitly_declare_identical_registered_policy_version_two(self):
+    def test_all_sessions_keep_registered_direction_policy_in_version_four(self):
         policies = []
         expected = {"version": VERSION, "break_lookback_m15": 2, "leg_ttl_m15": 6,
                     "break_margin_atr": .10, "break_margin_ticks": 2, "failure_closes_m5": 2,
@@ -40,7 +40,7 @@ class BidirectionalStrategyContractTests(unittest.TestCase):
             strategy = definition(profile).STRATEGY
             with self.subTest(profile=profile):
                 Registry.validate(strategy)
-                self.assertEqual(strategy.version, "3")
+                self.assertEqual(strategy.version, "4")
                 self.assertEqual(strategy.direction_policy, expected)
                 self.assertEqual(strategy.manifest()["direction_policy"], expected)
                 self.assertTrue(strategy.demo_only)
@@ -58,7 +58,8 @@ class BidirectionalStrategyContractTests(unittest.TestCase):
             module = definition(profile)
             strategy = module.STRATEGY
             with self.subTest(profile=profile):
-                self.assertEqual(module.P, dict(profile=profile, target_r=3., max_hold_minutes=90,
+                unchanged = {key: value for key, value in module.P.items() if key != "chop_policy"}
+                self.assertEqual(unchanged, dict(profile=profile, target_r=3., max_hold_minutes=90,
                     cooldown_seconds=60, soft_scoring=dict(range_edge_fraction=.3,
                         small_trend_max_atr=1., reaction_range_atr=1.25, weights=WEIGHTS[profile])))
                 self.assertEqual(strategy.parameters, module.P)
@@ -92,7 +93,9 @@ class BidirectionalStrategyContractTests(unittest.TestCase):
 
     def test_absent_or_explicit_legacy_policy_preserves_exact_h1_only_manifest(self):
         strategy = definition(PROFILES[0]).STRATEGY
-        absent = replace(strategy, direction_policy=None, analysis_mode=False, demo_only=False)
+        legacy_parameters = {key: value for key, value in strategy.parameters.items() if key != "chop_policy"}
+        absent = replace(strategy, direction_policy=None, analysis_mode=False, demo_only=False,
+                         parameters=legacy_parameters)
         explicit = replace(absent, direction_policy={"version": LEGACY_VERSION})
         Registry.validate(absent)
         Registry.validate(explicit)

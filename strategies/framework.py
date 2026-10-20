@@ -15,6 +15,7 @@ import copy
 from typing import Any, Callable
 from strategies.lifecycle import holding_policy
 from strategies.direction import normalize_policy, LEGACY_VERSION as LEGACY_DIRECTION_VERSION
+from strategies.chop import policy_for as chop_policy_for
 
 VERSION = "strategy-framework-v2"
 SESSIONS = ("asia", "london", "overlap", "late_us")
@@ -198,6 +199,11 @@ class Registry:
             raise StrategyError(f"{s.id} regime_filter/momentum错误")
         if not isinstance(s.parameters, dict) or not isinstance(s.ai_rules, dict) or set(s.ai_rules) != {"entry", "review", "guardian"}:
             raise StrategyError(f"{s.id} parameters及三角色ai_rules必须完整")
+        try:
+            if chop_policy_for(s.manifest()) is not None and direction["version"] == LEGACY_DIRECTION_VERSION:
+                raise ValueError("反复震荡政策需要来源绑定的双向方向契约")
+        except ValueError as exc:
+            raise StrategyError(f"{s.id} 反复震荡声明无效: {exc}") from exc
         if any(not isinstance(v, str) or not v.strip() or len(v) > 2000 for v in s.ai_rules.values()):
             raise StrategyError(f"{s.id} AI规则需为非空短文本")
         json.dumps(s.manifest(), allow_nan=False)

@@ -151,6 +151,7 @@ def loaded_code_signature():
                      os.path.join(BASE_DIR, "strategies", "recent_trades.py"),
                      os.path.join(BASE_DIR, "strategies", "adaptive.py"),
                      os.path.join(BASE_DIR, "strategies", "entry_context.py"),
+                     os.path.join(BASE_DIR, "strategies", "chop.py"),
                      os.path.join(BASE_DIR, "strategies", "ai_transport.py"),
                      os.path.join(BASE_DIR, "strategies", "calendars", "us_major_events.json"),
                      os.path.join(BASE_DIR, "strategies", "lifecycle.py"),
@@ -608,6 +609,8 @@ def selected_opportunity_pack(pack, selection):
     result["opportunity_blockers"] = [item for item in result.get("opportunity_blockers", [])
                                        if item.get("opportunity_id") == candidate["opportunity_id"]]
     result["strategy_contract"] = copy.deepcopy(candidate["strategy_contract"])
+    if "entry_chop" in candidate:
+        result["entry_chop"] = copy.deepcopy(candidate["entry_chop"])
     result["strategy_fingerprint"] = candidate["strategy_fingerprint"]
     result["strategy_evidence"] = copy.deepcopy(candidate["strategy_evidence"])
     result["reference_price"] = copy.deepcopy(candidate["reference_price"])
@@ -669,6 +672,38 @@ def analysis_scope_keys(pack):
             scopes.add((item["strategy_contract"]["id"], item["strategy_fingerprint"],
                         checkpoint["m5_bar_time"], checkpoint["m15_bar_time"]))
     return scopes
+
+
+def filter_chop_opportunities(pack, df_m5):
+    """Local, symmetric guard before paying for AI; never rewrites an AI card."""
+    kept = []
+    for candidate in pack.get("opportunities", []):
+        contract = candidate["strategy_contract"]
+        try:
+            if base.chop.policy_for(contract) is None:
+                kept.append(candidate)
+                continue
+            side = candidate["action"]
+            evidence = candidate["strategy_evidence"][side]["evidence"]
+            quote = pack["live_quote"]
+            context = base.chop.analyze(df_m5, now=quote.get("observed_at"),
+                server_utc_offset=evidence.get("server_offset_hours"), tick_size=base.direction_tick_size())
+            if pack.get("chop_context") is not None and pack["chop_context"] != context:
+                raise ValueError("同请求候选震荡公共来源不一致")
+            pack["chop_context"] = context
+            decision = base.chop.decide(context, side, bid=quote.get("bid"), ask=quote.get("ask"))
+            candidate["entry_chop"] = decision
+            if decision["allowed"]:
+                kept.append(candidate)
+                continue
+            error = decision["reason"]
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            error = "反复震荡来源不可用，暂停新入场: " + str(exc)
+        candidate["structural_blockers"].append(error)
+        for diagnostic in pack.get("opportunity_blockers", []):
+            if diagnostic["opportunity_id"] == candidate["opportunity_id"]:
+                diagnostic["blockers"] = list(candidate["structural_blockers"])
+    pack["opportunities"] = kept
 
 
 def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_id=None):
@@ -790,6 +825,7 @@ def build_feature_pack(df_m15, df_h1, df_m5, local_result, quote=None, decision_
                     item["local_plan"]["stop_loss"], item["local_plan"]["take_profit"], live, atr, pack["m15_ema21"])
         if any(item["strategy_contract"].get("analysis_mode") for item in pack["opportunities"]):
             pack["rules"]["price_finalization"]["reference"] = "selected opportunity successful AI1 request live Ask for BUY / Bid for SELL"
+        filter_chop_opportunities(pack, df_m5)
         direction_candidates = [item for item in pack["opportunities"] if base.direction_policy_active(item["strategy_contract"])]
         if direction_candidates:
             from strategies.direction import public_context
@@ -2832,6 +2868,13 @@ class ThreeAITrader(base.FibVolumePATrader):
         pack, fib, atr, price = build_feature_pack(
             df_m15, df_h1, df_m5, local_result, quote=self.get_live_quote(), decision_id=decision_id)
         pack["recent_trades"] = self.recent_trade_context()
+        if pack.get("chop_context"):
+            context = pack["chop_context"]
+            base.logger.info("%s 反复震荡识别 state=%s night_01_07=%s window=%s candidates=%s metrics=%s",
+                base.chop.VERSION, context["state"], context["night_guard"], context["selected_window"],
+                [(item["action"], item.get("entry_chop", {}).get("route")) for item in pack.get("opportunities", [])],
+                {key: {name: window[name] for name in ("efficiency", "reversals", "midpoint_crosses")}
+                 for key, window in context["windows"].items()})
         pack["snapshot_id"] = request_trace_id("%s-ai1" % decision_id)
         return df_m15, df_h1, df_m5, local_result, pack, fib, atr, price
 
@@ -3224,6 +3267,14 @@ class ThreeAITrader(base.FibVolumePATrader):
                                 item["strategy_evidence"][item["action"]]["evidence"], current_quote["bid"])
                             if error:
                                 raise MarketSnapshotError("AI-1发送前方向复核拒绝: " + error)
+                            if base.chop.policy_for(item["strategy_contract"]) is not None:
+                                context = base.chop.analyze(self.get_context()[2], now=current_quote["observed_at"],
+                                    server_utc_offset=item["strategy_evidence"][item["action"]]["evidence"]["server_offset_hours"],
+                                    tick_size=base.direction_tick_size())
+                                decision = base.chop.decide(context, item["action"], bid=current_quote["bid"], ask=current_quote["ask"])
+                                error = base.chop.binding_error(base.chop.bind(pack["chop_context"], item["entry_chop"]), context, decision)
+                                if error:
+                                    raise MarketSnapshotError("AI-1发送前" + error)
                     first_claim = not scope_claimed
                     previous_scopes = getattr(self, "_analysis_request_scopes", set()).copy()
                     if not scope_claimed:
@@ -3409,6 +3460,9 @@ class ThreeAITrader(base.FibVolumePATrader):
                 if base.direction_policy_active(pack["strategy_contract"]):
                     proposal.details["ai1_source_binding"]["direction"] = copy.deepcopy(
                         pack["strategy_evidence"][proposal.action]["evidence"]["host_verified_direction"])
+                if base.chop.policy_for(pack["strategy_contract"]) is not None:
+                    proposal.details["ai1_source_binding"]["chop"] = base.chop.bind(pack["chop_context"], pack["entry_chop"])
+                    proposal.details["entry_chop"] = copy.deepcopy(pack["entry_chop"])
             final_entry_price = float(proposal.details.get("entry_price") or entry_price)
             proposal.details["execution_guard"] = {
                 "atr": atr, "ema21": pack.get("m15_ema21"), "bar_closure": pack["bar_closure"],

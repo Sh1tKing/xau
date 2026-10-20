@@ -23,6 +23,7 @@ from strategies.direction import (normalize_policy as normalize_direction_policy
                                   public_context as public_direction_context, LEGACY_VERSION as LEGACY_DIRECTION_VERSION,
                                   ENGINE_DIGEST as DIRECTION_ENGINE_DIGEST)
 from strategies import recent_trades
+from strategies import chop
 from strategies.regions import region_facts
 from strategies.profit_guard import (ProfitFloor, GuardStore, validate_identity as validate_guard_identity,
                                     policy as profit_policy, VERSION as PROFIT_GUARD_VERSION)
@@ -75,6 +76,8 @@ def freeze_direction_proof(action, contract, context, checkpoint_id, h1_bar_time
              "context": copy.deepcopy(context), "permission": copy.deepcopy(context["permissions"][action]),
              "checkpoint_id": checkpoint_id, "h1_bar_time": h1_bar_time,
              "h1_source_digest": h1_source_digest, "account_namespace": account_namespace, "profile": contract["id"]}
+    if chop.policy_for(contract) is not None:
+        proof.update(chop_policy=chop.policy_for(contract), chop_engine_digest=chop.ENGINE_DIGEST)
     proof["attestation"] = _direction_attestation(proof)
     return proof
 
@@ -86,7 +89,13 @@ def verified_direction_permission(action, contract, evidence):
             raise StrategyError("旧契约没有短线方向证明")
         proof = evidence.get("host_verified_direction", {})
         context, permission = proof["context"], proof["permission"]
-        if (set(proof) != {"action", "policy", "context", "permission", "checkpoint_id", "h1_bar_time", "h1_source_digest", "account_namespace", "profile", "attestation"}
+        chop_policy = chop.policy_for(contract)
+        keys = {"action", "policy", "context", "permission", "checkpoint_id", "h1_bar_time", "h1_source_digest", "account_namespace", "profile", "attestation"}
+        if chop_policy is not None:
+            keys.update(("chop_policy", "chop_engine_digest"))
+        if (set(proof) != keys
+                or (chop_policy is not None and (proof.get("chop_policy") != chop_policy
+                    or proof.get("chop_engine_digest") != chop.ENGINE_DIGEST))
                 or not isinstance(proof["account_namespace"], str) or len(proof["account_namespace"]) != 64
                 or any(c not in "0123456789abcdef" for c in proof["account_namespace"])
                 or not isinstance(proof.get("attestation"), str)
@@ -2479,6 +2488,13 @@ class FibVolumePATrader:
             if ((result.action == "buy" and result.stop_loss > required + 1e-9)
                     or (result.action == "sell" and result.stop_loss < required - 1e-9)):
                 return "固定止损未覆盖原规范保护点及近三M5缓冲"
+            if chop.policy_for(contract) is not None:
+                chop_context = chop.analyze(m5, now=now, server_utc_offset=offset, tick_size=direction_tick_size())
+                decision = chop.decide(chop_context, result.action, bid=getattr(tick, "bid", None), ask=getattr(tick, "ask", None))
+                error = chop.binding_error(details.get("ai1_source_binding", {}).get("chop"), chop_context, decision)
+                details["last_chop_check"] = {"binding": chop.bind(chop_context, decision), "decision": decision}
+                if error:
+                    return error
             return ""
         except (StrategyError, ValueError, TypeError, KeyError, IndexError, RuntimeError) as exc:
             return "方向证明复核失败: " + str(exc)
