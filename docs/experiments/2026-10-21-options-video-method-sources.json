@@ -1,0 +1,35 @@
+{
+  "version": "video-method-v1-source-index",
+  "review_date": "2026-10-21",
+  "scope": "Seven user-supplied videos; reused prior machine transcripts and the earlier key-frame research. No audited trade history. Numerical thresholds are project formalizations, not author formulae.",
+  "files": {
+    "BV1XwTZzQEbP": {
+      "transcript_sha256": "f63a610a518cbb029e9cbc6df0ea73c832364617d5f621113d76e0bfe5a975e2",
+      "metadata_sha256": "dba9fed703f1b2b69d3a711d128d2f104e48d5d1a150664e3b398911ba633665"
+    },
+    "BV14XctzyEhc": {
+      "transcript_sha256": "2a9d53c9af24e28f84f731e3588ff92a733c8cc7573c1ded2613e2f5e0fb8e78",
+      "metadata_sha256": "719009b11fd74a6010523ca99f518a5cf967c11a544aa295f22f49353184d445"
+    },
+    "BV1apTa6AEyz": {
+      "transcript_sha256": "8c9233aba2e6e26332ae19f7f46f2f18b5a8c32b88126570f4fb26159560cc51",
+      "metadata_sha256": "320bf1f432db6b0ad6cb6710b77d666b06492c6910939af6c50156222a4e48fa"
+    },
+    "BV1RQNL6nEN9": {
+      "transcript_sha256": "31792c4af389f30ff97d419f1e9e79bc43b07c0076feb89c3dfa54e89ad6b1c0",
+      "metadata_sha256": "96f4369b4daeabe0797e796b066e0fc8af4edb22371e346d176b70e55b1c0a86"
+    },
+    "BV1K38z6PEdq": {
+      "transcript_sha256": "22bcd017d6a090fbe58a3f47d753e8b03e5ba3192d7423eaf66eb257a6523a8e",
+      "metadata_sha256": "7bddc8c1b2ca06342942723e3ec8916fc7b36f0a016104f72715d9fe888e276c"
+    },
+    "BV1wMbP6xEsm": {
+      "transcript_sha256": "f9c9c270b4f5b71c055417d5f11a2c253b7df07f921aa82bf95f80fdd272bce1",
+      "metadata_sha256": "18b184c2d6de6685eb04faa990d901a470a24095e8dab40e91f1d44a510777f7"
+    },
+    "BV1CYnc6wE1y": {
+      "transcript_sha256": "84b9faa109ab71a1cda86b5ccc19da33f309bb824a72081b332069c385c2e9fb",
+      "metadata_sha256": "a430e89d48b734a8fecac8b5083da8ed132cf4ac6cf848868c76eaa83e68be23"
+    }
+  }
+}
