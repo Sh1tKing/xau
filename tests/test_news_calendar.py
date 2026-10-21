@@ -244,6 +244,10 @@ class CacheTests(unittest.TestCase):
         entered, release = threading.Event(), threading.Event()
         obj = self.manager()
         obj._frames = self.frames
+        # This lock test uses dated synthetic frames, including in its worker.
+        # A real wall clock would stop reaching fsync after fixture expiry.
+        refresh = obj.refresh
+        obj.refresh = lambda: refresh(self.now)
         original = obj._persist
         def slow(snapshots):
             entered.set()

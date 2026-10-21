@@ -1,5 +1,7 @@
 # XAUUSD 三AI交易系统
 
+近期成交时间采用`recent-settlement-clock-v1`：新结算若因最多5秒的时钟领先暂时不能确定UTC，会保存原账户、成交与时差依据，在现有轮询中延后核对，避免永久漏出AI近期成交上下文。平仓净额与通知不等待，旧未知记录不猜时间补回；原双向入场、AI3和离散锁盈阶梯保留。见[修复与入场位置研究](docs/experiments/2026-10-22-recent-settlement-and-entry-location.md)。
+
 AI1新请求采用`ai1-citations-v2`：回复只在顶层写一次`evidence_scope`，证据使用本次目录的`r0/r1/...`短编号，减少重复抄哈希。快照、目录、候选隔离和真实路径仍严格校验；旧v1按原规则兼容，不自动修括号或猜引用。Schema与模板统一顺序并以顶层reasoning收尾。见[契约修复验证](docs/experiments/2026-10-19-ai1-scoped-citations-validation.md)。
 
 AI-1默认在同一主路连续两次读超时后暂避15分钟，仅在已有可用独立备用时启用；不额外发付费探测，下一轮正常任务在期限结束后检查恢复。模型、档位、单次超时和总HTTP预算保持实际配置，`FIB_PA_AI1_PRIMARY_TIMEOUT_THRESHOLD=0`可关闭暂避。入场新增`entry-context-v1`，把EMA50位置背景、闭合K线推进/收盘峰谷与实时窗口位置分开交给AI1/AI2，保留反弹自主权及原硬限制。见[下一周执行准备](docs/superpowers/specs/2026-10-17-week-start-readiness.md)。

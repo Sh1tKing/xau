@@ -17,6 +17,9 @@ MAX_RECORDS = 64
 MAX_PARTITIONS = 64
 WINDOW_SECONDS = 6 * 60 * 60
 CONTEXT_RECORDS = 6
+CLOCK_VERSION = "recent-settlement-clock-v1"
+MAX_CLOCK_LEAD_SECONDS = 5.
+CLOCK_CONFIRM_SECONDS = 120.
 ENTRY_KEYS = frozenset(("direction_policy_version", "route", "h1_background",
                         "structure_event_id", "protection_kind",
                         "invalidation_reason", "strategy_id"))
@@ -132,7 +135,9 @@ def _validate_record(record):
 
 
 def _validated_copy(state):
-    if (not isinstance(state, dict) or set(state) != {"version", "coverage_started_utc", "partitions"}
+    required = {"version", "coverage_started_utc", "partitions"}
+    if (not isinstance(state, dict) or not required <= set(state)
+            or set(state) - required - {"pending_close_utc"}
             or state["version"] != VERSION):
         raise RecentTradesError("invalid cache schema")
     started = _epoch(state["coverage_started_utc"], "coverage_started_utc")
@@ -158,7 +163,47 @@ def _validated_copy(state):
                 raise RecentTradesError("conflicting settlement identities")
             positions.add(record["position_id"])
             deals.update(record["deal_ids"])
+    pending = state.get("pending_close_utc", {})
+    if not isinstance(pending, dict) or set(pending) - set(partitions):
+        raise RecentTradesError("invalid pending clock partitions")
+    for key, entries in pending.items():
+        if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_RECORDS:
+            raise RecentTradesError("invalid pending clock limit")
+        rows = {row["position_id"]: row for row in partitions[key]["records"]}
+        seen = set()
+        for entry in entries:
+            fields = {"version", "position_id", "record_sha256", "offset_hours", "observed_utc", "expires_utc"}
+            if not isinstance(entry, dict) or set(entry) != fields or entry["version"] != CLOCK_VERSION:
+                raise RecentTradesError("invalid pending clock schema")
+            position = _integer(entry["position_id"], "pending position", positive=True)
+            row = rows.get(position)
+            offset = _number(entry["offset_hours"], "offset_hours")
+            observed = _epoch(entry["observed_utc"], "pending observation")
+            expires = _epoch(entry["expires_utc"], "pending expiry")
+            if (position in seen or row is None or row["close_utc"] is not None
+                    or not -12 <= offset <= 14 or offset * 2 != int(offset * 2)
+                    or row["observed_utc"] != observed or expires != observed + CLOCK_CONFIRM_SECONDS
+                    or not 0 < row["broker_close_time"] - offset*3600 - observed <= MAX_CLOCK_LEAD_SECONDS
+                    or entry["record_sha256"] != _record_digest(row)):
+                raise RecentTradesError("conflicting pending clock provenance")
+            seen.add(position)
     return deepcopy(state)
+
+
+def _record_digest(row):
+    return hashlib.sha256(json.dumps(row, sort_keys=True, ensure_ascii=True,
+                                    allow_nan=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _prune_pending(state, namespace_id, positions):
+    pending = state.get("pending_close_utc", {})
+    entries = [entry for entry in pending.get(namespace_id, []) if entry["position_id"] in positions]
+    if entries:
+        pending[namespace_id] = entries
+    else:
+        pending.pop(namespace_id, None)
+    if not pending:
+        state.pop("pending_close_utc", None)
 
 
 def _sort_key(record):
@@ -167,12 +212,14 @@ def _sort_key(record):
 
 
 def record_settlement(state, namespace_id, settlement, *, direction, observed_utc,
-                      close_utc, entry_context=None):
+                      close_utc, entry_context=None, verified_offset=None):
     """Return a bounded copy after a complete settlement, or raise without mutation.
 
     ``close_utc`` is host-confirmed UTC or None, never substituted with observation
     time. A later duplicate may enrich missing UTC/context, but cannot change facts.
     Successful repeated observations preserve the first observation timestamp.
+    Only a new record with a host-verified original offset may save a short-lived
+    future-time confirmation. Repeating an old unknown row cannot create one.
     """
     result = _validated_copy(state)
     _namespace(namespace_id)
@@ -223,16 +270,61 @@ def record_settlement(state, namespace_id, settlement, *, direction, observed_ut
             for field in ("close_utc", "entry_context"):
                 if merged[field] is None:
                     merged[field] = record[field]
+            _prune_pending(result, namespace_id,
+                           {row["position_id"] for row in part["records"]} - {record["position_id"]})
         part["records"][index] = merged
         break
     else:
         part["records"].append(record)
+        if verified_offset is not None:
+            offset = _number(verified_offset, "verified_offset")
+            if not -12 <= offset <= 14 or offset * 2 != int(offset * 2):
+                raise RecentTradesError("invalid verified offset")
+            candidate = record["broker_close_time"] - offset * 3600
+            if close_utc is None and 0 < candidate - observed_utc <= MAX_CLOCK_LEAD_SECONDS:
+                result.setdefault("pending_close_utc", {}).setdefault(namespace_id, []).append({
+                    "version": CLOCK_VERSION, "position_id": record["position_id"],
+                    "record_sha256": _record_digest(record), "offset_hours": offset,
+                    "observed_utc": observed_utc, "expires_utc": observed_utc + CLOCK_CONFIRM_SECONDS})
     part["records"].sort(key=_sort_key)
     removed = part["records"][:-MAX_RECORDS]
     part["records"] = part["records"][-MAX_RECORDS:]
     if removed:
         part["truncated_before_utc"] = max([_sort_key(row)[0] for row in removed]
                                            + [part["truncated_before_utc"] or 0])
+    _prune_pending(result, namespace_id, {row["position_id"] for row in part["records"]})
+    return result
+
+
+def confirm_pending_utc(state, namespace_id, *, observed_utc, verified_offset):
+    """Recheck only saved first-observation provenance, without guessing old UTC.
+
+    A changed known offset, clock rollback or deadline permanently abandons the
+    pending conversion. Missing fresh ticks wait within the original deadline.
+    The host must read and recheck the original namespace before persisting.
+    """
+    result = _validated_copy(state)
+    _namespace(namespace_id)
+    now = _epoch(observed_utc, "observed_utc")
+    if verified_offset is not None:
+        _number(verified_offset, "verified_offset")
+    part = result["partitions"].get(namespace_id)
+    if not part:
+        return result
+    rows = {row["position_id"]: row for row in part["records"]}
+    remaining = set()
+    for entry in result.get("pending_close_utc", {}).get(namespace_id, []):
+        if (now < entry["observed_utc"] or now > entry["expires_utc"]
+                or verified_offset is not None and verified_offset != entry["offset_hours"]):
+            continue
+        row = rows[entry["position_id"]]
+        candidate = row["broker_close_time"] - entry["offset_hours"] * 3600
+        if verified_offset is not None and candidate <= now:
+            row["close_utc"], row["observed_utc"] = candidate, now
+        else:
+            remaining.add(entry["position_id"])
+    _prune_pending(result, namespace_id, remaining)
+    part["records"].sort(key=_sort_key)
     return result
 
 

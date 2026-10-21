@@ -2230,6 +2230,7 @@ class FibVolumePATrader:
             self._recent_trade_error = "cache_read_failed"
 
     def recent_trade_context(self):
+        self.sync_recent_trade_times()
         try:
             namespace, now = self._recent_namespace(), time.time()
         except (ValueError, TypeError, AttributeError):
@@ -2242,8 +2243,54 @@ class FibVolumePATrader:
                 return recent_trades.unavailable_context(self._recent_trade_error)
             return recent_trades.recent_context(self._recent_trade_state, namespace, now)
 
-    def record_recent_settlement(self, snapshot, settlement):
+    def _persist_recent_trades(self, state):
         temporary = None
+        try:
+            parent = os.path.dirname(os.path.abspath(self._recent_trade_path))
+            os.makedirs(parent, exist_ok=True)
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=parent, delete=False) as handle:
+                temporary = handle.name
+                json.dump(state, handle, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._recent_trade_path)
+            self._recent_trade_state = state
+        finally:
+            if temporary and os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+
+    def sync_recent_trade_times(self):
+        """Resolve bounded, saved clock leads without resending a close or AI call."""
+        try:
+            namespace, observed = self._recent_namespace(), time.time()
+            if not hasattr(self, "_recent_trade_lock"):
+                self._prepare_recent_trades(namespace, observed)
+            with self._recent_trade_lock:
+                self._prepare_recent_trades(namespace, observed)
+                if self._recent_trade_error or not self._recent_trade_state.get("pending_close_utc", {}).get(namespace):
+                    return
+                tick = mt5.symbol_info_tick(SYMBOL)
+                observed = time.time()
+                offset = tick_clock_offset(tick, observed)
+                state = recent_trades.confirm_pending_utc(self._recent_trade_state, namespace,
+                    observed_utc=observed, verified_offset=offset)
+                if self._recent_namespace() != namespace or state == self._recent_trade_state:
+                    return
+                before = self._recent_trade_state["partitions"][namespace]["records"]
+                after = state["partitions"][namespace]["records"]
+                confirmed = sum(row["close_utc"] is not None for row in after) - sum(row["close_utc"] is not None for row in before)
+                self._persist_recent_trades(state)
+                logger.info("近期结算时间复核 version=%s confirmed=%s pending=%s；保留原成交与净额，不重复通知",
+                            recent_trades.CLOCK_VERSION, confirmed, len(state.get("pending_close_utc", {}).get(namespace, [])))
+        except (OSError, ValueError, TypeError, AttributeError, RuntimeError, OverflowError) as exc:
+            if hasattr(self, "_recent_trade_error"):
+                self._recent_trade_error = "cache_write_failed"
+            logger.warning("最近结算时间复核不可用，软上下文降级，不改变结算或交易门: %s", exc)
+
+    def record_recent_settlement(self, snapshot, settlement):
         try:
             namespace, observed = self._recent_namespace(), time.time()
             if snapshot.symbol != SYMBOL or not snapshot.settlement_namespace or namespace != snapshot.settlement_namespace:
@@ -2256,36 +2303,25 @@ class FibVolumePATrader:
                     return
                 offset = snapshot.server_utc_offset
                 close_utc = None
+                verified_offset = None
                 if isinstance(offset, Real) and not isinstance(offset, bool) and math.isfinite(offset) and abs(offset) <= 14:
                     candidate = settlement.time - offset*3600
                     # A bad clock conversion is excluded, never replaced with the observation clock.
                     current_offset = tick_clock_offset(mt5.symbol_info_tick(SYMBOL), observed)
-                    if current_offset == offset and 0 < candidate <= observed:
-                        close_utc = candidate
+                    if current_offset == offset:
+                        verified_offset = offset
+                        if 0 < candidate <= observed:
+                            close_utc = candidate
                 if self._recent_namespace() != namespace:
                     return
                 state = recent_trades.record_settlement(self._recent_trade_state, namespace, settlement,
                     direction=snapshot.direction.lower(), observed_utc=observed, close_utc=close_utc,
-                    entry_context=snapshot.entry_context or None)
-                parent = os.path.dirname(os.path.abspath(self._recent_trade_path))
-                os.makedirs(parent, exist_ok=True)
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=parent, delete=False) as handle:
-                    temporary = handle.name
-                    json.dump(state, handle, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, self._recent_trade_path)
-                self._recent_trade_state = state
-        except (OSError, ValueError, TypeError, AttributeError) as exc:
+                    entry_context=snapshot.entry_context or None, verified_offset=verified_offset)
+                self._persist_recent_trades(state)
+        except (OSError, ValueError, TypeError, AttributeError, RuntimeError, OverflowError) as exc:
             if hasattr(self, "_recent_trade_error"):
                 self._recent_trade_error = "cache_write_failed"
             logger.warning("最近结算上下文不可用，软上下文降级，不改变结算或交易门: %s", exc)
-        finally:
-            if temporary and os.path.exists(temporary):
-                try:
-                    os.remove(temporary)
-                except OSError:
-                    pass
 
     def position_entry_facts(self, ticket):
         ledger = self.strategy_ledger.snapshot() if getattr(self, "strategy_ledger", None) else {}
@@ -2855,6 +2891,7 @@ class FibVolumePATrader:
             finally:
                 with self._close_notification_lock:
                     processing.discard(ticket)
+        self.sync_recent_trade_times()
         return positions
 
     def validate_order_prices(self, action, entry_price, stop_loss, take_profit):

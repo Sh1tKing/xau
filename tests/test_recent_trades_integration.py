@@ -30,7 +30,8 @@ def host_types(directory, account, broker, clock, notify):
     source = Path(__file__).resolve().parents[1] / "xauusd_fib_volume_pa_trader.py"
     tree = ast.parse(source.read_text(encoding="utf-8-sig"))
     names = {"_recent_namespace", "_prepare_recent_trades", "recent_trade_context",
-             "record_recent_settlement", "position_entry_facts", "create_position_snapshot",
+             "record_recent_settlement", "_persist_recent_trades", "sync_recent_trade_times",
+             "position_entry_facts", "create_position_snapshot",
              "_prepare_close_notifications", "_load_close_notifications", "_save_close_notifications",
              "notify_position_closed", "find_recent_close_deal", "sync_position_close_notifications",
              "get_positions", "deal_reason_text"}
