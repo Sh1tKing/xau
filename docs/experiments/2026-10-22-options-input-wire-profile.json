@@ -1,0 +1,274 @@
+{
+  "baseline_commit": "e3f8836c6c849f9634c47aec658b432fe10172f2",
+  "policy": "inline-evidence-v1",
+  "fixture_only": true,
+  "real_services_called": false,
+  "model_calls_mocked": 24,
+  "limit": "Literal characters/UTF-8 bytes, not tokenizer counts or billing. Includes new encoding instructions; structured schema counted separately.",
+  "samples": [
+    {
+      "fixture": "ETH_native_flat",
+      "role": "ANALYST",
+      "protocol": "messages",
+      "structured": false,
+      "evidence_refs": 609,
+      "before": {
+        "system_user_chars": 82670,
+        "system_user_schema_chars": 82670,
+        "request_utf8_bytes": 94106
+      },
+      "after": {
+        "system_user_chars": 54863,
+        "system_user_schema_chars": 54863,
+        "request_utf8_bytes": 65501
+      },
+      "reduction_percent": {
+        "system_user_chars": 33.64,
+        "system_user_schema_chars": 33.64,
+        "request_utf8_bytes": 30.4
+      }
+    },
+    {
+      "fixture": "ETH_native_flat",
+      "role": "ANALYST",
+      "protocol": "messages",
+      "structured": true,
+      "evidence_refs": 609,
+      "before": {
+        "system_user_chars": 82670,
+        "system_user_schema_chars": 96200,
+        "request_utf8_bytes": 107696
+      },
+      "after": {
+        "system_user_chars": 54863,
+        "system_user_schema_chars": 68393,
+        "request_utf8_bytes": 79091
+      },
+      "reduction_percent": {
+        "system_user_chars": 33.64,
+        "system_user_schema_chars": 28.91,
+        "request_utf8_bytes": 26.56
+      }
+    },
+    {
+      "fixture": "ETH_native_flat",
+      "role": "ANALYST",
+      "protocol": "chat",
+      "structured": false,
+      "evidence_refs": 609,
+      "before": {
+        "system_user_chars": 82670,
+        "system_user_schema_chars": 82670,
+        "request_utf8_bytes": 94136
+      },
+      "after": {
+        "system_user_chars": 54863,
+        "system_user_schema_chars": 54863,
+        "request_utf8_bytes": 65531
+      },
+      "reduction_percent": {
+        "system_user_chars": 33.64,
+        "system_user_schema_chars": 33.64,
+        "request_utf8_bytes": 30.39
+      }
+    },
+    {
+      "fixture": "ETH_native_flat",
+      "role": "ANALYST",
+      "protocol": "chat",
+      "structured": true,
+      "evidence_refs": 609,
+      "before": {
+        "system_user_chars": 82670,
+        "system_user_schema_chars": 96200,
+        "request_utf8_bytes": 107772
+      },
+      "after": {
+        "system_user_chars": 54863,
+        "system_user_schema_chars": 68393,
+        "request_utf8_bytes": 79167
+      },
+      "reduction_percent": {
+        "system_user_chars": 33.64,
+        "system_user_schema_chars": 28.91,
+        "request_utf8_bytes": 26.54
+      }
+    },
+    {
+      "fixture": "XAU_native_flat",
+      "role": "ANALYST",
+      "protocol": "messages",
+      "structured": false,
+      "evidence_refs": 513,
+      "before": {
+        "system_user_chars": 75538,
+        "system_user_schema_chars": 75538,
+        "request_utf8_bytes": 86348
+      },
+      "after": {
+        "system_user_chars": 51901,
+        "system_user_schema_chars": 51901,
+        "request_utf8_bytes": 62105
+      },
+      "reduction_percent": {
+        "system_user_chars": 31.29,
+        "system_user_schema_chars": 31.29,
+        "request_utf8_bytes": 28.08
+      }
+    },
+    {
+      "fixture": "XAU_native_flat",
+      "role": "ANALYST",
+      "protocol": "messages",
+      "structured": true,
+      "evidence_refs": 513,
+      "before": {
+        "system_user_chars": 75538,
+        "system_user_schema_chars": 87724,
+        "request_utf8_bytes": 98594
+      },
+      "after": {
+        "system_user_chars": 51901,
+        "system_user_schema_chars": 64087,
+        "request_utf8_bytes": 74351
+      },
+      "reduction_percent": {
+        "system_user_chars": 31.29,
+        "system_user_schema_chars": 26.94,
+        "request_utf8_bytes": 24.59
+      }
+    },
+    {
+      "fixture": "XAU_native_flat",
+      "role": "ANALYST",
+      "protocol": "chat",
+      "structured": false,
+      "evidence_refs": 513,
+      "before": {
+        "system_user_chars": 75538,
+        "system_user_schema_chars": 75538,
+        "request_utf8_bytes": 86378
+      },
+      "after": {
+        "system_user_chars": 51901,
+        "system_user_schema_chars": 51901,
+        "request_utf8_bytes": 62135
+      },
+      "reduction_percent": {
+        "system_user_chars": 31.29,
+        "system_user_schema_chars": 31.29,
+        "request_utf8_bytes": 28.07
+      }
+    },
+    {
+      "fixture": "XAU_native_flat",
+      "role": "ANALYST",
+      "protocol": "chat",
+      "structured": true,
+      "evidence_refs": 513,
+      "before": {
+        "system_user_chars": 75538,
+        "system_user_schema_chars": 87724,
+        "request_utf8_bytes": 98670
+      },
+      "after": {
+        "system_user_chars": 51901,
+        "system_user_schema_chars": 64087,
+        "request_utf8_bytes": 74427
+      },
+      "reduction_percent": {
+        "system_user_chars": 31.29,
+        "system_user_schema_chars": 26.94,
+        "request_utf8_bytes": 24.57
+      }
+    },
+    {
+      "fixture": "ETH_synthetic_waves",
+      "role": "ANALYST",
+      "protocol": "messages",
+      "structured": false,
+      "evidence_refs": 1020,
+      "before": {
+        "system_user_chars": 125844,
+        "system_user_schema_chars": 125844,
+        "request_utf8_bytes": 139032
+      },
+      "after": {
+        "system_user_chars": 78068,
+        "system_user_schema_chars": 78068,
+        "request_utf8_bytes": 89636
+      },
+      "reduction_percent": {
+        "system_user_chars": 37.96,
+        "system_user_schema_chars": 37.96,
+        "request_utf8_bytes": 35.53
+      }
+    },
+    {
+      "fixture": "ETH_synthetic_waves",
+      "role": "ANALYST",
+      "protocol": "messages",
+      "structured": true,
+      "evidence_refs": 1020,
+      "before": {
+        "system_user_chars": 125844,
+        "system_user_schema_chars": 145188,
+        "request_utf8_bytes": 158436
+      },
+      "after": {
+        "system_user_chars": 78068,
+        "system_user_schema_chars": 97412,
+        "request_utf8_bytes": 109040
+      },
+      "reduction_percent": {
+        "system_user_chars": 37.96,
+        "system_user_schema_chars": 32.91,
+        "request_utf8_bytes": 31.18
+      }
+    },
+    {
+      "fixture": "ETH_synthetic_waves",
+      "role": "ANALYST",
+      "protocol": "chat",
+      "structured": false,
+      "evidence_refs": 1020,
+      "before": {
+        "system_user_chars": 125844,
+        "system_user_schema_chars": 125844,
+        "request_utf8_bytes": 139062
+      },
+      "after": {
+        "system_user_chars": 78068,
+        "system_user_schema_chars": 78068,
+        "request_utf8_bytes": 89666
+      },
+      "reduction_percent": {
+        "system_user_chars": 37.96,
+        "system_user_schema_chars": 37.96,
+        "request_utf8_bytes": 35.52
+      }
+    },
+    {
+      "fixture": "ETH_synthetic_waves",
+      "role": "ANALYST",
+      "protocol": "chat",
+      "structured": true,
+      "evidence_refs": 1020,
+      "before": {
+        "system_user_chars": 125844,
+        "system_user_schema_chars": 145188,
+        "request_utf8_bytes": 158512
+      },
+      "after": {
+        "system_user_chars": 78068,
+        "system_user_schema_chars": 97412,
+        "request_utf8_bytes": 109116
+      },
+      "reduction_percent": {
+        "system_user_chars": 37.96,
+        "system_user_schema_chars": 32.91,
+        "request_utf8_bytes": 31.16
+      }
+    }
+  ]
+}
